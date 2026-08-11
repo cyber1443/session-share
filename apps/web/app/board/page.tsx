@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import type { Task } from '@session-share/protocol'
+import type { Participant, Task } from '@session-share/protocol'
 import { AuthProvider, SignIn, useAuth } from '@/components/auth'
 import { PeerGate } from '@/components/peer-gate'
 import { api, peerToken } from '@/lib/api'
@@ -10,6 +10,7 @@ import { useQueryParam } from '@/lib/query'
 import { Dag } from '@/components/dag'
 import { Graph } from '@/components/graph'
 import { JoinCode } from '@/components/join-code'
+import { Plan } from '@/components/plan'
 import { Room } from '@/components/room'
 import { useLiveSession } from '@/lib/live'
 
@@ -30,8 +31,12 @@ function Board({ slug }: { slug: string }) {
   const { me, mode } = useAuth()
   const { snapshot, status, error, activity, events, send } = useLiveSession(slug)
   const [selected, setSelected] = useState<string | null>(null)
-  /** Topics answers "what is this about"; order answers "what unblocks what". */
-  const [view, setView] = useState<'graph' | 'dag'>('graph')
+  /**
+   * Plan is where the work is decided; topics answers "what is this about" and
+   * order answers "what unblocks what". Planning opens on the plan view because
+   * during that phase the graph has nothing in it yet.
+   */
+  const [viewOverride, setView] = useState<'plan' | 'graph' | 'dag' | null>(null)
   const [chatFilter, setChatFilter] = useState<string | null>(null)
   const [pairing, setPairing] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -51,6 +56,8 @@ function Board({ slug }: { slug: string }) {
     (h) => h.status === 'pending' && h.holderId === mine?.id,
   )
   const decomposition = snapshot.decomposition
+  const planning = snapshot.session.phase === 'plan'
+  const view = viewOverride ?? (planning ? 'plan' : 'graph')
   const awaitingApproval = decomposition?.status === 'proposed' && snapshot.validation?.ok
 
   const act = async (fn: () => Promise<unknown>) => {
@@ -127,27 +134,31 @@ function Board({ slug }: { slug: string }) {
                     {participant.activity.detail}
                     {participant.repoPath ? '' : ' · watching'}
                   </p>
+                  {/* What they were given, and how much of it is done. */}
+                  {(() => {
+                    const theirs = snapshot.tasks.filter((t) => t.assigneeId === participant.id)
+                    if (theirs.length === 0) return null
+                    const merged = theirs.filter((t) => t.state === 'merged').length
+                    return (
+                      <p className="truncate pl-4 text-[10px] text-mute">
+                        {merged}/{theirs.length} landed
+                      </p>
+                    )
+                  })()}
                 </li>
               ))}
             </ul>
           </div>
 
-          {awaitingApproval ? (
+          {awaitingApproval && view !== 'plan' ? (
             <div className="panel space-y-2 p-3">
               <p className="text-[10px] uppercase tracking-wider text-mute">Split proposed</p>
               <p className="text-xs leading-relaxed text-neutral-300">
                 {decomposition!.tasks.length} tasks, up to {snapshot.validation!.maxFrontier} at once.
               </p>
-              <button
-                className="btn btn-accent w-full"
-                disabled={!mine || decomposition!.approvals.includes(mine.id)}
-                onClick={() =>
-                  void act(() =>
-                    send({ type: 'decomposition.approve', decompositionId: decomposition!.id }),
-                  )
-                }
-              >
-                {mine && decomposition!.approvals.includes(mine.id) ? 'approved' : 'approve'}
+              {/* Approving happens where you can see what you are approving. */}
+              <button className="btn btn-accent w-full" onClick={() => setView('plan')}>
+                review it
               </button>
             </div>
           ) : null}
@@ -189,6 +200,14 @@ function Board({ slug }: { slug: string }) {
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="relative min-h-0 flex-1 border-b border-edge">
             <div className="absolute right-3 top-3 z-10 flex gap-3 text-[10px] uppercase tracking-wider">
+              {planning ? (
+                <button
+                  className={view === 'plan' ? 'text-neutral-200' : 'text-mute hover:text-neutral-400'}
+                  onClick={() => setView('plan')}
+                >
+                  plan
+                </button>
+              ) : null}
               <button
                 className={view === 'graph' ? 'text-neutral-200' : 'text-mute hover:text-neutral-400'}
                 onClick={() => setView('graph')}
@@ -203,7 +222,38 @@ function Board({ slug }: { slug: string }) {
               </button>
             </div>
 
-            {view === 'graph' ? (
+            {view === 'plan' ? (
+              <Plan
+                snapshot={snapshot}
+                meId={mine?.id ?? null}
+                onRequest={(goal, plannerId) =>
+                  act(() => send({ type: 'plan.request', goal, issueRef: null, plannerId: plannerId as never }))
+                }
+                onAssign={(taskId, participantId) =>
+                  act(() =>
+                    send({
+                      type: 'task.assign',
+                      taskId: taskId as never,
+                      participantId: participantId as never,
+                    }),
+                  )
+                }
+                onApprove={() =>
+                  act(() =>
+                    send({ type: 'decomposition.approve', decompositionId: decomposition!.id }),
+                  )
+                }
+                onReject={(reason) =>
+                  act(() =>
+                    send({
+                      type: 'decomposition.reject',
+                      decompositionId: decomposition!.id,
+                      reason,
+                    }),
+                  )
+                }
+              />
+            ) : view === 'graph' ? (
               <Graph
                 tasks={snapshot.tasks}
                 contract={snapshot.decomposition?.contract ?? null}
@@ -239,11 +289,21 @@ function Board({ slug }: { slug: string }) {
         {selectedTask ? (
           <TaskDrawer
             task={selectedTask}
+            participants={snapshot.participants}
             ownerName={
               snapshot.participants.find((p) => p.id === selectedTask.ownerId)?.displayName ?? null
             }
             onClose={() => setSelected(null)}
             onFilterChat={() => setChatFilter(selectedTask.id)}
+            onAssign={(participantId) =>
+              act(() =>
+                send({
+                  type: 'task.assign',
+                  taskId: selectedTask.id,
+                  participantId: participantId as never,
+                }),
+              )
+            }
           />
         ) : null}
       </div>
@@ -255,14 +315,18 @@ function Board({ slug }: { slug: string }) {
 
 function TaskDrawer({
   task,
+  participants,
   ownerName,
   onClose,
   onFilterChat,
+  onAssign,
 }: {
   task: Task
+  participants: Participant[]
   ownerName: string | null
   onClose: () => void
   onFilterChat: () => void
+  onAssign: (participantId: string | null) => Promise<void>
 }) {
   return (
     <aside className="flex w-80 shrink-0 flex-col gap-5 overflow-y-auto border-l border-edge p-4 text-xs">
@@ -274,6 +338,31 @@ function TaskDrawer({
       </div>
 
       <Row label="state" value={`${task.state}${ownerName ? ` · ${ownerName}` : ''}`} />
+
+      <div>
+        <p className="text-[10px] uppercase tracking-wider text-mute">Assigned to</p>
+        {/* Re-pointing an unclaimed task is how work moves without a handoff. */}
+        <select
+          className="field mt-1"
+          value={task.assigneeId ?? ''}
+          disabled={Boolean(task.ownerId) || task.state === 'merged'}
+          onChange={(event) => void onAssign(event.target.value || null)}
+        >
+          <option value="">nobody</option>
+          {participants
+            .filter((participant) => participant.repoPath)
+            .map((participant) => (
+              <option key={participant.id} value={participant.id}>
+                {participant.displayName}
+              </option>
+            ))}
+        </select>
+        {task.ownerId ? (
+          <p className="mt-1 text-[10px] text-mute">
+            Held right now, so it cannot be reassigned until it is released.
+          </p>
+        ) : null}
+      </div>
       <div>
         <p className="text-[10px] uppercase tracking-wider text-mute">Intent</p>
         <p className="mt-1 leading-relaxed text-neutral-300">{task.intent}</p>
@@ -335,7 +424,7 @@ function Row({ label, value }: { label: string; value: string }) {
 }
 
 function Gate() {
-  const { me, mode, loading } = useAuth()
+  const { me, mode, loading, refresh } = useAuth()
   const { value: slug, ready } = useQueryParam('s')
   const [peerSlug, setPeerSlug] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
@@ -361,7 +450,23 @@ function Gate() {
   // A peer board is authorised by the token it holds, not by an account.
   if (mode === 'peer') {
     const seated = peerSlug ?? (peerToken.get() ? slug : null)
-    if (!seated) return <PeerGate onSeated={(seat) => setPeerSlug(seat.sessionRef)} />
+    /**
+     * Redeeming the invite is what gives this browser an identity, and the
+     * identity was fetched before that happened -- so ask again. Without this
+     * the board is seated but does not know which participant it is, and every
+     * "is this mine" control stays disabled: approving, granting a handoff,
+     * seeing your own tasks.
+     */
+    if (!seated) {
+      return (
+        <PeerGate
+          onSeated={(seat) => {
+            setPeerSlug(seat.sessionRef)
+            void refresh()
+          }}
+        />
+      )
+    }
     return <Board slug={seated} />
   }
 

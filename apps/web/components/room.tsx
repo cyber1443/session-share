@@ -228,6 +228,12 @@ function describe(envelope: EventEnvelope): string {
       return `attached a checkout at ${body.repoPath}`
     case 'participant.activity':
       return body.activity.detail
+    case 'plan.requested':
+      return `asked for a split: ${body.goal.slice(0, 80)}`
+    case 'decomposition.assigned':
+      return `assigned ${body.assignments.length} task(s)`
+    case 'task.assigned':
+      return body.assigneeId ? `${body.taskId} assigned` : `${body.taskId} unassigned`
     case 'decomposition.proposed':
       return body.validation.ok
         ? `proposed a split of ${body.decomposition.tasks.length} tasks`

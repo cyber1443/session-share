@@ -122,7 +122,8 @@ export function Dag({
         </svg>
 
         {[...placed.values()].map(({ task, x, y }) => {
-          const owner = participants.find((p) => p.id === task.ownerId)
+          // Who holds it, or -- before anyone claims -- who it is meant for.
+          const owner = participants.find((p) => p.id === (task.ownerId ?? task.assigneeId))
           const line = activity[task.id]
           return (
             <button

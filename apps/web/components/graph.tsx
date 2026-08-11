@@ -251,7 +251,7 @@ export function Graph({
                   : topicColor
 
             const owner = node.task
-              ? participants.find((p) => p.id === node.task!.ownerId)
+              ? participants.find((p) => p.id === (node.task!.ownerId ?? node.task!.assigneeId))
               : undefined
 
             return (
