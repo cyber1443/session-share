@@ -30,7 +30,7 @@ Your teammate does not clone this repository. They install the plugin, once,
 in their own Claude Code:
 
 ```
-/plugin marketplace add <owner>/session-share
+/plugin marketplace add cyber1443/session-share
 /plugin install ss@session-share
 ```
 
