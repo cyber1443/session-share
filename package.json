@@ -20,9 +20,11 @@
     "lint": "turbo run lint",
     "check-bundle": "node scripts/check-bundle.mjs",
     "git-flow-demo": "pnpm bundle && node --disable-warning=ExperimentalWarning scripts/git-flow-demo.mjs",
-    "sandbox": "pnpm bundle && node scripts/local-sandbox.mjs"
+    "sandbox": "pnpm bundle && node scripts/local-sandbox.mjs",
+    "e2e": "turbo run build && node --disable-warning=ExperimentalWarning scripts/e2e.mjs"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "esbuild": "^0.28.2",
     "turbo": "^2.3.3",
     "typescript": "^5.7.2"
