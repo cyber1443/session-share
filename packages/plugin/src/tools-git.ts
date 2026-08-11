@@ -1,9 +1,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import type { SessionSnapshot } from '@session-share/protocol'
+import { isLoopbackUrl, type SessionSnapshot } from '@session-share/protocol'
 import { runCommand } from './client.js'
 import type { SessionConfig } from './config.js'
-import { readDaemon, isHealthy, lanAddress } from './daemon.js'
+import { readDaemon, lanAddress, probe } from './daemon.js'
 import { localIdentity } from './identity.js'
 import {
   canPush,
@@ -43,12 +43,14 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
     'ss_settings',
     {
       description:
-        'Read or change how session-share touches this machine: when work is committed, whether branches are pushed, whether pull requests are opened, and whether hosting is reachable on the local network.',
+        'Read or change how session-share touches this machine: when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, and whether the room can drive this agent.',
       inputSchema: {
         commitPolicy: z.enum(['explicit', 'auto-on-green']).nullish(),
         push: z.boolean().nullish(),
         openPullRequests: z.boolean().nullish(),
         expose: z.enum(['lan', 'loopback']).nullish(),
+        openBoard: z.boolean().nullish(),
+        acceptDirectives: z.boolean().nullish(),
       },
     },
     async (input) => {
@@ -104,12 +106,16 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       if (!daemon) {
         lines.push('server     not running here — you are joining, or you have not hosted yet')
       } else {
-        const alive = await isHealthy(`http://127.0.0.1:${daemon.port}`)
-        lines.push(`server     ${alive ? 'running' : 'recorded but NOT responding'} on port ${daemon.port}`)
+        const health = await probe(`http://127.0.0.1:${daemon.port}`)
+        lines.push(
+          `server     ${health ? 'running' : 'recorded but NOT responding'} on port ${daemon.port}, bound to ${
+            daemon.expose === 'lan' ? '0.0.0.0' : '127.0.0.1'
+          }${health?.serverId ? ` (id ${health.serverId})` : ''}`,
+        )
         const lan = lanAddress()
         lines.push(
-          daemon.url.includes('127.0.0.1')
-            ? 'reach      loopback only — a teammate on another machine cannot connect. Re-host with expose "lan", or use a tunnel'
+          isLoopbackUrl(daemon.url)
+            ? 'reach      loopback only — a teammate on another machine cannot connect, and any invite from here names their own machine, not yours. Re-host with expose "lan", or use a tunnel'
             : `reach      teammates dial ${daemon.url}${lan && !daemon.url.includes(lan) ? ` (this machine is now ${lan} — the invite you sent may be stale)` : ''}`,
         )
       }

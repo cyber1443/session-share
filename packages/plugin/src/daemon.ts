@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { createHmac, randomBytes } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isLoopbackUrl } from '@session-share/protocol'
 
 /**
  * The host's coordination server, started and kept alive on their behalf.
@@ -13,18 +14,20 @@ import { fileURLToPath } from 'node:url'
  * to host a session gets a server as a side effect, detached from the Claude
  * Code that asked for it so closing that terminal does not end the session.
  */
-export const STATE_DIR = join(homedir(), '.session-share')
+export const STATE_DIR = process.env.SESSION_SHARE_HOME ?? join(homedir(), '.session-share')
 const DAEMON_FILE = join(STATE_DIR, 'daemon.json')
 const SECRET_FILE = join(STATE_DIR, 'secret')
 const DB_FILE = join(STATE_DIR, 'sessions.db')
 const LOG_FILE = join(STATE_DIR, 'server.log')
 
-export const DEFAULT_PORT = 4310
+export const DEFAULT_PORT = Number(process.env.SESSION_SHARE_PORT ?? 4310)
 
 export interface DaemonInfo {
   port: number
   /** What a guest should dial: the LAN address, not loopback. */
   url: string
+  /** What the running process is actually bound to. */
+  expose: 'lan' | 'loopback'
   pid: number
   startedAt: number
 }
@@ -45,10 +48,24 @@ export function hostSecret(): string {
   return secret
 }
 
+/**
+ * What our own server's `/healthz` will report, computed from the secret on
+ * this machine. Anything else answering on the port is somebody else's process,
+ * and adopting it would mean minting invites nobody can redeem.
+ */
+export function expectedServerId(): string {
+  return createHmac('sha256', hostSecret())
+    .update('session-share/server-id')
+    .digest('hex')
+    .slice(0, 16)
+}
+
 export function readDaemon(): DaemonInfo | null {
   if (!existsSync(DAEMON_FILE)) return null
   try {
-    return JSON.parse(readFileSync(DAEMON_FILE, 'utf8')) as DaemonInfo
+    const info = JSON.parse(readFileSync(DAEMON_FILE, 'utf8')) as DaemonInfo
+    // Written before `expose` existed: a loopback url can only have meant loopback.
+    return { ...info, expose: info.expose ?? (isLoopbackUrl(info.url) ? 'loopback' : 'lan') }
   } catch {
     return null
   }
@@ -59,30 +76,56 @@ function writeDaemon(info: DaemonInfo): void {
   writeFileSync(DAEMON_FILE, `${JSON.stringify(info, null, 2)}\n`)
 }
 
-export async function isHealthy(url: string, timeoutMs = 1200): Promise<boolean> {
+export interface Health {
+  ok: boolean
+  mode?: string
+  /** Identifies the signing key, so a client can tell two servers apart. */
+  serverId?: string
+}
+
+/** Health plus identity, or null when nothing answered. */
+export async function probe(url: string, timeoutMs = 1500): Promise<Health | null> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const response = await fetch(new URL('/healthz', url), { signal: controller.signal })
-    return response.ok
+    if (!response.ok) return null
+    return (await response.json()) as Health
   } catch {
-    return false
+    return null
   } finally {
     clearTimeout(timer)
   }
 }
 
+export async function isHealthy(url: string, timeoutMs = 1200): Promise<boolean> {
+  return (await probe(url, timeoutMs)) !== null
+}
+
 /**
- * First non-internal IPv4 address. Guests need something they can actually
- * dial, and `127.0.0.1` is the one address guaranteed not to work for them.
+ * Interfaces that exist but are never the answer: VPN tunnels, AirDrop links,
+ * container and VM bridges. Handing a guest one of these produces an address
+ * that looks plausible and refuses every connection.
+ */
+const SKIP_INTERFACE = /^(utun|awdl|llw|bridge|vmnet|docker|veth|tun|tap|ap\d)/i
+const PRIVATE_LAN = /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/
+
+/**
+ * The address a teammate on the same network can actually dial. `127.0.0.1` is
+ * the one address guaranteed not to work for them, and the first non-internal
+ * interface is frequently a VPN -- so prefer a private LAN address on a real
+ * interface, and only fall back to whatever is left.
  */
 export function lanAddress(): string | null {
-  for (const addresses of Object.values(networkInterfaces())) {
+  const candidates: string[] = []
+  for (const [name, addresses] of Object.entries(networkInterfaces())) {
+    if (SKIP_INTERFACE.test(name)) continue
     for (const address of addresses ?? []) {
-      if (address.family === 'IPv4' && !address.internal) return address.address
+      if (address.family !== 'IPv4' || address.internal) continue
+      candidates.push(address.address)
     }
   }
-  return null
+  return candidates.find((address) => PRIVATE_LAN.test(address)) ?? candidates[0] ?? null
 }
 
 function serverEntrypoint(): string {
@@ -120,8 +163,38 @@ export async function ensureDaemon(options: StartOptions = {}): Promise<DaemonIn
   const port = options.port ?? DEFAULT_PORT
   const expose = options.expose ?? 'lan'
 
+  const mine = expectedServerId()
   const existing = readDaemon()
-  if (existing && (await isHealthy(`http://127.0.0.1:${existing.port}`))) return existing
+  if (existing) {
+    const health = await probe(`http://127.0.0.1:${existing.port}`)
+    // No serverId at all means a server from before fingerprints: ours, but old.
+    if (health && (!health.serverId || health.serverId === mine)) {
+      /**
+       * A running server bound to loopback cannot serve a guest, and no amount
+       * of re-hosting changes that from the outside -- so a mismatch restarts
+       * it. Reusing it regardless is how a host ends up handing out
+       * `127.0.0.1` invites that fail on every machine but their own.
+       */
+      if (health.serverId && existing.expose === expose) return refreshAddress(existing)
+
+      stopDaemon()
+      await waitUntilDown(`http://127.0.0.1:${existing.port}`)
+    }
+  }
+
+  /**
+   * Something answering on the port that is not ours would be adopted silently
+   * by a plain health check, and every invite minted afterwards would be signed
+   * by a key the other process does not have.
+   */
+  const squatter = await probe(`http://127.0.0.1:${port}`)
+  if (squatter && squatter.serverId !== mine) {
+    throw new Error(
+      `Port ${port} is already serving a different session-share (id ${squatter.serverId ?? 'unknown'}).\n` +
+        'It is not this machine\'s server, so invites from it cannot be redeemed here. ' +
+        `Stop it, or pick another port with SESSION_SHARE_PORT.`,
+    )
+  }
 
   ensureStateDir()
   const out = openLog()
@@ -148,6 +221,7 @@ export async function ensureDaemon(options: StartOptions = {}): Promise<DaemonIn
       const info: DaemonInfo = {
         port,
         url: ip ? `http://${ip}:${port}` : loopback,
+        expose,
         pid: child.pid ?? -1,
         startedAt: Date.now(),
       }
@@ -158,6 +232,28 @@ export async function ensureDaemon(options: StartOptions = {}): Promise<DaemonIn
   }
 
   throw new Error(`The coordination server did not come up on port ${port}. See ${LOG_FILE}`)
+}
+
+/**
+ * The process survives a change of network; the address it was reachable at
+ * does not. Re-derive it rather than handing out yesterday's DHCP lease.
+ */
+function refreshAddress(info: DaemonInfo): DaemonInfo {
+  if (info.expose !== 'lan') return info
+  const ip = lanAddress()
+  const url = ip ? `http://${ip}:${info.port}` : `http://127.0.0.1:${info.port}`
+  if (url === info.url) return info
+  const updated = { ...info, url }
+  writeDaemon(updated)
+  return updated
+}
+
+async function waitUntilDown(url: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!(await isHealthy(url, 500))) return
+    await sleep(150)
+  }
 }
 
 export function stopDaemon(): boolean {
