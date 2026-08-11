@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-ink text-neutral-200 font-mono antialiased;
+}
+
+::selection {
+  @apply bg-accent/30;
+}
+
+/* Wide content scrolls inside its own box; the page body never does. */
+.scroll-x {
+  overflow-x: auto;
+}
+
+.panel {
+  @apply border border-edge bg-panel;
+}
+
+.btn {
+  @apply border border-edge px-3 py-1.5 text-xs uppercase tracking-wider transition-colors hover:border-neutral-500 disabled:opacity-40 disabled:hover:border-edge;
+}
+
+.btn-accent {
+  @apply border-accent/40 text-accent hover:border-accent;
+}
+
+.field {
+  @apply w-full border border-edge bg-ink px-3 py-2 text-sm outline-none placeholder:text-mute focus:border-neutral-500;
+}
