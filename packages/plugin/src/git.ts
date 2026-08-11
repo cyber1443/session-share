@@ -202,3 +202,13 @@ export async function existingPullRequest(cwd: string, head: string): Promise<nu
     return null
   }
 }
+
+/** Can we actually talk to origin with the credentials on this machine? */
+export async function canPush(cwd: string): Promise<boolean> {
+  try {
+    await git(cwd, ['ls-remote', '--exit-code', 'origin', 'HEAD'])
+    return true
+  } catch {
+    return false
+  }
+}

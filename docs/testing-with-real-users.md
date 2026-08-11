@@ -73,6 +73,79 @@ on a header, so it holds even with the server bound to the LAN.
 
 ---
 
+## Two laptops, two accounts — the real thing
+
+Nothing to override here: each laptop's `gh` is a different account, so you get
+two genuine participants.
+
+**Before anything else, on both laptops:**
+
+```
+/ss:doctor
+```
+
+It reports who you will appear as, whether `origin` is reachable, and — on the
+host — the address the other machine should dial. Most failures in this setup
+are network or credentials, and they are far easier to read here than as a
+session that mysteriously does nothing.
+
+**1. Access.** Laptop B's GitHub account needs read access to
+`cyber1443/session-share` while it is private (Settings → Collaborators), and
+**both** accounts need push access to the project repo you are collaborating on.
+
+**2. Install, on each laptop:**
+
+```
+/plugin marketplace add cyber1443/session-share
+/plugin install ss@session-share
+```
+
+**3. Clone the project repo on each laptop.** One checkout per person — that is
+what the lease gate depends on.
+
+**4. Network.** The guest has to reach the host.
+
+| | |
+|---|---|
+| Same wifi | works as-is; the invite carries the host's LAN address |
+| Different networks | `cloudflared tunnel --url http://127.0.0.1:4310` on the host, then host with that URL |
+
+macOS will likely prompt to allow incoming connections the first time you host.
+If the guest cannot connect and the firewall is on, that is the first thing to
+check. On a café or corporate wifi, client isolation often blocks laptop-to-laptop
+traffic entirely — use a tunnel or Tailscale rather than fighting it.
+
+**5. Run it.** Host on laptop A:
+
+```
+/ss:host Add a dark mode toggle
+```
+
+Send the `/ss:join ssx_…` line however you like — it is not a secret in the sense
+that it needs a secure channel, but anyone who gets it can join, so treat it like
+a meeting link. On laptop B, inside its own clone:
+
+```
+/ss:join ssx_…
+```
+
+Both open the board URL. Then `/ss:plan`, approve, `/ss:land`, `/ss:next` on
+both, `/ss:done` each, `/ss:ship`.
+
+**What to actually watch for**, since this is the test that matters:
+
+- Ask laptop B's Claude to edit a file laptop A holds. It should be denied by
+  name. If it is allowed, the two laptops are not seeing the same session.
+- Watch the board on both while each of you works.
+- Close the lid on the host mid-session. Everything pauses; `/ss:host` again
+  brings it back, and the event log survived.
+
+**If the host's IP changes** — moving between networks, waking from sleep — the
+invite you already sent points at the old address. `/ss:doctor` says so
+explicitly. Re-host and send a fresh invite.
+
+---
+
 ## Rehearsing it alone, as two people
 
 Before involving anyone else, run both seats on your own machine:

@@ -275,6 +275,7 @@ and once the split is approved and the contract has landed, on every machine:
 | `/ss:host` | start hosting from this machine, get one string to send |
 | `/ss:join` | attach this checkout to a session |
 | `/ss:setup` | choose what may be committed, pushed and opened on your behalf |
+| `/ss:doctor` | check this machine is ready before blaming the session |
 | `/ss:land` | create the session branch and commit the approved contract |
 | `/ss:done` | finish a task: test, commit, push, PR, merge back |
 | `/ss:sync` | pull what teammates have landed |

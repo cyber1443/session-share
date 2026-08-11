@@ -3,7 +3,10 @@ import { z } from 'zod'
 import type { SessionSnapshot } from '@session-share/protocol'
 import { runCommand } from './client.js'
 import type { SessionConfig } from './config.js'
+import { readDaemon, isHealthy, lanAddress } from './daemon.js'
+import { localIdentity } from './identity.js'
 import {
+  canPush,
   checkoutBranch,
   commit,
   contractBranch,
@@ -64,6 +67,76 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
           preferences.configured ? '' : '\n\nThese are defaults; nothing has been chosen yet.'
         }`,
       )
+    },
+  )
+
+  server.registerTool(
+    'ss_doctor',
+    {
+      description:
+        'Check whether this machine is ready for a real session: who it will appear as, whether the repo can push, whether a server is running and what address a teammate should dial. Run it on both machines before blaming the session.',
+      inputSchema: {},
+    },
+    async () => {
+      const root = await ctx.repoRoot()
+      const lines: string[] = []
+      const preferences = readPreferences()
+
+      const identity = await localIdentity()
+      lines.push(
+        `identity   ${identity.displayName} <${identity.githubLogin}>  ${
+          identity.source === 'gh'
+            ? '(from gh — a real account)'
+            : identity.source === 'override'
+              ? '(from SESSION_SHARE_LOGIN — a rehearsal, not a real account)'
+              : `(from ${identity.source}, since gh is not authenticated here)`
+        }`,
+      )
+
+      const remote = await hasRemote(root)
+      lines.push(
+        remote
+          ? `remote     origin is set${(await canPush(root)) ? ' and reachable' : ' but could not be reached — check your git credentials'}`
+          : 'remote     no origin — branches cannot be shared, so a second machine will never see your work',
+      )
+
+      const daemon = readDaemon()
+      if (!daemon) {
+        lines.push('server     not running here — you are joining, or you have not hosted yet')
+      } else {
+        const alive = await isHealthy(`http://127.0.0.1:${daemon.port}`)
+        lines.push(`server     ${alive ? 'running' : 'recorded but NOT responding'} on port ${daemon.port}`)
+        const lan = lanAddress()
+        lines.push(
+          daemon.url.includes('127.0.0.1')
+            ? 'reach      loopback only — a teammate on another machine cannot connect. Re-host with expose "lan", or use a tunnel'
+            : `reach      teammates dial ${daemon.url}${lan && !daemon.url.includes(lan) ? ` (this machine is now ${lan} — the invite you sent may be stale)` : ''}`,
+        )
+      }
+
+      let attached = false
+      try {
+        const config = ctx.config()
+        attached = true
+        const state = await ctx.snapshot(config)
+        const mine = state.participants.find((p) => p.id === config.participantId)
+        lines.push(`session    "${state.session.title}" — phase ${state.session.phase}`)
+        lines.push(
+          `you        ${mine?.displayName ?? config.displayName}, ${state.participants.length} participant(s): ${state.participants.map((p) => p.displayName).join(', ')}`,
+        )
+        lines.push(`server url ${config.serverUrl} — reachable`)
+      } catch (error) {
+        lines.push(
+          attached
+            ? `session    attached, but the server did not answer: ${error instanceof Error ? error.message : error}`
+            : 'session    this checkout is not attached — run /ss:host or /ss:join',
+        )
+      }
+
+      lines.push('')
+      lines.push(describePreferences(preferences))
+
+      return ctx.text(lines.join('\n'))
     },
   )
 

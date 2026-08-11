@@ -31964,6 +31964,14 @@ async function existingPullRequest(cwd, head) {
     return null;
   }
 }
+async function canPush(cwd) {
+  try {
+    await git(cwd, ["ls-remote", "--exit-code", "origin", "HEAD"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // packages/plugin/src/preferences.ts
 import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync4 } from "node:fs";
@@ -32009,6 +32017,87 @@ function describePreferences(preferences) {
   ].join("\n");
 }
 
+// packages/plugin/src/identity.ts
+import { execFile as execFile2 } from "node:child_process";
+import { promisify as promisify2 } from "node:util";
+var run2 = promisify2(execFile2);
+async function localIdentity() {
+  const override = process.env.SESSION_SHARE_LOGIN?.trim();
+  if (override) {
+    return {
+      githubLogin: override,
+      displayName: process.env.SESSION_SHARE_NAME?.trim() || titleCase(override),
+      source: "override"
+    };
+  }
+  const fromGh = await tryGh();
+  if (fromGh) return fromGh;
+  const login = await gitConfig("user.name") ?? process.env.USER ?? "dev";
+  const handle = login.trim().toLowerCase().replace(/\s+/g, "-");
+  return {
+    githubLogin: handle,
+    displayName: login.trim(),
+    source: await gitConfig("user.name") ? "git" : "system"
+  };
+}
+async function tryGh() {
+  try {
+    const { stdout } = await run2("gh", ["api", "user", "--jq", "{login: .login, name: .name}"], {
+      timeout: 5e3
+    });
+    const parsed = JSON.parse(stdout);
+    if (!parsed.login) return null;
+    return {
+      githubLogin: parsed.login,
+      displayName: parsed.name?.trim() || parsed.login,
+      source: "gh"
+    };
+  } catch {
+    return null;
+  }
+}
+async function gitConfig(key) {
+  try {
+    const { stdout } = await run2("git", ["config", "--get", key], { timeout: 3e3 });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+async function repoRoot(cwd) {
+  try {
+    const { stdout } = await run2("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 3e3 });
+    return stdout.trim() || cwd;
+  } catch {
+    return cwd;
+  }
+}
+async function repoRemote(cwd) {
+  try {
+    const { stdout } = await run2("git", ["remote", "get-url", "origin"], { cwd, timeout: 3e3 });
+    const remoteUrl = stdout.trim();
+    const match = remoteUrl.match(/[:/]([^/:]+)\/([^/]+?)(?:\.git)?$/);
+    if (!match) return null;
+    return { owner: match[1], name: match[2], remoteUrl };
+  } catch {
+    return null;
+  }
+}
+async function currentBranch(cwd) {
+  try {
+    const { stdout } = await run2("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd,
+      timeout: 3e3
+    });
+    return stdout.trim() || "main";
+  } catch {
+    return "main";
+  }
+}
+function titleCase(value) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
 // packages/plugin/src/tools-git.ts
 var OWN_ARTIFACTS = [".session-share/", ".claude/", ".mcp.json", ".gitignore"];
 function registerGitTools(server, ctx) {
@@ -32034,6 +32123,56 @@ function registerGitTools(server, ctx) {
 
 Stored in ${PREFERENCES_FILE}.${preferences.configured ? "" : "\n\nThese are defaults; nothing has been chosen yet."}`
       );
+    }
+  );
+  server.registerTool(
+    "ss_doctor",
+    {
+      description: "Check whether this machine is ready for a real session: who it will appear as, whether the repo can push, whether a server is running and what address a teammate should dial. Run it on both machines before blaming the session.",
+      inputSchema: {}
+    },
+    async () => {
+      const root = await ctx.repoRoot();
+      const lines = [];
+      const preferences = readPreferences();
+      const identity = await localIdentity();
+      lines.push(
+        `identity   ${identity.displayName} <${identity.githubLogin}>  ${identity.source === "gh" ? "(from gh \u2014 a real account)" : identity.source === "override" ? "(from SESSION_SHARE_LOGIN \u2014 a rehearsal, not a real account)" : `(from ${identity.source}, since gh is not authenticated here)`}`
+      );
+      const remote = await hasRemote(root);
+      lines.push(
+        remote ? `remote     origin is set${await canPush(root) ? " and reachable" : " but could not be reached \u2014 check your git credentials"}` : "remote     no origin \u2014 branches cannot be shared, so a second machine will never see your work"
+      );
+      const daemon = readDaemon();
+      if (!daemon) {
+        lines.push("server     not running here \u2014 you are joining, or you have not hosted yet");
+      } else {
+        const alive = await isHealthy(`http://127.0.0.1:${daemon.port}`);
+        lines.push(`server     ${alive ? "running" : "recorded but NOT responding"} on port ${daemon.port}`);
+        const lan = lanAddress();
+        lines.push(
+          daemon.url.includes("127.0.0.1") ? 'reach      loopback only \u2014 a teammate on another machine cannot connect. Re-host with expose "lan", or use a tunnel' : `reach      teammates dial ${daemon.url}${lan && !daemon.url.includes(lan) ? ` (this machine is now ${lan} \u2014 the invite you sent may be stale)` : ""}`
+        );
+      }
+      let attached = false;
+      try {
+        const config3 = ctx.config();
+        attached = true;
+        const state = await ctx.snapshot(config3);
+        const mine = state.participants.find((p) => p.id === config3.participantId);
+        lines.push(`session    "${state.session.title}" \u2014 phase ${state.session.phase}`);
+        lines.push(
+          `you        ${mine?.displayName ?? config3.displayName}, ${state.participants.length} participant(s): ${state.participants.map((p) => p.displayName).join(", ")}`
+        );
+        lines.push(`server url ${config3.serverUrl} \u2014 reachable`);
+      } catch (error51) {
+        lines.push(
+          attached ? `session    attached, but the server did not answer: ${error51 instanceof Error ? error51.message : error51}` : "session    this checkout is not attached \u2014 run /ss:host or /ss:join"
+        );
+      }
+      lines.push("");
+      lines.push(describePreferences(preferences));
+      return ctx.text(lines.join("\n"));
     }
   );
   server.registerTool(
@@ -32278,87 +32417,6 @@ Proven by \`${task.acceptance.testCommand}\`.`
       );
     }
   );
-}
-
-// packages/plugin/src/identity.ts
-import { execFile as execFile2 } from "node:child_process";
-import { promisify as promisify2 } from "node:util";
-var run2 = promisify2(execFile2);
-async function localIdentity() {
-  const override = process.env.SESSION_SHARE_LOGIN?.trim();
-  if (override) {
-    return {
-      githubLogin: override,
-      displayName: process.env.SESSION_SHARE_NAME?.trim() || titleCase(override),
-      source: "override"
-    };
-  }
-  const fromGh = await tryGh();
-  if (fromGh) return fromGh;
-  const login = await gitConfig("user.name") ?? process.env.USER ?? "dev";
-  const handle = login.trim().toLowerCase().replace(/\s+/g, "-");
-  return {
-    githubLogin: handle,
-    displayName: login.trim(),
-    source: await gitConfig("user.name") ? "git" : "system"
-  };
-}
-async function tryGh() {
-  try {
-    const { stdout } = await run2("gh", ["api", "user", "--jq", "{login: .login, name: .name}"], {
-      timeout: 5e3
-    });
-    const parsed = JSON.parse(stdout);
-    if (!parsed.login) return null;
-    return {
-      githubLogin: parsed.login,
-      displayName: parsed.name?.trim() || parsed.login,
-      source: "gh"
-    };
-  } catch {
-    return null;
-  }
-}
-async function gitConfig(key) {
-  try {
-    const { stdout } = await run2("git", ["config", "--get", key], { timeout: 3e3 });
-    return stdout.trim() || null;
-  } catch {
-    return null;
-  }
-}
-async function repoRoot(cwd) {
-  try {
-    const { stdout } = await run2("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 3e3 });
-    return stdout.trim() || cwd;
-  } catch {
-    return cwd;
-  }
-}
-async function repoRemote(cwd) {
-  try {
-    const { stdout } = await run2("git", ["remote", "get-url", "origin"], { cwd, timeout: 3e3 });
-    const remoteUrl = stdout.trim();
-    const match = remoteUrl.match(/[:/]([^/:]+)\/([^/]+?)(?:\.git)?$/);
-    if (!match) return null;
-    return { owner: match[1], name: match[2], remoteUrl };
-  } catch {
-    return null;
-  }
-}
-async function currentBranch(cwd) {
-  try {
-    const { stdout } = await run2("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-      cwd,
-      timeout: 3e3
-    });
-    return stdout.trim() || "main";
-  } catch {
-    return "main";
-  }
-}
-function titleCase(value) {
-  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 // packages/plugin/src/mcp.ts
