@@ -180,9 +180,13 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       inputSchema: {
         taskId: z.string(),
         summary: z.string().max(500).describe('One line for the commit message'),
+        force: z
+          .boolean()
+          .default(false)
+          .describe('Land it even though the acceptance command has not passed'),
       },
     },
-    async ({ taskId, summary }) => {
+    async ({ taskId, summary, force }) => {
       const config = ctx.config()
       const root = await ctx.repoRoot()
       const preferences = readPreferences()
@@ -191,6 +195,28 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       const task = state.tasks.find((t) => t.id === taskId)
       if (!task) throw new Error(`No task "${taskId}" in this session.`)
       if (task.ownerId !== config.participantId) throw new Error(`You do not hold "${taskId}".`)
+
+      /**
+       * A task is done when the command that proves it passes. Landing on an
+       * agent's say-so instead would make the acceptance criterion decorative,
+       * and the whole split rests on each piece being independently provable.
+       */
+      if (!force && !task.lastTest?.passed) {
+        return ctx.text(
+          [
+            task.lastTest
+              ? `"${taskId}" last reported a FAILING acceptance command:`
+              : `"${taskId}" has not reported an acceptance result yet:`,
+            `  ${task.acceptance.testCommand}`,
+            task.lastTest?.summary ? `  ${task.lastTest.summary}` : '',
+            '',
+            'Run it, report the outcome with ss_report_test, and try again.',
+            'If it genuinely should land anyway, call this with force: true and say why in chat.',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        )
+      }
 
       const branch = taskBranch(state.session.slug, taskId)
       const contract = contractBranch(state.session.slug)
@@ -211,6 +237,28 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
           }))
         if (prNumber) {
           await runCommand(config, { type: 'task.branch', taskId: taskId as never, branch, prNumber })
+        }
+      }
+
+      /**
+       * Take whatever else has landed before merging on top of it. Without
+       * this, two people finishing at once each merge into their own stale copy
+       * of the contract branch and the second push is rejected -- which strands
+       * their task as far as the session is concerned.
+       */
+      if (preferences.push) {
+        await gitFetch(root)
+        const caughtUp = await mergeInto(root, contract, `origin/${contract}`)
+        if (!caughtUp.merged) {
+          await checkoutBranch(root, branch, contract)
+          return ctx.text(
+            [
+              `${contract} has moved on and cannot be fast-forwarded here:`,
+              ...caughtUp.conflicts.map((path) => `  ${path}`),
+              '',
+              'Run /ss:sync, resolve that, then finish again.',
+            ].join('\n'),
+          )
         }
       }
 

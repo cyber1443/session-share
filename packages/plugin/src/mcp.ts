@@ -59,6 +59,16 @@ async function createSession(
   }
 }
 
+/** Re-mints an invite for a session that already exists on this server. */
+async function mintInvite(serverUrl: string, slug: string): Promise<string> {
+  const response = await fetch(new URL(`/api/sessions/${slug}/invite`, serverUrl), { method: 'POST' })
+  const payload = (await response.json()) as { invite?: string; message?: string; error?: string }
+  if (!response.ok || !payload.invite) {
+    throw new Error(payload.message ?? payload.error ?? 'could not mint an invite')
+  }
+  return payload.invite
+}
+
 /**
  * The agent's own handle on the session. These tools exist so Claude can take
  * part in the coordination rather than being narrated by it: it claims its own
@@ -114,17 +124,30 @@ export function createServer(): McpServer {
 
       const remote = await repoRemote(root)
       const slug = slugify(title)
-      const created = await createSession(loopback, {
-        slug,
-        title,
-        repo: {
-          owner: remote?.owner ?? 'local',
-          name: remote?.name ?? basename(root),
-          baseBranch: await currentBranch(root),
-          remoteUrl: remote?.remoteUrl ?? root,
-        },
-        issueRef: issueRef ?? null,
-      })
+
+      /**
+       * Hosting the same thing twice rejoins it rather than failing. The host's
+       * machine sleeping is a normal way for a session to pause, and the
+       * documented recovery is to run this again -- so it has to work.
+       */
+      let created: { invite: string | null; resumed: boolean }
+      try {
+        const fresh = await createSession(loopback, {
+          slug,
+          title,
+          repo: {
+            owner: remote?.owner ?? 'local',
+            name: remote?.name ?? basename(root),
+            baseBranch: await currentBranch(root),
+            remoteUrl: remote?.remoteUrl ?? root,
+          },
+          issueRef: issueRef ?? null,
+        })
+        created = { invite: fresh.invite, resumed: false }
+      } catch (error) {
+        if (!String(error).includes('is taken')) throw error
+        created = { invite: await mintInvite(loopback, slug), resumed: true }
+      }
 
       if (!created.invite) {
         throw new Error('This server verifies identity with GitHub; use the board to invite people.')
@@ -147,7 +170,9 @@ export function createServer(): McpServer {
       const reachable = daemon.url.includes('127.0.0.1')
       return text(
         [
-          `Hosting "${title}" as ${identity.displayName}.`,
+          created.resumed
+            ? `Resumed hosting "${title}" as ${identity.displayName}.`
+            : `Hosting "${title}" as ${identity.displayName}.`,
           '',
           'Send your teammate this line:',
           `  /ss:join ${packed}`,

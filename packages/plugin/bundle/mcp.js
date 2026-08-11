@@ -32131,10 +32131,11 @@ Tasks land on this branch as they finish.`,
       description: "Finish a task: commit everything under its owned paths, push, open a pull request, and merge it into the contract branch so whatever was waiting on it becomes claimable.",
       inputSchema: {
         taskId: external_exports.string(),
-        summary: external_exports.string().max(500).describe("One line for the commit message")
+        summary: external_exports.string().max(500).describe("One line for the commit message"),
+        force: external_exports.boolean().default(false).describe("Land it even though the acceptance command has not passed")
       }
     },
-    async ({ taskId, summary }) => {
+    async ({ taskId, summary, force }) => {
       const config3 = ctx.config();
       const root = await ctx.repoRoot();
       const preferences = readPreferences();
@@ -32142,6 +32143,18 @@ Tasks land on this branch as they finish.`,
       const task = state.tasks.find((t) => t.id === taskId);
       if (!task) throw new Error(`No task "${taskId}" in this session.`);
       if (task.ownerId !== config3.participantId) throw new Error(`You do not hold "${taskId}".`);
+      if (!force && !task.lastTest?.passed) {
+        return ctx.text(
+          [
+            task.lastTest ? `"${taskId}" last reported a FAILING acceptance command:` : `"${taskId}" has not reported an acceptance result yet:`,
+            `  ${task.acceptance.testCommand}`,
+            task.lastTest?.summary ? `  ${task.lastTest.summary}` : "",
+            "",
+            "Run it, report the outcome with ss_report_test, and try again.",
+            "If it genuinely should land anyway, call this with force: true and say why in chat."
+          ].filter(Boolean).join("\n")
+        );
+      }
       const branch = taskBranch(state.session.slug, taskId);
       const contract = contractBranch(state.session.slug);
       await checkoutBranch(root, branch, contract);
@@ -32159,6 +32172,21 @@ Proven by \`${task.acceptance.testCommand}\`.`
         });
         if (prNumber) {
           await runCommand(config3, { type: "task.branch", taskId, branch, prNumber });
+        }
+      }
+      if (preferences.push) {
+        await fetch2(root);
+        const caughtUp = await mergeInto(root, contract, `origin/${contract}`);
+        if (!caughtUp.merged) {
+          await checkoutBranch(root, branch, contract);
+          return ctx.text(
+            [
+              `${contract} has moved on and cannot be fast-forwarded here:`,
+              ...caughtUp.conflicts.map((path) => `  ${path}`),
+              "",
+              "Run /ss:sync, resolve that, then finish again."
+            ].join("\n")
+          );
         }
       }
       const merge2 = await mergeInto(root, contract, branch);
@@ -32352,6 +32380,14 @@ async function createSession(serverUrl, input) {
     invite: payload.invite ?? null
   };
 }
+async function mintInvite(serverUrl, slug) {
+  const response = await fetch(new URL(`/api/sessions/${slug}/invite`, serverUrl), { method: "POST" });
+  const payload = await response.json();
+  if (!response.ok || !payload.invite) {
+    throw new Error(payload.message ?? payload.error ?? "could not mint an invite");
+  }
+  return payload.invite;
+}
 var REPO_ROOT = process.env.SESSION_SHARE_REPO ?? process.cwd();
 function config2() {
   const found = readConfig(REPO_ROOT);
@@ -32391,17 +32427,24 @@ function createServer() {
       const loopback = `http://127.0.0.1:${daemon.port}`;
       const remote = await repoRemote(root);
       const slug = slugify2(title);
-      const created = await createSession(loopback, {
-        slug,
-        title,
-        repo: {
-          owner: remote?.owner ?? "local",
-          name: remote?.name ?? basename(root),
-          baseBranch: await currentBranch(root),
-          remoteUrl: remote?.remoteUrl ?? root
-        },
-        issueRef: issueRef ?? null
-      });
+      let created;
+      try {
+        const fresh = await createSession(loopback, {
+          slug,
+          title,
+          repo: {
+            owner: remote?.owner ?? "local",
+            name: remote?.name ?? basename(root),
+            baseBranch: await currentBranch(root),
+            remoteUrl: remote?.remoteUrl ?? root
+          },
+          issueRef: issueRef ?? null
+        });
+        created = { invite: fresh.invite, resumed: false };
+      } catch (error51) {
+        if (!String(error51).includes("is taken")) throw error51;
+        created = { invite: await mintInvite(loopback, slug), resumed: true };
+      }
       if (!created.invite) {
         throw new Error("This server verifies identity with GitHub; use the board to invite people.");
       }
@@ -32419,7 +32462,7 @@ function createServer() {
       const reachable = daemon.url.includes("127.0.0.1");
       return text(
         [
-          `Hosting "${title}" as ${identity.displayName}.`,
+          created.resumed ? `Resumed hosting "${title}" as ${identity.displayName}.` : `Hosting "${title}" as ${identity.displayName}.`,
           "",
           "Send your teammate this line:",
           `  /ss:join ${packed}`,
