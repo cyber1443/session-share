@@ -113,6 +113,42 @@ describe('peer sessions', () => {
     )
   })
 
+  /**
+   * A peer board has no cookie, so if /api/me only reads cookies it answers
+   * "nobody" -- and a board that does not know which participant it is cannot
+   * tell whether the approve button is for it. That is what made approving a
+   * split impossible in peer mode.
+   */
+  it('tells a board holding a participant token who it is', async () => {
+    const joined = await post('/api/peer/join', {
+      invite,
+      githubLogin: 'alice',
+      displayName: 'Alice',
+      repoPath: '/tmp/peer-alice',
+    })
+
+    const anonymous = await (await fetch(new URL('/api/me', baseUrl))).json()
+    assert.equal(anonymous.user, null, 'no credential, no identity')
+
+    const identified = await (
+      await fetch(new URL('/api/me', baseUrl), {
+        headers: { authorization: `Bearer ${joined.body.participantToken}` },
+      })
+    ).json()
+    assert.equal(identified.mode, 'peer')
+    assert.equal(identified.user.githubLogin, 'alice')
+
+    // And it has to be the same user the participant record points at, or the
+    // board still cannot match itself to a seat.
+    const snapshot = await (
+      await fetch(new URL('/sessions/peer-session/snapshot', baseUrl), {
+        headers: { authorization: `Bearer ${joined.body.participantToken}` },
+      })
+    ).json()
+    const seat = snapshot.participants.find((p) => p.id === joined.body.participantId)
+    assert.equal(seat.userId, identified.user.id)
+  })
+
   it('seats a browser with no checkout at all', async () => {
     const joined = await post('/api/peer/join', {
       invite,

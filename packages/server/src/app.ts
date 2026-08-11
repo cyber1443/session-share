@@ -227,7 +227,16 @@ export function createApp(options: AppOptions = {}): App {
 
   /** Answers for signed-out callers too: the login page needs to know what it can offer. */
   fastify.get('/api/me', async (request) => {
-    const user = currentUser(request)
+    /**
+     * A peer board has no cookie -- its credential is the participant token it
+     * got from the invite. Reading only the cookie here left the board with no
+     * idea who it was, so it could not tell which participant was itself: the
+     * approve button and every "is this mine" check were dead in peer mode.
+     */
+    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '')
+    const claims = bearer ? readParticipantToken(auth, bearer) : null
+    const user = (claims ? store.findUserById(claims.userId) : null) ?? currentUser(request)
+
     return {
       mode: auth.mode,
       user: user ? toAuthUser(user) : null,
