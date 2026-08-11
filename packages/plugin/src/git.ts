@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -201,6 +201,60 @@ export async function existingPullRequest(cwd: string, head: string): Promise<nu
   } catch {
     return null
   }
+}
+
+/**
+ * A second working tree of the same clone, so one repository can be in more
+ * than one session at a time.
+ *
+ * The alternative -- one checkout per session -- means a second clone, a second
+ * `npm install` and a second copy of everything ignored by git, for work that
+ * shares all of it. A worktree is a directory and a branch; the object store
+ * stays shared, so it is close to free.
+ *
+ * Each session still gets its own directory, which is what the lease gate and
+ * the server's one-agent-per-path rule both require.
+ */
+export async function addWorktree(
+  cwd: string,
+  path: string,
+  branch: string,
+  from: string,
+): Promise<'created' | 'existing'> {
+  if (existsSync(path)) return 'existing'
+
+  await fetch(cwd)
+  const base = (await remoteBranchExists(cwd, from)) ? `origin/${from}` : from
+
+  // The branch may already exist from an earlier worktree that was removed.
+  const args = (await branchExists(cwd, branch))
+    ? ['worktree', 'add', path, branch]
+    : ['worktree', 'add', '-b', branch, path, base]
+
+  await git(cwd, args)
+  return 'created'
+}
+
+export interface Worktree {
+  path: string
+  branch: string | null
+}
+
+export async function listWorktrees(cwd: string): Promise<Worktree[]> {
+  const output = await git(cwd, ['worktree', 'list', '--porcelain'])
+  const trees: Worktree[] = []
+  let current: Partial<Worktree> = {}
+
+  for (const line of output.split('\n')) {
+    if (line.startsWith('worktree ')) current = { path: line.slice('worktree '.length) }
+    else if (line.startsWith('branch ')) current.branch = line.slice('branch refs/heads/'.length)
+    else if (line === '' && current.path) {
+      trees.push({ path: current.path, branch: current.branch ?? null })
+      current = {}
+    }
+  }
+  if (current.path) trees.push({ path: current.path, branch: current.branch ?? null })
+  return trees
 }
 
 /** Can we actually talk to origin with the credentials on this machine? */

@@ -1,4 +1,4 @@
-import { basename } from 'node:path'
+import { basename, resolve } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
@@ -18,6 +18,7 @@ import { ensureDaemon, probe, stopDaemon } from './daemon.js'
 import { markCaughtUp } from './inbox.js'
 import { boardUrl, openInBrowser } from './open.js'
 import {
+  addWorktree,
   checkoutBranch,
   contractBranch,
   fetch as gitFetch,
@@ -340,6 +341,52 @@ export function createServer(): McpServer {
   )
 
   server.registerTool(
+    'ss_worktree',
+    {
+      description:
+        'Create a separate working tree of this repository for a session, so several sessions can run against one clone at the same time. Returns the directory to open a second Claude Code in.',
+      inputSchema: {
+        title: z
+          .string()
+          .describe('What that session is for; also names the directory and the branch'),
+        issueRef: z.string().nullish(),
+        /** An existing session to join there instead of hosting a new one. */
+        invite: z.string().nullish().describe('An ssx_ invite, if joining a session rather than hosting one'),
+      },
+    },
+    async ({ title, issueRef, invite }) => {
+      const root = await repoRoot(REPO_ROOT)
+      const slug = slugify(title)
+      const path = resolve(root, '..', `${basename(root)}-${slug}`)
+      const branch = `ss/${slug}/work`
+
+      /**
+       * Sessions are already independent of each other; what was missing is a
+       * place to stand. One Claude Code lives in one directory, so a second
+       * concurrent session needs a second directory -- and a worktree is the
+       * cheap version of that.
+       */
+      const created = await addWorktree(root, path, branch, await currentBranch(root))
+
+      return text(
+        [
+          created === 'existing'
+            ? `${path} already exists -- reusing it.`
+            : `Created a worktree at ${path} on ${branch}.`,
+          '',
+          'Open a second Claude Code there and run:',
+          invite ? `  /ss:join ${invite.trim()}` : `  /ss:host ${title}`,
+          '',
+          `  cd ${path}`,
+          '',
+          'It shares this clone\'s history and remote, so pushes and fetches behave',
+          'exactly as they do here. Remove it later with: git worktree remove ' + path,
+        ].join('\n'),
+      )
+    },
+  )
+
+  server.registerTool(
     'ss_stop_host',
     {
       description:
@@ -473,12 +520,21 @@ export function createServer(): McpServer {
       })
 
       if (result.validation.ok) {
+        // The server balances the split across whoever has a checkout the
+        // moment it lands, so report who ended up with what rather than
+        // leaving the team to work it out.
+        const after = await snapshot(cfg)
+        const names = new Map(after.participants.map((p) => [p.id, p.displayName]))
         return text({
           accepted: true,
           decompositionId: result.decompositionId,
           maxParallel: result.validation.maxFrontier,
           warnings: result.validation.issues,
-          next: 'Ask the team to approve on the board.',
+          assigned: (after.decomposition?.assignments ?? []).map((a) => ({
+            task: a.taskId,
+            to: names.get(a.participantId) ?? a.participantId,
+          })),
+          next: 'The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns.',
         })
       }
       return text({
@@ -504,7 +560,7 @@ export function createServer(): McpServer {
       })
       return text(
         result.satisfied
-          ? 'Approved. Tasks are seeded; commit the contract to make them claimable.'
+          ? 'Approved. Tasks are seeded and each assignee has been told what they own; land the contract to make them claimable.'
           : `Recorded. ${result.approvals.length} approval(s) so far.`,
       )
     },
