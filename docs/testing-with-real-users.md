@@ -1,4 +1,61 @@
-# Testing with real GitHub accounts and real Claude Codes
+# Testing with real users
+
+There are two ways to do this. Start with the first.
+
+---
+
+## The quick way: a peer session (no accounts, no setup)
+
+Both people install the plugin. One hosts, the other pastes one string.
+
+```bash
+# once, on each machine
+pnpm bundle                        # builds the server and the board
+pnpm attach ~/work/web-mine        # wires this checkout up to Claude Code
+```
+
+**Host**, in Claude Code inside their clone:
+
+```
+/ss:host Add a dark mode toggle
+```
+
+A coordination server starts on their machine (nothing to install — it is the
+same binary the plugin ships with), the session is created, their checkout is
+attached, and they get back:
+
+```
+Send your teammate this line:
+  /ss:join ssx_eyJ1IjoiaHR0cDovLzE5Mi4xNjguMC4zNjo0MzEwIiwidCI6…
+
+Board: http://192.168.0.36:4310/board/?join=ssx_…
+```
+
+**Guest**, in Claude Code inside *their own clone*:
+
+```
+/ss:join ssx_eyJ1IjoiaHR0cDovLzE5Mi4xNjguMC4zNjo0MzEwIiwidCI6…
+```
+
+That is the whole setup. Both open the board URL; it asks for a handle once and
+nothing else. Then `/ss:plan`, approve, `/ss:next` each.
+
+**What this costs you.** Nothing verifies identity — whoever holds the invite is
+in the room, and they can call themselves anything. The host machine is the
+server, so it has to stay awake, and if it sleeps the session pauses (the event
+log survives; `/ss:host` again brings it back). The guest must be able to reach
+the host: same network works, different networks need a tunnel such as
+`cloudflared tunnel --url http://127.0.0.1:4310` or Tailscale, and the invite has
+to be minted against that address.
+
+Only the hosting machine can create sessions — that check is on the socket, not
+on a header, so it holds even with the server bound to the LAN.
+
+`/ss:stop_host` shuts the server down when you are done.
+
+---
+
+## The thorough way: verified GitHub accounts
 
 Two developers, two GitHub accounts, two Claude subscriptions, one issue. Nobody
 shares credentials with anyone, including with session-share.

@@ -24,6 +24,35 @@ Each dev keeps their own Claude account, their own quota and their own GitHub id
 | **P5** GitHub App, PRs, merge queue | not started | |
 | **P6** Final integration PR | not started | |
 
+## Two ways to run it
+
+**Peer** is the default and needs no setup at all. One person runs `/ss:host`;
+a coordination server starts on their machine as a side effect and they get a
+single string to send. The other person pastes it into `/ss:join`. No OAuth App,
+no second process, no account anywhere. Identity comes from each person's own
+machine (`gh`, falling back to git config) and **nothing verifies it** — the
+invite is the credential, which is the right trade for two people who can hand
+each other a link and the wrong one for a public URL.
+
+```
+host   /ss:host Add a dark mode toggle
+       → send: /ss:join ssx_eyJ1Ijoi…
+       → board: http://192.168.0.36:4310/board/?join=ssx_…
+
+guest  /ss:join ssx_eyJ1Ijoi…
+```
+
+The guest has to be able to reach the host: same network works out of the box,
+different networks need a tunnel (`cloudflared tunnel --url http://127.0.0.1:4310`
+or Tailscale). The host machine has to stay awake — it is the server.
+
+**Hosted** is for a team that wants verified identity and a server that outlives
+any one laptop: register a GitHub OAuth App, run the server somewhere, and
+people sign in properly. Set `GITHUB_CLIENT_ID` and the server switches to it.
+
+Everything below the auth layer — the split, the leases, the board, the room —
+is identical in both.
+
 ## Signing in, and attaching a checkout
 
 These are two different things, and conflating them is what made the early
@@ -82,8 +111,9 @@ Only two tables are persisted: a `sessions` index and the append-only `events` l
 
 ```bash
 pnpm install
-pnpm demo      # the whole flow, narrated, no UI and no GitHub needed
-pnpm test      # 70 tests
+pnpm peer-demo   # host + guest + a real daemon, no accounts anywhere
+pnpm demo        # the same flow through the hosted (OAuth) path
+pnpm test        # 94 tests
 ```
 
 `pnpm demo` runs a real server, two real participants and the real hook binary as
@@ -160,6 +190,7 @@ and once the split is approved and the contract has landed, on every machine:
 
 | | |
 |---|---|
+| `/ss:host` | start hosting from this machine, get one string to send |
 | `/ss:join` | attach this checkout to a session |
 | `/ss:plan` | decompose an issue into a contract plus tasks |
 | `/ss:next` | claim the next ready task and work it |
