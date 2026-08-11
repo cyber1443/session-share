@@ -31199,6 +31199,14 @@ var ChatMessage = external_exports.object({
   /** Set by a `#<task-id>` ref; links the message to a DAG node. */
   taskRef: TaskId.nullable(),
   mentions: external_exports.array(ParticipantId).default([]),
+  /**
+   * A directive is addressed to the other people's *agents*, not to the people:
+   * their Claude Code picks it up and acts on it, which is what makes the room
+   * usable as a shared terminal rather than only as a place to talk. Mentions
+   * narrow it to specific participants; with none it goes to everyone but the
+   * author.
+   */
+  directive: external_exports.boolean().default(false),
   createdAt: Timestamp
 });
 var MergeQueueEntry = external_exports.object({
@@ -31422,7 +31430,9 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     body: external_exports.string().min(1).max(8e3),
     /** Explicit ref; a `#task-id` in the body is also parsed server-side. */
     taskRef: TaskId.nullable().default(null),
-    asAgent: external_exports.boolean().default(false)
+    asAgent: external_exports.boolean().default(false),
+    /** Deliver this into the other participants' Claude Code sessions. */
+    directive: external_exports.boolean().default(false)
   }),
   external_exports.object({
     type: external_exports.literal("chat.read"),
@@ -31563,12 +31573,18 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
 // packages/protocol/dist/invite.js
 var INVITE_PREFIX = "ssx_";
 function packInvite(invite) {
-  const payload = JSON.stringify({ u: invite.url.replace(/\/$/, ""), t: invite.token });
+  const payload = JSON.stringify({
+    u: invite.url.replace(/\/$/, ""),
+    t: invite.token,
+    ...invite.serverId ? { s: invite.serverId } : {}
+  });
   return INVITE_PREFIX + base64UrlEncode(payload);
 }
+function findInvite(value) {
+  return value.match(/ssx_[A-Za-z0-9_-]+/)?.[0] ?? null;
+}
 function unpackInvite(value) {
-  const trimmed = value.trim();
-  const body = trimmed.startsWith(INVITE_PREFIX) ? trimmed.slice(INVITE_PREFIX.length) : null;
+  const body = findInvite(value)?.slice(INVITE_PREFIX.length) ?? null;
   if (!body)
     return null;
   try {
@@ -31577,9 +31593,22 @@ function unpackInvite(value) {
       return null;
     if (!/^https?:\/\//.test(parsed.u))
       return null;
-    return { url: parsed.u, token: parsed.t };
+    return {
+      url: parsed.u,
+      token: parsed.t,
+      // Older invites do not carry one; absence means "cannot check", not "mismatch".
+      serverId: typeof parsed.s === "string" ? parsed.s : null
+    };
   } catch {
     return null;
+  }
+}
+function isLoopbackUrl(url2) {
+  try {
+    const host = new URL(url2).hostname.replace(/^\[|\]$/g, "");
+    return host === "localhost" || host === "::1" || host.startsWith("127.");
+  } catch {
+    return false;
   }
 }
 function base64UrlEncode(value) {
@@ -31695,17 +31724,17 @@ function writeConfig(repoPath, config3) {
 // packages/plugin/src/daemon.ts
 import { spawn } from "node:child_process";
 import { existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { homedir } from "node:os";
 import { dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
-var STATE_DIR = join2(homedir(), ".session-share");
+var STATE_DIR = process.env.SESSION_SHARE_HOME ?? join2(homedir(), ".session-share");
 var DAEMON_FILE = join2(STATE_DIR, "daemon.json");
 var SECRET_FILE = join2(STATE_DIR, "secret");
 var DB_FILE = join2(STATE_DIR, "sessions.db");
 var LOG_FILE = join2(STATE_DIR, "server.log");
-var DEFAULT_PORT = 4310;
+var DEFAULT_PORT = Number(process.env.SESSION_SHARE_PORT ?? 4310);
 function ensureStateDir() {
   mkdirSync2(STATE_DIR, { recursive: true });
 }
@@ -31717,10 +31746,14 @@ function hostSecret() {
 `, { mode: 384 });
   return secret;
 }
+function expectedServerId() {
+  return createHmac("sha256", hostSecret()).update("session-share/server-id").digest("hex").slice(0, 16);
+}
 function readDaemon() {
   if (!existsSync2(DAEMON_FILE)) return null;
   try {
-    return JSON.parse(readFileSync2(DAEMON_FILE, "utf8"));
+    const info = JSON.parse(readFileSync2(DAEMON_FILE, "utf8"));
+    return { ...info, expose: info.expose ?? (isLoopbackUrl(info.url) ? "loopback" : "lan") };
   } catch {
     return null;
   }
@@ -31730,25 +31763,34 @@ function writeDaemon(info) {
   writeFileSync2(DAEMON_FILE, `${JSON.stringify(info, null, 2)}
 `);
 }
-async function isHealthy(url2, timeoutMs = 1200) {
+async function probe(url2, timeoutMs = 1500) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(new URL("/healthz", url2), { signal: controller.signal });
-    return response.ok;
+    if (!response.ok) return null;
+    return await response.json();
   } catch {
-    return false;
+    return null;
   } finally {
     clearTimeout(timer);
   }
 }
+async function isHealthy(url2, timeoutMs = 1200) {
+  return await probe(url2, timeoutMs) !== null;
+}
+var SKIP_INTERFACE = /^(utun|awdl|llw|bridge|vmnet|docker|veth|tun|tap|ap\d)/i;
+var PRIVATE_LAN = /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/;
 function lanAddress() {
-  for (const addresses of Object.values(networkInterfaces())) {
+  const candidates = [];
+  for (const [name, addresses] of Object.entries(networkInterfaces())) {
+    if (SKIP_INTERFACE.test(name)) continue;
     for (const address of addresses ?? []) {
-      if (address.family === "IPv4" && !address.internal) return address.address;
+      if (address.family !== "IPv4" || address.internal) continue;
+      candidates.push(address.address);
     }
   }
-  return null;
+  return candidates.find((address) => PRIVATE_LAN.test(address)) ?? candidates[0] ?? null;
 }
 function serverEntrypoint() {
   const here = dirname2(fileURLToPath(import.meta.url));
@@ -31774,8 +31816,23 @@ Build it with: pnpm build`
 async function ensureDaemon(options = {}) {
   const port = options.port ?? DEFAULT_PORT;
   const expose = options.expose ?? "lan";
+  const mine = expectedServerId();
   const existing = readDaemon();
-  if (existing && await isHealthy(`http://127.0.0.1:${existing.port}`)) return existing;
+  if (existing) {
+    const health = await probe(`http://127.0.0.1:${existing.port}`);
+    if (health && (!health.serverId || health.serverId === mine)) {
+      if (health.serverId && existing.expose === expose) return refreshAddress(existing);
+      stopDaemon();
+      await waitUntilDown(`http://127.0.0.1:${existing.port}`);
+    }
+  }
+  const squatter = await probe(`http://127.0.0.1:${port}`);
+  if (squatter && squatter.serverId !== mine) {
+    throw new Error(
+      `Port ${port} is already serving a different session-share (id ${squatter.serverId ?? "unknown"}).
+It is not this machine's server, so invites from it cannot be redeemed here. Stop it, or pick another port with SESSION_SHARE_PORT.`
+    );
+  }
   ensureStateDir();
   const out = openLog();
   const child = spawn(process.execPath, [serverEntrypoint()], {
@@ -31799,6 +31856,7 @@ async function ensureDaemon(options = {}) {
       const info = {
         port,
         url: ip ? `http://${ip}:${port}` : loopback,
+        expose,
         pid: child.pid ?? -1,
         startedAt: Date.now()
       };
@@ -31808,6 +31866,22 @@ async function ensureDaemon(options = {}) {
     await sleep(250);
   }
   throw new Error(`The coordination server did not come up on port ${port}. See ${LOG_FILE}`);
+}
+function refreshAddress(info) {
+  if (info.expose !== "lan") return info;
+  const ip = lanAddress();
+  const url2 = ip ? `http://${ip}:${info.port}` : `http://127.0.0.1:${info.port}`;
+  if (url2 === info.url) return info;
+  const updated = { ...info, url: url2 };
+  writeDaemon(updated);
+  return updated;
+}
+async function waitUntilDown(url2, timeoutMs = 5e3) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!await isHealthy(url2, 500)) return;
+    await sleep(150);
+  }
 }
 function stopDaemon() {
   const info = readDaemon();
@@ -31824,10 +31898,56 @@ function openLog() {
 }
 var sleep = (ms) => new Promise((resolve3) => setTimeout(resolve3, ms));
 
+// packages/plugin/src/inbox.ts
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join3 } from "node:path";
+var INBOX_FILE = join3(STATE_DIR, "inbox.json");
+function cursorKey(config3) {
+  return `${config3.serverUrl}|${config3.sessionRef}|${config3.participantId}`;
+}
+function readCursors() {
+  if (!existsSync3(INBOX_FILE)) return {};
+  try {
+    return JSON.parse(readFileSync3(INBOX_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function writeCursor(key, value) {
+  mkdirSync3(STATE_DIR, { recursive: true });
+  writeFileSync3(INBOX_FILE, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
+`);
+}
+function markCaughtUp(config3, at = Date.now()) {
+  writeCursor(cursorKey(config3), at);
+}
+
+// packages/plugin/src/open.ts
+import { spawn as spawn2 } from "node:child_process";
+function openInBrowser(url2) {
+  if (process.env.SESSION_SHARE_NO_OPEN === "1") return false;
+  const [command, args] = process.platform === "darwin" ? ["open", [url2]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url2]] : ["xdg-open", [url2]];
+  try {
+    const child = spawn2(command, args, {
+      detached: true,
+      stdio: "ignore"
+    });
+    child.on("error", () => void 0);
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+function boardUrl(serverUrl, packedInvite, as) {
+  const suffix = as ? `&as=${encodeURIComponent(as)}` : "";
+  return `${serverUrl.replace(/\/$/, "")}/board/?join=${packedInvite}${suffix}`;
+}
+
 // packages/plugin/src/git.ts
 import { execFile } from "node:child_process";
-import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname3, join as join3 } from "node:path";
+import { mkdirSync as mkdirSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname3, join as join4 } from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
 var GitError = class extends Error {
@@ -31900,9 +32020,9 @@ async function checkoutBranch(cwd, branch, from) {
 async function writeFiles(cwd, files) {
   const written = [];
   for (const file2 of files) {
-    const absolute = join3(cwd, file2.path);
-    mkdirSync3(dirname3(absolute), { recursive: true });
-    writeFileSync3(absolute, file2.contents);
+    const absolute = join4(cwd, file2.path);
+    mkdirSync4(dirname3(absolute), { recursive: true });
+    writeFileSync4(absolute, file2.contents);
     written.push(file2.path);
   }
   return written;
@@ -31974,8 +32094,8 @@ async function canPush(cwd) {
 }
 
 // packages/plugin/src/preferences.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname4, join as join4 } from "node:path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname4, join as join5 } from "node:path";
 var Preferences = external_exports.object({
   /**
    * explicit: nothing is committed until you run /ss:done.
@@ -31988,22 +32108,30 @@ var Preferences = external_exports.object({
   openPullRequests: external_exports.boolean().default(true),
   /** Whether hosting binds the local network or only this machine. */
   expose: external_exports.enum(["lan", "loopback"]).default("lan"),
+  /** Open the live board automatically when you host or join. */
+  openBoard: external_exports.boolean().default(true),
+  /**
+   * Let messages sent to the room as directives run in this Claude Code
+   * session. Off makes the room read-only: you still see everything, but
+   * nothing anyone types reaches your agent.
+   */
+  acceptDirectives: external_exports.boolean().default(true),
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });
-var PREFERENCES_PATH = join4(STATE_DIR, "preferences.json");
+var PREFERENCES_PATH = join5(STATE_DIR, "preferences.json");
 function readPreferences() {
-  if (!existsSync3(PREFERENCES_PATH)) return Preferences.parse({});
+  if (!existsSync4(PREFERENCES_PATH)) return Preferences.parse({});
   try {
-    return Preferences.parse(JSON.parse(readFileSync3(PREFERENCES_PATH, "utf8")));
+    return Preferences.parse(JSON.parse(readFileSync4(PREFERENCES_PATH, "utf8")));
   } catch {
     return Preferences.parse({});
   }
 }
 function writePreferences(update) {
   const merged = Preferences.parse({ ...readPreferences(), ...update });
-  mkdirSync4(dirname4(PREFERENCES_PATH), { recursive: true });
-  writeFileSync4(PREFERENCES_PATH, `${JSON.stringify(merged, null, 2)}
+  mkdirSync5(dirname4(PREFERENCES_PATH), { recursive: true });
+  writeFileSync5(PREFERENCES_PATH, `${JSON.stringify(merged, null, 2)}
 `);
   return merged;
 }
@@ -32013,7 +32141,9 @@ function describePreferences(preferences) {
     `commits:  ${preferences.commitPolicy === "explicit" ? "only when you run /ss:done" : "automatically when the acceptance test passes"}`,
     `push:     ${preferences.push ? "branches are pushed to origin" : "nothing leaves this machine"}`,
     `PRs:      ${preferences.openPullRequests ? "opened per task and for the session" : "never opened"}`,
-    `hosting:  ${preferences.expose === "lan" ? "reachable on your local network" : "this machine only"}`
+    `hosting:  ${preferences.expose === "lan" ? "reachable on your local network" : "this machine only"}`,
+    `board:    ${preferences.openBoard ? "opens in your browser on host and join" : "never opened for you"}`,
+    `room:     ${preferences.acceptDirectives ? "directives from the room run in this session" : "read-only; nothing from the room reaches your agent"}`
   ].join("\n");
 }
 
@@ -32104,12 +32234,14 @@ function registerGitTools(server, ctx) {
   server.registerTool(
     "ss_settings",
     {
-      description: "Read or change how session-share touches this machine: when work is committed, whether branches are pushed, whether pull requests are opened, and whether hosting is reachable on the local network.",
+      description: "Read or change how session-share touches this machine: when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, and whether the room can drive this agent.",
       inputSchema: {
         commitPolicy: external_exports.enum(["explicit", "auto-on-green"]).nullish(),
         push: external_exports.boolean().nullish(),
         openPullRequests: external_exports.boolean().nullish(),
-        expose: external_exports.enum(["lan", "loopback"]).nullish()
+        expose: external_exports.enum(["lan", "loopback"]).nullish(),
+        openBoard: external_exports.boolean().nullish(),
+        acceptDirectives: external_exports.boolean().nullish()
       }
     },
     async (input) => {
@@ -32147,11 +32279,13 @@ Stored in ${PREFERENCES_FILE}.${preferences.configured ? "" : "\n\nThese are def
       if (!daemon) {
         lines.push("server     not running here \u2014 you are joining, or you have not hosted yet");
       } else {
-        const alive = await isHealthy(`http://127.0.0.1:${daemon.port}`);
-        lines.push(`server     ${alive ? "running" : "recorded but NOT responding"} on port ${daemon.port}`);
+        const health = await probe(`http://127.0.0.1:${daemon.port}`);
+        lines.push(
+          `server     ${health ? "running" : "recorded but NOT responding"} on port ${daemon.port}, bound to ${daemon.expose === "lan" ? "0.0.0.0" : "127.0.0.1"}${health?.serverId ? ` (id ${health.serverId})` : ""}`
+        );
         const lan = lanAddress();
         lines.push(
-          daemon.url.includes("127.0.0.1") ? 'reach      loopback only \u2014 a teammate on another machine cannot connect. Re-host with expose "lan", or use a tunnel' : `reach      teammates dial ${daemon.url}${lan && !daemon.url.includes(lan) ? ` (this machine is now ${lan} \u2014 the invite you sent may be stale)` : ""}`
+          isLoopbackUrl(daemon.url) ? 'reach      loopback only \u2014 a teammate on another machine cannot connect, and any invite from here names their own machine, not yours. Re-host with expose "lan", or use a tunnel' : `reach      teammates dial ${daemon.url}${lan && !daemon.url.includes(lan) ? ` (this machine is now ${lan} \u2014 the invite you sent may be stale)` : ""}`
         );
       }
       let attached = false;
@@ -32446,6 +32580,29 @@ async function mintInvite(serverUrl, slug) {
   }
   return payload.invite;
 }
+async function checkReachable(url2, expectedServerId2) {
+  const health = await probe(url2, 4e3);
+  if (!health) {
+    throw new Error(
+      [
+        `Nothing answered at ${url2}.`,
+        "",
+        isLoopbackUrl(url2) ? 'That address means "this machine", so the invite was minted by a host bound to loopback. Ask them to re-run /ss:host -- their invite cannot reach them from anywhere else.' : "Check that you are on the same network as the host, that their machine is awake, and that their firewall allows incoming connections on that port. If you are not on the same network, they need a tunnel."
+      ].join("\n")
+    );
+  }
+  if (expectedServerId2 && health.serverId && health.serverId !== expectedServerId2) {
+    throw new Error(
+      [
+        `${url2} answered, but it is not the server that minted this invite.`,
+        `  invite expects: ${expectedServerId2}`,
+        `  answered:       ${health.serverId}`,
+        "",
+        isLoopbackUrl(url2) ? "The address inside the invite is loopback, so on your machine it points at your own session-share. The host must re-run /ss:host so the invite carries their network address." : "Another session-share is listening on that address. The host should re-host, or free the port."
+      ].join("\n")
+    );
+  }
+}
 var REPO_ROOT = process.env.SESSION_SHARE_REPO ?? process.cwd();
 function config2() {
   const found = readConfig(REPO_ROOT);
@@ -32475,7 +32632,9 @@ function createServer() {
       inputSchema: {
         title: external_exports.string().describe('What the session is for, e.g. "Add a dark mode toggle"'),
         issueRef: external_exports.string().nullish().describe("Issue URL, if there is one"),
-        expose: external_exports.enum(["lan", "loopback"]).default("lan").describe("lan lets teammates on the same network connect; loopback is this machine only")
+        expose: external_exports.enum(["lan", "loopback"]).nullish().describe(
+          "lan lets teammates on the same network connect; loopback is this machine only. Defaults to your saved preference."
+        )
       }
     },
     async ({ title, issueRef, expose }) => {
@@ -32506,9 +32665,14 @@ function createServer() {
       if (!created.invite) {
         throw new Error("This server verifies identity with GitHub; use the board to invite people.");
       }
-      const packed = packInvite({ url: daemon.url, token: created.invite });
+      const health = await probe(loopback);
+      const packed = packInvite({
+        url: daemon.url,
+        token: created.invite,
+        serverId: health?.serverId ?? null
+      });
       const joined = await peerJoin(loopback, created.invite, identity, root);
-      writeConfig(root, {
+      const cfg = {
         serverUrl: loopback,
         sessionRef: joined.sessionRef,
         participantId: joined.participantId,
@@ -32516,8 +32680,12 @@ function createServer() {
         githubLogin: joined.githubLogin,
         displayName: joined.displayName,
         repoPath: root
-      });
-      const reachable = daemon.url.includes("127.0.0.1");
+      };
+      writeConfig(root, cfg);
+      markCaughtUp(cfg);
+      const board = boardUrl(daemon.url, packed, joined.githubLogin);
+      const opened = readPreferences().openBoard && openInBrowser(board);
+      const loopbackOnly = isLoopbackUrl(daemon.url);
       return text(
         [
           created.resumed ? `Resumed hosting "${title}" as ${identity.displayName}.` : `Hosting "${title}" as ${identity.displayName}.`,
@@ -32525,9 +32693,13 @@ function createServer() {
           "Send your teammate this line:",
           `  /ss:join ${packed}`,
           "",
-          `Board: ${daemon.url}/board/?join=${packed}`,
+          opened ? `Board opened: ${board}` : `Board: ${board}`,
           "",
-          reachable ? 'Bound to loopback only, so nobody else can reach it. Re-run with expose="lan" to let a teammate on your network in.' : `Reachable on your network at ${daemon.url}. Anyone who has the invite can join; anyone who does not, cannot.`,
+          loopbackOnly ? [
+            "This invite only works on this machine: the server is bound to loopback,",
+            "so the address inside it points at whatever is running on the other person's",
+            'own port 4310. Re-run with expose="lan"' + (readPreferences().expose === "lan" ? " -- and check you are on a network, because no LAN address was found." : " to let a teammate on your network in.")
+          ].join("\n") : `Reachable on your network at ${daemon.url}. Anyone who has the invite can join; anyone who does not, cannot.`,
           "",
           `Every edit in ${basename(root)} is now checked against this session's file leases.`
         ].join("\n")
@@ -32545,10 +32717,16 @@ function createServer() {
     },
     async ({ code, serverUrl }) => {
       const root = await repoRoot(REPO_ROOT);
-      const trimmed = code.trim();
+      const trimmed = findInvite(code) ?? code.trim();
       const packed = unpackInvite(trimmed);
+      if (!packed && trimmed.startsWith(INVITE_PREFIX)) {
+        throw new Error(
+          "That looks like an invite but it is damaged -- most likely it was cut short or wrapped when it was copied. Ask for it again, or have the host re-run /ss:host."
+        );
+      }
+      if (packed) await checkReachable(packed.url, packed.serverId ?? null);
       const result = packed ? await peerJoin(packed.url, packed.token, await localIdentity(), root) : await pair(serverUrl ?? DEFAULT_SERVER_URL, trimmed, root);
-      const path = writeConfig(root, {
+      const cfg = {
         serverUrl: packed?.url ?? serverUrl ?? DEFAULT_SERVER_URL,
         sessionRef: result.sessionRef,
         participantId: result.participantId,
@@ -32556,15 +32734,44 @@ function createServer() {
         githubLogin: result.githubLogin,
         displayName: result.displayName,
         repoPath: root
-      });
+      };
+      const path = writeConfig(root, cfg);
+      markCaughtUp(cfg);
+      const board = packed ? boardUrl(packed.url, trimmed, result.githubLogin) : null;
+      const opened = Boolean(board) && readPreferences().openBoard && openInBrowser(board);
       return text(
         [
           `Joined "${result.sessionTitle}" as ${result.displayName}.`,
-          packed ? `Board: ${packed.url}/board/?join=${trimmed}` : "",
+          board ? opened ? `Board opened: ${board}` : `Board: ${board}` : "",
           `Config at ${path}.`,
           `Every edit in ${basename(root)} is now checked against the session's file leases.`
         ].filter(Boolean).join("\n")
       );
+    }
+  );
+  server.registerTool(
+    "ss_board",
+    {
+      description: "Open the live board for the session this checkout is attached to, in the browser. Use it when the board was closed or never opened.",
+      inputSchema: {}
+    },
+    async () => {
+      const cfg = config2();
+      const response = await fetch(new URL(`/api/sessions/${cfg.sessionRef}/invite`, cfg.serverUrl), {
+        method: "POST",
+        headers: cfg.participantToken ? { authorization: `Bearer ${cfg.participantToken}` } : {}
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.invite) {
+        throw new Error(payload.message ?? "Could not get a board link for this session.");
+      }
+      const health = await probe(cfg.serverUrl);
+      const board = boardUrl(
+        cfg.serverUrl,
+        packInvite({ url: cfg.serverUrl, token: payload.invite, serverId: health?.serverId ?? null }),
+        cfg.githubLogin
+      );
+      return text(openInBrowser(board) ? `Opened ${board}` : board);
     }
   );
   server.registerTool(
@@ -32849,17 +33056,26 @@ function createServer() {
     "ss_chat_post",
     {
       description: "Say something in the session room. Use it when you learn something the other agent must know BEFORE it acts -- a contract gap, a shared assumption that broke, a path you need. Mention a task as #task-id to pin the message to it.",
-      inputSchema: { body: external_exports.string().min(1).max(8e3), taskRef: external_exports.string().nullish() }
+      inputSchema: {
+        body: external_exports.string().min(1).max(8e3),
+        taskRef: external_exports.string().nullish(),
+        directive: external_exports.boolean().nullish().describe(
+          "Deliver this into the other agents' Claude Code sessions instead of only showing it in the room. Use @login to aim it at one person."
+        )
+      }
     },
-    async ({ body, taskRef }) => {
+    async ({ body, taskRef, directive }) => {
       const cfg = config2();
       const { message } = await runCommand(cfg, {
         type: "chat.post",
         body,
         taskRef: taskRef ?? null,
-        asAgent: true
+        asAgent: true,
+        directive: directive ?? false
       });
-      return text(`Posted${message.taskRef ? ` on #${message.taskRef}` : ""}.`);
+      return text(
+        `Posted${message.taskRef ? ` on #${message.taskRef}` : ""}${message.directive ? " as a directive -- it will run in the other agents." : "."}`
+      );
     }
   );
   server.registerTool(

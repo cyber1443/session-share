@@ -11,7 +11,7 @@ var __export = (target, all) => {
 };
 
 // packages/plugin/src/hook.ts
-import { relative, resolve as resolve2 } from "node:path";
+import { relative, resolve as resolve3 } from "node:path";
 
 // packages/plugin/src/config.ts
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -14599,9 +14599,686 @@ async function runCommand(config2, command, timeoutMs = 3e3) {
   }
 }
 
+// packages/plugin/src/inbox.ts
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join3 } from "node:path";
+
+// packages/plugin/src/daemon.ts
+import { spawn } from "node:child_process";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { createHmac, randomBytes } from "node:crypto";
+import { networkInterfaces } from "node:os";
+import { homedir } from "node:os";
+import { dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// packages/protocol/dist/ids.js
+var SessionId = external_exports.string().min(1).brand();
+var ParticipantId = external_exports.string().min(1).brand();
+var DecompositionId = external_exports.string().min(1).brand();
+var MessageId = external_exports.string().min(1).brand();
+var TaskId = external_exports.string().regex(/^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/, "task id must be kebab-case, 3-40 chars").brand();
+var Seq = external_exports.number().int().nonnegative();
+var Timestamp = external_exports.number().int().nonnegative();
+
+// packages/protocol/dist/domain.js
+var RepoRef = external_exports.object({
+  owner: external_exports.string().min(1),
+  name: external_exports.string().min(1),
+  baseBranch: external_exports.string().min(1).default("main"),
+  remoteUrl: external_exports.string().min(1)
+});
+var SessionPhase = external_exports.enum(["plan", "build", "integrate", "done"]);
+var Session = external_exports.object({
+  id: SessionId,
+  slug: external_exports.string().min(1),
+  title: external_exports.string().min(1),
+  repo: RepoRef,
+  issueRef: external_exports.string().nullable(),
+  phase: SessionPhase,
+  /** Whoever ran /ss:plan. Holds the approval vote once participants > 3. */
+  leadId: ParticipantId.nullable(),
+  contractBranch: external_exports.string().nullable(),
+  createdAt: Timestamp
+});
+var ParticipantActivity = external_exports.object({
+  state: external_exports.enum(["idle", "planning", "working", "testing", "blocked", "offline"]),
+  detail: external_exports.string().max(120),
+  taskId: TaskId.nullable(),
+  updatedAt: Timestamp
+});
+var Participant = external_exports.object({
+  id: ParticipantId,
+  sessionId: SessionId,
+  /** The authenticated account behind this participant, once there is one. */
+  userId: external_exports.string().nullable(),
+  githubLogin: external_exports.string().min(1),
+  displayName: external_exports.string().min(1),
+  avatarUrl: external_exports.string().nullable(),
+  /** Index into the fixed 8-colour board palette. Assigned on join, stable. */
+  colorIndex: external_exports.number().int().min(0).max(7),
+  /**
+   * Absolute path of this participant's checkout, or null for someone watching
+   * from the board without one. Two participants sharing one path means two
+   * Claude Codes in one working tree, which corrupts both -- the server rejects
+   * that join.
+   */
+  repoPath: external_exports.string().min(1).nullable(),
+  connected: external_exports.boolean(),
+  activity: ParticipantActivity,
+  joinedAt: Timestamp
+});
+var ContractFile = external_exports.object({
+  path: external_exports.string().min(1),
+  purpose: external_exports.string().min(1),
+  contents: external_exports.string()
+});
+var Contract = external_exports.object({
+  summary: external_exports.string().min(1),
+  files: external_exports.array(ContractFile).min(1)
+});
+var Acceptance = external_exports.object({
+  testCommand: external_exports.string().min(1),
+  testFiles: external_exports.array(external_exports.string().min(1)),
+  manualChecks: external_exports.array(external_exports.string().min(1)).default([])
+});
+var TaskSpec = external_exports.object({
+  id: TaskId,
+  title: external_exports.string().min(1).max(80),
+  intent: external_exports.string().min(1),
+  /**
+   * Globs this task exclusively owns. The lease is granted over exactly these,
+   * and the PreToolUse hook denies edits outside them.
+   */
+  ownedPaths: external_exports.array(external_exports.string().min(1)).min(1),
+  dependsOn: external_exports.array(TaskId).default([]),
+  /** What this task may rely on already existing, all of it from the contract. */
+  assumes: external_exports.array(external_exports.string().min(1)).default([]),
+  acceptance: Acceptance,
+  estimateMinutes: external_exports.number().int().min(5).max(240)
+});
+var DecompositionStatus = external_exports.enum(["proposed", "approved", "rejected"]);
+var Decomposition = external_exports.object({
+  id: DecompositionId,
+  sessionId: SessionId,
+  issueRef: external_exports.string().nullable(),
+  contract: Contract,
+  tasks: external_exports.array(TaskSpec).min(1),
+  /** Planner input: how wide the ready-frontier needs to be to keep everyone busy. */
+  participantCount: external_exports.number().int().min(1),
+  proposedBy: ParticipantId,
+  status: DecompositionStatus,
+  approvals: external_exports.array(ParticipantId).default([]),
+  createdAt: Timestamp
+});
+var ValidationCode = external_exports.enum([
+  "overlapping_paths",
+  "dependency_cycle",
+  "unknown_dependency",
+  "missing_acceptance",
+  "path_escapes_repo",
+  "contract_path_owned_by_task",
+  "narrow_frontier",
+  "oversized_task"
+]);
+var ValidationIssue = external_exports.object({
+  code: ValidationCode,
+  /** error blocks approval; warning is shown on the board and can be accepted. */
+  severity: external_exports.enum(["error", "warning"]),
+  message: external_exports.string().min(1),
+  taskIds: external_exports.array(TaskId).default([]),
+  /** Concrete instruction the planner can act on in its one repair round. */
+  repairHint: external_exports.string().min(1)
+});
+var ValidationReport = external_exports.object({
+  ok: external_exports.boolean(),
+  issues: external_exports.array(ValidationIssue),
+  /** Max number of tasks simultaneously claimable, per DAG depth. */
+  frontierByDepth: external_exports.array(external_exports.number().int().nonnegative()),
+  maxFrontier: external_exports.number().int().nonnegative()
+});
+var TaskState = external_exports.enum([
+  "blocked",
+  // an unmerged dependency
+  "ready",
+  // claimable
+  "claimed",
+  // lease held, agent not started
+  "running",
+  // agent editing
+  "testing",
+  // acceptance command running
+  "pr",
+  // PR open, waiting on CI or merge queue
+  "merged",
+  // in the contract branch
+  "failed"
+  // acceptance failed, needs another pass
+]);
+var TestResult = external_exports.object({
+  passed: external_exports.boolean(),
+  command: external_exports.string(),
+  exitCode: external_exports.number().int(),
+  summary: external_exports.string().max(2e3),
+  ranAt: Timestamp
+});
+var Task = TaskSpec.extend({
+  sessionId: SessionId,
+  state: TaskState,
+  ownerId: ParticipantId.nullable(),
+  branch: external_exports.string().nullable(),
+  prNumber: external_exports.number().int().nullable(),
+  lastTest: TestResult.nullable(),
+  /** Streaming one-liner of what the owning agent is doing, for the DAG node. */
+  activityLine: external_exports.string().max(120).nullable(),
+  depth: external_exports.number().int().nonnegative()
+});
+var Lease = external_exports.object({
+  taskId: TaskId,
+  sessionId: SessionId,
+  holderId: ParticipantId,
+  paths: external_exports.array(external_exports.string().min(1)).min(1),
+  grantedAt: Timestamp
+});
+var HandoffStatus = external_exports.enum(["pending", "granted", "denied", "expired"]);
+var HandoffRequest = external_exports.object({
+  id: external_exports.string().min(1),
+  sessionId: SessionId,
+  path: external_exports.string().min(1),
+  requesterId: ParticipantId,
+  holderId: ParticipantId,
+  heldByTaskId: TaskId,
+  reason: external_exports.string().max(280),
+  status: HandoffStatus,
+  createdAt: Timestamp
+});
+var ChatAuthorKind = external_exports.enum(["human", "agent", "system"]);
+var ChatMessage = external_exports.object({
+  id: MessageId,
+  sessionId: SessionId,
+  authorId: ParticipantId.nullable(),
+  // null for system
+  authorKind: ChatAuthorKind,
+  body: external_exports.string().min(1).max(8e3),
+  /** Set by a `#<task-id>` ref; links the message to a DAG node. */
+  taskRef: TaskId.nullable(),
+  mentions: external_exports.array(ParticipantId).default([]),
+  /**
+   * A directive is addressed to the other people's *agents*, not to the people:
+   * their Claude Code picks it up and acts on it, which is what makes the room
+   * usable as a shared terminal rather than only as a place to talk. Mentions
+   * narrow it to specific participants; with none it goes to everyone but the
+   * author.
+   */
+  directive: external_exports.boolean().default(false),
+  createdAt: Timestamp
+});
+var MergeQueueEntry = external_exports.object({
+  taskId: TaskId,
+  position: external_exports.number().int().nonnegative(),
+  state: external_exports.enum(["waiting", "merging", "merged", "conflict", "failed"]),
+  conflictPaths: external_exports.array(external_exports.string()).default([]),
+  updatedAt: Timestamp
+});
+var SessionSnapshot = external_exports.object({
+  session: Session,
+  participants: external_exports.array(Participant),
+  decomposition: Decomposition.nullable(),
+  validation: ValidationReport.nullable(),
+  tasks: external_exports.array(Task),
+  leases: external_exports.array(Lease),
+  handoffs: external_exports.array(HandoffRequest),
+  chat: external_exports.array(ChatMessage),
+  mergeQueue: external_exports.array(MergeQueueEntry),
+  seq: external_exports.number().int().nonnegative()
+});
+
+// packages/protocol/dist/events.js
+var EventBody = external_exports.discriminatedUnion("type", [
+  // -- session lifecycle ----------------------------------------------------
+  external_exports.object({ type: external_exports.literal("session.created"), session: Session }),
+  external_exports.object({ type: external_exports.literal("session.phase"), phase: SessionPhase }),
+  external_exports.object({ type: external_exports.literal("session.lead"), leadId: ParticipantId }),
+  // -- participants ---------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("participant.joined"), participant: Participant }),
+  external_exports.object({ type: external_exports.literal("participant.left"), participantId: ParticipantId }),
+  external_exports.object({
+    type: external_exports.literal("participant.connection"),
+    participantId: ParticipantId,
+    connected: external_exports.boolean()
+  }),
+  external_exports.object({
+    type: external_exports.literal("participant.activity"),
+    participantId: ParticipantId,
+    activity: ParticipantActivity
+  }),
+  /** A checkout was paired to an existing participant via /ss:join. */
+  external_exports.object({
+    type: external_exports.literal("participant.attached"),
+    participantId: ParticipantId,
+    repoPath: external_exports.string().min(1)
+  }),
+  // -- decomposition --------------------------------------------------------
+  external_exports.object({
+    type: external_exports.literal("decomposition.proposed"),
+    decomposition: Decomposition,
+    validation: ValidationReport
+  }),
+  external_exports.object({
+    type: external_exports.literal("decomposition.approval"),
+    participantId: ParticipantId,
+    approvals: external_exports.array(ParticipantId),
+    /** True once the approval rule is satisfied: unanimous at <=3, lead above. */
+    satisfied: external_exports.boolean()
+  }),
+  external_exports.object({
+    type: external_exports.literal("decomposition.rejected"),
+    participantId: ParticipantId,
+    reason: external_exports.string().max(500)
+  }),
+  external_exports.object({
+    type: external_exports.literal("contract.committed"),
+    branch: external_exports.string().min(1),
+    commitSha: external_exports.string().min(1),
+    prNumber: external_exports.number().int().nullable()
+  }),
+  // -- tasks ----------------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("tasks.seeded"), tasks: external_exports.array(Task) }),
+  external_exports.object({
+    type: external_exports.literal("task.state"),
+    taskId: TaskId,
+    state: TaskState,
+    ownerId: ParticipantId.nullable()
+  }),
+  external_exports.object({
+    type: external_exports.literal("task.branch"),
+    taskId: TaskId,
+    branch: external_exports.string().min(1),
+    prNumber: external_exports.number().int().nullable()
+  }),
+  external_exports.object({ type: external_exports.literal("task.test"), taskId: TaskId, result: TestResult }),
+  // -- leases ---------------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("lease.granted"), lease: Lease }),
+  external_exports.object({
+    type: external_exports.literal("lease.released"),
+    taskId: TaskId,
+    holderId: ParticipantId
+  }),
+  /**
+   * Emitted when the PreToolUse hook blocks a write. Surfaced on the board and
+   * in chat, because a stream of these means the decomposition drew the seam in
+   * the wrong place and something needs hoisting into the contract.
+   */
+  external_exports.object({
+    type: external_exports.literal("lease.denied"),
+    participantId: ParticipantId,
+    path: external_exports.string().min(1),
+    heldBy: ParticipantId.nullable(),
+    heldByTaskId: TaskId.nullable()
+  }),
+  external_exports.object({ type: external_exports.literal("handoff.requested"), request: HandoffRequest }),
+  external_exports.object({
+    type: external_exports.literal("handoff.resolved"),
+    requestId: external_exports.string().min(1),
+    granted: external_exports.boolean(),
+    resolvedBy: ParticipantId
+  }),
+  // -- chat -----------------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("chat.message"), message: ChatMessage }),
+  // -- merge queue ----------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("merge.queue"), entries: external_exports.array(MergeQueueEntry) }),
+  external_exports.object({
+    type: external_exports.literal("merge.conflict"),
+    taskId: TaskId,
+    paths: external_exports.array(external_exports.string()),
+    /** Handed to the owning dev's Claude via /ss:resolve. */
+    detail: external_exports.string()
+  }),
+  external_exports.object({
+    type: external_exports.literal("integration.pr"),
+    prNumber: external_exports.number().int(),
+    url: external_exports.string()
+  })
+]);
+var EventEnvelope = external_exports.object({
+  seq: Seq,
+  sessionId: SessionId,
+  /** Who caused it; null for server-originated events (merge queue, webhooks). */
+  actorId: ParticipantId.nullable(),
+  ts: Timestamp,
+  body: EventBody
+});
+
+// packages/protocol/dist/commands.js
+var ClientCommand = external_exports.discriminatedUnion("type", [
+  external_exports.object({
+    type: external_exports.literal("session.create"),
+    slug: external_exports.string().min(1),
+    title: external_exports.string().min(1),
+    repo: RepoRef,
+    issueRef: external_exports.string().nullable().default(null)
+  }),
+  external_exports.object({
+    type: external_exports.literal("session.join"),
+    /** Either works; the plugin has the slug, the board has the id. */
+    sessionRef: external_exports.string().min(1),
+    /**
+     * Only used when the caller is unauthenticated. An authenticated join takes
+     * its identity from the credential, so the board sends neither.
+     */
+    githubLogin: external_exports.string().min(1).nullish().default(null),
+    displayName: external_exports.string().min(1).nullish().default(null),
+    /**
+     * The checkout being attached. Null when joining from the board with no
+     * checkout. Rejected if another connected participant reports the same path.
+     */
+    repoPath: external_exports.string().min(1).nullable().default(null),
+    /** Replay from here instead of receiving a full snapshot. */
+    fromSeq: Seq.nullable().default(null)
+  }),
+  external_exports.object({ type: external_exports.literal("session.sync"), fromSeq: Seq }),
+  external_exports.object({
+    type: external_exports.literal("decomposition.propose"),
+    contract: Contract,
+    tasks: external_exports.array(TaskSpec).min(1),
+    participantCount: external_exports.number().int().min(1),
+    issueRef: external_exports.string().nullable().default(null)
+  }),
+  external_exports.object({ type: external_exports.literal("decomposition.approve"), decompositionId: DecompositionId }),
+  external_exports.object({
+    type: external_exports.literal("decomposition.reject"),
+    decompositionId: DecompositionId,
+    reason: external_exports.string().max(500)
+  }),
+  external_exports.object({
+    type: external_exports.literal("contract.committed"),
+    branch: external_exports.string().min(1),
+    commitSha: external_exports.string().min(1),
+    prNumber: external_exports.number().int().nullable().default(null)
+  }),
+  /** Omit taskId to be handed the best ready task by affinity. */
+  external_exports.object({ type: external_exports.literal("task.claim"), taskId: TaskId.nullable().default(null) }),
+  external_exports.object({ type: external_exports.literal("task.release"), taskId: TaskId }),
+  external_exports.object({
+    type: external_exports.literal("task.progress"),
+    taskId: TaskId,
+    state: TaskState.nullable().default(null),
+    activityLine: external_exports.string().max(120)
+  }),
+  external_exports.object({ type: external_exports.literal("task.testResult"), taskId: TaskId, result: TestResult }),
+  external_exports.object({
+    type: external_exports.literal("task.branch"),
+    taskId: TaskId,
+    branch: external_exports.string().min(1),
+    prNumber: external_exports.number().int().nullable().default(null)
+  }),
+  /**
+   * The task's work is in the contract branch. This is what unblocks whatever
+   * was waiting on it, so it is the event that actually moves the DAG.
+   */
+  external_exports.object({ type: external_exports.literal("task.merged"), taskId: TaskId }),
+  /** Called by the PreToolUse hook before every Edit/Write. Must be fast. */
+  external_exports.object({ type: external_exports.literal("lease.check"), paths: external_exports.array(external_exports.string().min(1)).min(1) }),
+  external_exports.object({
+    type: external_exports.literal("handoff.request"),
+    path: external_exports.string().min(1),
+    reason: external_exports.string().max(280).default("")
+  }),
+  external_exports.object({
+    type: external_exports.literal("handoff.resolve"),
+    requestId: external_exports.string().min(1),
+    granted: external_exports.boolean()
+  }),
+  external_exports.object({
+    type: external_exports.literal("chat.post"),
+    body: external_exports.string().min(1).max(8e3),
+    /** Explicit ref; a `#task-id` in the body is also parsed server-side. */
+    taskRef: TaskId.nullable().default(null),
+    asAgent: external_exports.boolean().default(false),
+    /** Deliver this into the other participants' Claude Code sessions. */
+    directive: external_exports.boolean().default(false)
+  }),
+  external_exports.object({
+    type: external_exports.literal("chat.read"),
+    limit: external_exports.number().int().min(1).max(200).default(50),
+    beforeSeq: Seq.nullable().default(null),
+    taskRef: TaskId.nullable().default(null)
+  }),
+  external_exports.object({
+    type: external_exports.literal("activity.report"),
+    activity: ParticipantActivity.omit({ updatedAt: true })
+  })
+]);
+var LeaseDenial = external_exports.object({
+  path: external_exports.string(),
+  heldBy: ParticipantId.nullable(),
+  heldByTaskId: TaskId.nullable(),
+  /** Rendered verbatim by the hook into Claude's deny message. */
+  message: external_exports.string()
+});
+var LeaseCheckResult = external_exports.object({
+  allowed: external_exports.boolean(),
+  denials: external_exports.array(LeaseDenial)
+});
+var JoinResult = external_exports.object({
+  participantId: ParticipantId,
+  sessionId: SessionId,
+  /** Present on a cold join; omitted when resuming from `fromSeq`. */
+  snapshot: SessionSnapshot.nullable()
+});
+var ProposeResult = external_exports.object({
+  decompositionId: DecompositionId,
+  validation: ValidationReport
+});
+var ClaimResult = external_exports.object({
+  task: Task.nullable(),
+  lease: Lease.nullable(),
+  /** Why nothing was handed over: everything blocked, or the claim cap is hit. */
+  reason: external_exports.string().nullable()
+});
+
+// packages/protocol/dist/transport.js
+var ActivityFrame = external_exports.discriminatedUnion("type", [
+  /** One line of what an agent is doing right now. Renders on the DAG node. */
+  external_exports.object({
+    type: external_exports.literal("agent.line"),
+    from: ParticipantId,
+    taskId: TaskId.nullable(),
+    text: external_exports.string().max(200),
+    ts: Timestamp
+  }),
+  /** Which task a participant is looking at, for presence on the board. */
+  external_exports.object({
+    type: external_exports.literal("attention"),
+    from: ParticipantId,
+    taskId: TaskId.nullable(),
+    ts: Timestamp
+  }),
+  /** Unified-diff preview before a task opens its PR. */
+  external_exports.object({
+    type: external_exports.literal("diff.preview"),
+    from: ParticipantId,
+    taskId: TaskId,
+    files: external_exports.array(external_exports.object({ path: external_exports.string(), added: external_exports.number(), removed: external_exports.number() })),
+    ts: Timestamp
+  }),
+  external_exports.object({
+    type: external_exports.literal("typing"),
+    from: ParticipantId,
+    active: external_exports.boolean(),
+    ts: Timestamp
+  })
+]);
+
+// packages/protocol/dist/wire.js
+var PROTOCOL_VERSION = 1;
+var ErrorCode = external_exports.enum([
+  "bad_request",
+  "unauthorized",
+  "not_found",
+  "conflict",
+  // lost a claim race, duplicate repoPath, stale decomposition
+  "forbidden",
+  // e.g. approving on someone else's behalf
+  "not_ready",
+  // command valid but wrong session phase
+  "internal"
+]);
+var ClientMessage = external_exports.discriminatedUnion("kind", [
+  external_exports.object({
+    kind: external_exports.literal("cmd"),
+    v: external_exports.literal(PROTOCOL_VERSION),
+    /** Correlates with the ack. Client-generated, unique per connection. */
+    reqId: external_exports.string().min(1),
+    command: ClientCommand
+  }),
+  /**
+   * Ephemeral activity, relayed not persisted. This is the `ws-fanout`
+   * ActivityTransport: it works from day one and is what a WebRTC mesh
+   * replaces later without anything upstream noticing.
+   */
+  external_exports.object({
+    kind: external_exports.literal("frame"),
+    v: external_exports.literal(PROTOCOL_VERSION),
+    frame: ActivityFrame
+  }),
+  external_exports.object({ kind: external_exports.literal("ping"), ts: external_exports.number() })
+]);
+var ServerMessage = external_exports.discriminatedUnion("kind", [
+  external_exports.object({
+    kind: external_exports.literal("ack"),
+    reqId: external_exports.string(),
+    data: external_exports.unknown()
+  }),
+  external_exports.object({
+    kind: external_exports.literal("err"),
+    reqId: external_exports.string(),
+    code: ErrorCode,
+    message: external_exports.string()
+  }),
+  /** Live broadcast of a newly appended event. */
+  external_exports.object({ kind: external_exports.literal("event"), event: EventEnvelope }),
+  /**
+   * Ordered backlog after a reconnect. Clients apply these before any buffered
+   * live events, then resume from `upToSeq`.
+   */
+  external_exports.object({
+    kind: external_exports.literal("sync"),
+    events: external_exports.array(EventEnvelope),
+    upToSeq: Seq,
+    /** More batches follow; keep buffering live events until the last one. */
+    more: external_exports.boolean()
+  }),
+  /** Relayed activity from another participant. Never persisted, never ordered. */
+  external_exports.object({ kind: external_exports.literal("frame"), frame: ActivityFrame }),
+  external_exports.object({ kind: external_exports.literal("pong"), ts: external_exports.number() })
+]);
+
+// packages/plugin/src/daemon.ts
+var STATE_DIR = process.env.SESSION_SHARE_HOME ?? join2(homedir(), ".session-share");
+var DAEMON_FILE = join2(STATE_DIR, "daemon.json");
+var SECRET_FILE = join2(STATE_DIR, "secret");
+var DB_FILE = join2(STATE_DIR, "sessions.db");
+var LOG_FILE = join2(STATE_DIR, "server.log");
+var DEFAULT_PORT = Number(process.env.SESSION_SHARE_PORT ?? 4310);
+
+// packages/plugin/src/inbox.ts
+var INBOX_FILE = join3(STATE_DIR, "inbox.json");
+function cursorKey(config2) {
+  return `${config2.serverUrl}|${config2.sessionRef}|${config2.participantId}`;
+}
+function readCursors() {
+  if (!existsSync3(INBOX_FILE)) return {};
+  try {
+    return JSON.parse(readFileSync3(INBOX_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function writeCursor(key, value) {
+  mkdirSync3(STATE_DIR, { recursive: true });
+  writeFileSync3(INBOX_FILE, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
+`);
+}
+function markCaughtUp(config2, at = Date.now()) {
+  writeCursor(cursorKey(config2), at);
+}
+async function pendingDirectives(config2, timeoutMs = 2500) {
+  const key = cursorKey(config2);
+  const cursor = readCursors()[key];
+  if (cursor === void 0) {
+    markCaughtUp(config2);
+    return [];
+  }
+  const { messages } = await runCommand(
+    config2,
+    { type: "chat.read", limit: 50, beforeSeq: null, taskRef: null },
+    timeoutMs
+  );
+  const pending = messages.filter(
+    (message) => message.directive && message.createdAt > cursor && message.authorId !== config2.participantId && (message.mentions.length === 0 || message.mentions.includes(config2.participantId))
+  );
+  if (pending.length > 0) {
+    writeCursor(key, Math.max(...pending.map((message) => message.createdAt)));
+  }
+  return pending;
+}
+function describeDirectives(messages, names) {
+  const lines = messages.map((message) => {
+    const author = message.authorId && names.get(message.authorId) || "a teammate";
+    const scope = message.taskRef ? ` (about #${message.taskRef})` : "";
+    return `- ${author}${scope}: ${message.body}`;
+  });
+  return [
+    `[session-share] ${messages.length === 1 ? "A teammate sent an instruction" : `${messages.length} instructions arrived`} in the session room:`,
+    "",
+    ...lines,
+    "",
+    "Act on it in this repository now. Your file leases still apply, so an edit outside your task will be refused.",
+    "Reply in the room with ss_chat_post when you are done or if you need something from them."
+  ].join("\n");
+}
+
+// packages/plugin/src/preferences.ts
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname3, join as join4 } from "node:path";
+var Preferences = external_exports.object({
+  /**
+   * explicit: nothing is committed until you run /ss:done.
+   * auto-on-green: the agent commits when it reports a passing acceptance test.
+   */
+  commitPolicy: external_exports.enum(["explicit", "auto-on-green"]).default("explicit"),
+  /** Push branches to origin. Off means two clones never exchange code. */
+  push: external_exports.boolean().default(true),
+  /** Open a pull request per task, and one for the finished session. */
+  openPullRequests: external_exports.boolean().default(true),
+  /** Whether hosting binds the local network or only this machine. */
+  expose: external_exports.enum(["lan", "loopback"]).default("lan"),
+  /** Open the live board automatically when you host or join. */
+  openBoard: external_exports.boolean().default(true),
+  /**
+   * Let messages sent to the room as directives run in this Claude Code
+   * session. Off makes the room read-only: you still see everything, but
+   * nothing anyone types reaches your agent.
+   */
+  acceptDirectives: external_exports.boolean().default(true),
+  /** Set once the setup questions have been answered. */
+  configured: external_exports.boolean().default(false)
+});
+var PREFERENCES_PATH = join4(STATE_DIR, "preferences.json");
+function readPreferences() {
+  if (!existsSync4(PREFERENCES_PATH)) return Preferences.parse({});
+  try {
+    return Preferences.parse(JSON.parse(readFileSync4(PREFERENCES_PATH, "utf8")));
+  } catch {
+    return Preferences.parse({});
+  }
+}
+
 // packages/plugin/src/hook.ts
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 var TIMEOUT_MS = 1500;
+var ROOM_TIMEOUT_MS = 2500;
 function extractPaths(toolInput) {
   if (!toolInput) return [];
   const paths = [];
@@ -14612,7 +15289,7 @@ function extractPaths(toolInput) {
   return paths;
 }
 function toRepoRelative(repoPath, cwd, filePath) {
-  const absolute = resolve2(cwd, filePath);
+  const absolute = resolve3(cwd, filePath);
   return relative(repoPath, absolute).split("\\").join("/");
 }
 async function decide(input) {
@@ -14642,6 +15319,57 @@ async function decide(input) {
     }
   };
 }
+async function participantNames(config2) {
+  try {
+    const response = await fetch(new URL(`/sessions/${config2.sessionRef}/snapshot`, config2.serverUrl), {
+      headers: config2.participantToken ? { authorization: `Bearer ${config2.participantToken}` } : {},
+      signal: AbortSignal.timeout(ROOM_TIMEOUT_MS)
+    });
+    if (!response.ok) return /* @__PURE__ */ new Map();
+    const snapshot = await response.json();
+    return new Map(snapshot.participants.map((p) => [p.id, p.displayName]));
+  } catch {
+    return /* @__PURE__ */ new Map();
+  }
+}
+async function collectRoom(input) {
+  const config2 = readConfig(input.cwd ?? process.cwd());
+  if (!config2) return null;
+  if (!readPreferences().acceptDirectives) return null;
+  let pending;
+  try {
+    pending = await pendingDirectives(config2, ROOM_TIMEOUT_MS);
+  } catch {
+    return null;
+  }
+  if (pending.length === 0) return null;
+  return describeDirectives(pending, await participantNames(config2));
+}
+async function route(input) {
+  const event = input.hook_event_name ?? (input.tool_name ? "PreToolUse" : "");
+  switch (event) {
+    case "PreToolUse":
+      return decide(input);
+    /**
+     * The turn is over and the agent is about to go idle -- the one moment it
+     * can be handed work without a human typing. Blocking here makes Claude
+     * continue with the directive as its instruction.
+     */
+    case "Stop": {
+      if (input.stop_hook_active) return null;
+      const reason = await collectRoom(input);
+      return reason ? { decision: "block", reason } : null;
+    }
+    // The human is already talking to the agent; ride along rather than interrupt.
+    case "UserPromptSubmit":
+    case "SessionStart": {
+      const additionalContext = await collectRoom(input);
+      return additionalContext ? { hookSpecificOutput: { hookEventName: event, additionalContext } } : null;
+    }
+    default:
+      return null;
+  }
+}
 async function readStdin() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
@@ -14656,12 +15384,14 @@ if (isEntrypoint) {
   } catch {
     process.exit(0);
   }
-  const output = await decide(input);
+  const output = await route(input);
   if (output) process.stdout.write(JSON.stringify(output));
   process.exit(0);
 }
 export {
+  collectRoom,
   decide,
   extractPaths,
+  route,
   toRepoRelative
 };

@@ -63300,6 +63300,14 @@ var ChatMessage = external_exports.object({
   /** Set by a `#<task-id>` ref; links the message to a DAG node. */
   taskRef: TaskId.nullable(),
   mentions: external_exports.array(ParticipantId).default([]),
+  /**
+   * A directive is addressed to the other people's *agents*, not to the people:
+   * their Claude Code picks it up and acts on it, which is what makes the room
+   * usable as a shared terminal rather than only as a place to talk. Mentions
+   * narrow it to specific participants; with none it goes to everyone but the
+   * author.
+   */
+  directive: external_exports.boolean().default(false),
   createdAt: Timestamp
 });
 var MergeQueueEntry = external_exports.object({
@@ -63523,7 +63531,9 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     body: external_exports.string().min(1).max(8e3),
     /** Explicit ref; a `#task-id` in the body is also parsed server-side. */
     taskRef: TaskId.nullable().default(null),
-    asAgent: external_exports.boolean().default(false)
+    asAgent: external_exports.boolean().default(false),
+    /** Deliver this into the other participants' Claude Code sessions. */
+    directive: external_exports.boolean().default(false)
   }),
   external_exports.object({
     type: external_exports.literal("chat.read"),
@@ -64411,6 +64421,9 @@ function upsertUser(store, profile) {
   store.saveUser(user);
   return user;
 }
+function serverFingerprint(config2) {
+  return createHmac("sha256", config2.secret).update("session-share/server-id").digest("hex").slice(0, 16);
+}
 function loadAuthConfig(env = process.env) {
   const githubClientId = env.GITHUB_CLIENT_ID ?? null;
   return {
@@ -65151,6 +65164,7 @@ var SessionService = class {
       body: command.body,
       taskRef: command.taskRef ?? refs[0] ?? null,
       mentions: parseMentions(command.body, loginToId),
+      directive: command.directive,
       createdAt: Date.now()
     };
     this.emit(sessionId, participantId, { type: "chat.message", message });
@@ -65486,7 +65500,11 @@ function createApp(options = {}) {
     if (redirectTo) return reply.redirect(redirectTo);
     return reply.send({ user: toAuthUser(user) });
   };
-  fastify.get("/healthz", async () => ({ ok: true }));
+  fastify.get("/healthz", async () => ({
+    ok: true,
+    mode: auth.mode,
+    serverId: serverFingerprint(auth)
+  }));
   fastify.get("/auth/github", async (request, reply) => {
     if (!auth.githubClientId) {
       return reply.code(503).send({
@@ -65717,7 +65735,11 @@ function createApp(options = {}) {
     }
     const claims = readInvite(auth, parsed.data.invite);
     if (!claims) {
-      return reply.code(401).send({ error: "unauthorized", message: "That invite is not valid for this server." });
+      return reply.code(401).send({
+        error: "unauthorized",
+        message: `That invite was not signed by this server (${serverFingerprint(auth)}). If a teammate sent it, the address inside it is pointing at your own machine -- ask them to re-run /ss:host so the invite carries their network address.`,
+        serverId: serverFingerprint(auth)
+      });
     }
     const state = service.state(claims.sessionId);
     if (!state.session) return reply.code(404).send({ error: "not_found" });
