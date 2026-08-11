@@ -1,0 +1,28 @@
+#!/bin/sh
+#
+# Refuses to push a plugin bundle that no longer matches the source.
+#
+# Teammates install the committed bundle, so this is the moment the mistake
+# stops being local. The check is a hash comparison and costs milliseconds; only
+# a genuinely stale bundle triggers a rebuild.
+
+if ! node scripts/check-bundle.mjs --quiet 2>/dev/null; then
+  echo ""
+  echo "The plugin bundle is out of date. Rebuilding it now..."
+  echo ""
+
+  if ! pnpm bundle; then
+    echo ""
+    echo "Bundle failed. Fix the build, then push again."
+    exit 1
+  fi
+
+  echo ""
+  echo "Rebuilt. Commit it and push again:"
+  echo ""
+  echo "  git add packages/plugin/bundle && git commit -m 'chore: rebuild plugin bundle'"
+  echo ""
+  exit 1
+fi
+
+exit 0

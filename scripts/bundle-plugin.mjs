@@ -11,10 +11,11 @@
  * is built into Node. A native database driver would have made a
  * dependency-free bundle impossible.
  */
-import { cpSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
+import { computeHash } from './bundle-hash.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const out = join(root, 'packages/plugin/bundle')
@@ -71,6 +72,9 @@ if (!existsSync(webOut)) {
 }
 console.log('copying the board…')
 cpSync(webOut, join(out, 'web'), { recursive: true })
+
+// Stamped last, so a bundle that failed halfway is never marked current.
+writeFileSync(join(out, '.stamp'), `${computeHash()}\n`)
 
 const sizes = ['server/index.js', 'mcp.js', 'hook.js'].map((file) => {
   const bytes = statSync(join(out, file)).size

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "turbo run build",
+    "prepare": "git config core.hooksPath .githooks || true",
     "dev": "turbo run dev",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
@@ -16,7 +17,8 @@
     "bundle": "turbo run build && pnpm --filter @session-share/web export && node scripts/bundle-plugin.mjs",
     "server": "turbo run build && pnpm --filter @session-share/server start",
     "attach": "node scripts/attach.mjs",
-    "lint": "turbo run lint"
+    "lint": "turbo run lint",
+    "check-bundle": "node scripts/check-bundle.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

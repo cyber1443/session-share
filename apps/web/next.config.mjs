@@ -12,9 +12,18 @@ const isExport = process.env.SESSION_SHARE_EXPORT === '1'
 
 /** @type {import('next').NextConfig} */
 const config = isExport
-  ? // Directory-style output (`board/index.html`) so a plain static file server
-    // resolves `/board` without needing rewrite rules of its own.
-    { output: 'export', trailingSlash: true, images: { unoptimized: true } }
+  ? {
+      output: 'export',
+      // Directory-style output (`board/index.html`) so a plain static file
+      // server resolves `/board` without rewrite rules of its own.
+      trailingSlash: true,
+      images: { unoptimized: true },
+      /**
+       * The export is committed, so a random build id per run would rewrite
+       * every asset path and churn the diff on rebuilds that changed nothing.
+       */
+      generateBuildId: () => 'session-share',
+    }
   : {
       async rewrites() {
         return [
