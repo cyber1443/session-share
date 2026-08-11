@@ -276,6 +276,15 @@ export function upsertUser(store: Store, profile: Omit<User, 'id'>): User {
   return user
 }
 
+/**
+ * A public, non-reversible name for this server's signing key. Two servers with
+ * different secrets cannot honour each other's invites, so publishing the
+ * fingerprint lets a client work out *which* server it reached before it tries.
+ */
+export function serverFingerprint(config: AuthConfig): string {
+  return createHmac('sha256', config.secret).update('session-share/server-id').digest('hex').slice(0, 16)
+}
+
 export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig {
   const githubClientId = env.GITHUB_CLIENT_ID ?? null
   return {

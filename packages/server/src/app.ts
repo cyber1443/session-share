@@ -30,6 +30,7 @@ import {
   readInvite,
   readParticipantToken,
   readUserIdFromCookies,
+  serverFingerprint,
   upsertUser,
   type AuthConfig,
   type User,
@@ -153,7 +154,11 @@ export function createApp(options: AppOptions = {}): App {
     return reply.send({ user: toAuthUser(user) })
   }
 
-  fastify.get('/healthz', async () => ({ ok: true }))
+  fastify.get('/healthz', async () => ({
+    ok: true,
+    mode: auth.mode,
+    serverId: serverFingerprint(auth),
+  }))
 
   // -- sign in -------------------------------------------------------------
 
@@ -469,9 +474,19 @@ export function createApp(options: AppOptions = {}): App {
 
     const claims = readInvite(auth, parsed.data.invite)
     if (!claims) {
-      return reply
-        .code(401)
-        .send({ error: 'unauthorized', message: 'That invite is not valid for this server.' })
+      /**
+       * Nearly always this is not a bad token but the wrong server: the address
+       * inside the invite resolved to the guest's own machine. Say so, because
+       * from here "invalid" and "not mine" look identical.
+       */
+      return reply.code(401).send({
+        error: 'unauthorized',
+        message:
+          `That invite was not signed by this server (${serverFingerprint(auth)}). ` +
+          'If a teammate sent it, the address inside it is pointing at your own machine -- ' +
+          'ask them to re-run /ss:host so the invite carries their network address.',
+        serverId: serverFingerprint(auth),
+      })
     }
 
     const state = service.state(claims.sessionId)

@@ -133,6 +133,43 @@ describe('peer sessions', () => {
     assert.equal(joined.status, 401)
   })
 
+  /**
+   * The commonest cause of a rejected invite is not a bad token but the wrong
+   * server -- the guest dialled a loopback address and reached their own. The
+   * refusal has to name that, because from inside it is indistinguishable.
+   */
+  it('names itself when it refuses, so a guest can tell it is the wrong server', async () => {
+    const health = await (await fetch(new URL('/healthz', baseUrl))).json()
+    assert.match(health.serverId, /^[0-9a-f]{16}$/)
+    assert.equal(health.mode, 'peer')
+
+    const other = createApp({
+      dbPath: ':memory:',
+      webRoot: null,
+      auth: { mode: 'peer', secret: 'a-different-machine' },
+    })
+    const otherUrl = await other.listen(0)
+    const otherHealth = await (await fetch(new URL('/healthz', otherUrl), {})).json()
+    assert.notEqual(otherHealth.serverId, health.serverId, 'two secrets, two identities')
+
+    // A perfectly good invite, presented to the machine that did not mint it.
+    const response = await fetch(new URL('/api/peer/join', otherUrl), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        invite,
+        githubLogin: 'guest',
+        displayName: 'Guest',
+        repoPath: null,
+      }),
+    })
+    const payload = await response.json()
+    assert.equal(response.status, 401)
+    assert.equal(payload.serverId, otherHealth.serverId)
+    assert.match(payload.message, /pointing at your own machine/)
+    await other.close()
+  })
+
   it('still refuses two people in one working tree', async () => {
     const joined = await post('/api/peer/join', {
       invite,
