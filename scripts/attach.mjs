@@ -1,10 +1,14 @@
 /**
- * Wires a target repository up to session-share for a real Claude Code run:
- * the MCP server, the PreToolUse lease gate, and the /ss:* commands.
+ * Wires a target repository up to a checkout of THIS repo, for developing
+ * session-share itself.
  *
  *   pnpm attach /path/to/your/repo
  *
- * Everything it writes is additive -- existing settings, hooks and MCP servers
+ * Anyone who just wants to use it should install the plugin instead -- see the
+ * README -- which needs no clone and no build. This exists so changes here take
+ * effect immediately without reinstalling.
+ *
+ * Everything it writes is additive: existing settings, hooks and MCP servers
  * are merged, never replaced. Re-running it is safe.
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
@@ -23,11 +27,11 @@ if (!existsSync(repo)) {
 }
 
 const pluginRoot = resolve(dirname(new URL(import.meta.url).pathname), '..', 'packages', 'plugin')
-const hookPath = join(pluginRoot, 'dist', 'hook.js')
-const mcpPath = join(pluginRoot, 'dist', 'mcp.js')
+const hookPath = join(pluginRoot, 'bundle', 'hook.js')
+const mcpPath = join(pluginRoot, 'bundle', 'mcp.js')
 
 if (!existsSync(hookPath) || !existsSync(mcpPath)) {
-  console.error('Build first: pnpm build')
+  console.error('Bundle first: pnpm bundle')
   process.exit(1)
 }
 

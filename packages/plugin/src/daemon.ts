@@ -89,7 +89,9 @@ function serverEntrypoint(): string {
   const here = dirname(fileURLToPath(import.meta.url))
   const candidates = [
     process.env.SESSION_SHARE_SERVER_ENTRY,
-    // Packaged: the server is vendored next to the plugin's own dist.
+    // Installed plugin: this file is bundle/mcp.js, the server is bundle/server.
+    resolve(here, 'server/index.js'),
+    // Unbundled build inside the plugin directory.
     resolve(here, '../server/index.js'),
     // In the monorepo: packages/plugin/dist -> packages/server/dist.
     resolve(here, '../../server/dist/index.js'),

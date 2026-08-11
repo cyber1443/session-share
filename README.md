@@ -24,6 +24,31 @@ Each dev keeps their own Claude account, their own quota and their own GitHub id
 | **P5** GitHub App, PRs, merge queue | not started | |
 | **P6** Final integration PR | not started | |
 
+## Installing
+
+Your teammate does not clone this repository. They install the plugin, once,
+in their own Claude Code:
+
+```
+/plugin marketplace add <owner>/session-share
+/plugin install ss@session-share
+```
+
+That is the whole install. No `pnpm`, no build, no Node modules — the plugin
+ships prebuilt: the coordination server, the MCP tools and the lease-gate hook
+are each bundled into a single dependency-free file, with the board vendored
+beside them. Claude Code clones the marketplace repo and runs nothing.
+
+(This is only possible because the server keeps state in `node:sqlite`, which is
+built into Node. A native database driver would have meant a compile step on
+every machine.)
+
+They still clone **the project you are working on together** — one checkout per
+person, which the lease gate depends on. Just not this repo.
+
+For local development of session-share itself, `pnpm bundle && pnpm attach
+/path/to/repo` wires a checkout straight to your working copy instead.
+
 ## Two ways to run it
 
 **Peer** is the default and needs no setup at all. One person runs `/ss:host`;

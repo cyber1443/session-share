@@ -144,7 +144,7 @@ export function createServer(): McpServer {
           'Send your teammate this line:',
           `  /ss:join ${packed}`,
           '',
-          `Board: ${daemon.url}/?join=${packed}`,
+          `Board: ${daemon.url}/board/?join=${packed}`,
           '',
           reachable
             ? 'Bound to loopback only, so nobody else can reach it. Re-run with expose="lan" to let a teammate on your network in.'
@@ -191,7 +191,7 @@ export function createServer(): McpServer {
       return text(
         [
           `Joined "${result.sessionTitle}" as ${result.displayName}.`,
-          packed ? `Board: ${packed.url}/?join=${trimmed}` : '',
+          packed ? `Board: ${packed.url}/board/?join=${trimmed}` : '',
           `Config at ${path}.`,
           `Every edit in ${basename(root)} is now checked against the session's file leases.`,
         ]

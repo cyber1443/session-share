@@ -13,12 +13,13 @@
     "test": "turbo run test",
     "demo": "turbo run build && node --disable-warning=ExperimentalWarning scripts/demo.mjs",
     "peer-demo": "pnpm bundle && node --disable-warning=ExperimentalWarning scripts/peer-demo.mjs",
-    "bundle": "turbo run build && pnpm --filter @session-share/web export",
+    "bundle": "turbo run build && pnpm --filter @session-share/web export && node scripts/bundle-plugin.mjs",
     "server": "turbo run build && pnpm --filter @session-share/server start",
     "attach": "node scripts/attach.mjs",
     "lint": "turbo run lint"
   },
   "devDependencies": {
+    "esbuild": "^0.28.2",
     "turbo": "^2.3.3",
     "typescript": "^5.7.2"
   }

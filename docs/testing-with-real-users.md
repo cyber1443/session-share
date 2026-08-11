@@ -8,11 +8,28 @@ There are two ways to do this. Start with the first.
 
 Both people install the plugin. One hosts, the other pastes one string.
 
-```bash
-# once, on each machine
-pnpm bundle                        # builds the server and the board
-pnpm attach ~/work/web-mine        # wires this checkout up to Claude Code
+### Installing, per person
+
+Push this repository somewhere they can reach it (GitHub, private is fine), then
+each of them runs, once, in Claude Code:
+
 ```
+/plugin marketplace add <owner>/session-share
+/plugin install ss@session-share
+```
+
+Nothing else. The plugin arrives prebuilt — the server, the MCP tools and the
+lease gate are single dependency-free files and the board is vendored beside
+them, so there is no `pnpm install` and no build on their machine.
+
+They do clone **the project repo you are collaborating on** — one checkout each,
+which the lease gate depends on. They do not clone session-share.
+
+*Developing session-share itself?* `pnpm bundle && pnpm attach ~/work/web-mine`
+points a checkout at your working copy instead, so edits take effect without
+reinstalling.
+
+### Starting the session
 
 **Host**, in Claude Code inside their clone:
 
