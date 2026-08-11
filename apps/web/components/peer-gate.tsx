@@ -17,16 +17,24 @@ export interface PeerSeat {
  */
 export function PeerGate({ onSeated }: { onSeated: (seat: PeerSeat) => void }) {
   const { value: invite, ready } = useQueryParam('join')
+  /**
+   * When the plugin opened this page it already knows who you are -- it just
+   * joined the session as you. Asking again would make "the board opens by
+   * itself" mean "the board opens and then asks you a question".
+   */
+  const { value: known, ready: knownReady } = useQueryParam('as')
   const [handle, setHandle] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [seating, setSeating] = useState(false)
 
   useEffect(() => {
     setHandle(window.localStorage.getItem('session-share.handle') ?? '')
   }, [])
 
-  const join = async () => {
-    if (!invite) return
+  const join = async (as?: string) => {
+    const name = (as ?? handle).trim()
+    if (!invite || !name) return
     setBusy(true)
     setError(null)
     try {
@@ -35,22 +43,31 @@ export function PeerGate({ onSeated }: { onSeated: (seat: PeerSeat) => void }) {
        * page is served BY that server, so only the token inside matters here.
        */
       const token = unpackInvite(invite)?.token ?? invite
-      const result = await api.peerJoin(token, {
-        githubLogin: handle.trim(),
-        displayName: handle.trim(),
-      })
+      const result = await api.peerJoin(token, { githubLogin: name, displayName: name })
       peerToken.set(result.participantToken)
-      window.localStorage.setItem('session-share.handle', handle.trim())
+      window.localStorage.setItem('session-share.handle', name)
       stripQueryParam('join')
+      stripQueryParam('as')
       onSeated({ sessionRef: result.sessionRef, displayName: result.displayName })
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'could not join')
     } finally {
       setBusy(false)
+      setSeating(false)
     }
   }
 
-  if (!ready) return <div className="p-6 text-xs text-mute">…</div>
+  // Seat the known handle once, and fall back to the form if it is refused.
+  useEffect(() => {
+    if (!ready || !knownReady || seating) return
+    if (!invite || !known?.trim()) return
+    setSeating(true)
+    void join(known)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, knownReady, invite, known])
+
+  if (!ready || !knownReady) return <div className="p-6 text-xs text-mute">…</div>
+  if (seating && !error) return <div className="p-6 text-xs text-mute">joining as {known}…</div>
 
   if (!invite) {
     return (
@@ -85,7 +102,11 @@ export function PeerGate({ onSeated }: { onSeated: (seat: PeerSeat) => void }) {
         }}
       />
 
-      <button className="btn btn-accent" disabled={!handle.trim() || busy} onClick={() => void join()}>
+      <button
+        className="btn btn-accent"
+        disabled={!handle.trim() || busy}
+        onClick={() => void join()}
+      >
         {busy ? 'joining…' : 'join'}
       </button>
 

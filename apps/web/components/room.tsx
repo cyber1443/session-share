@@ -19,7 +19,7 @@ export function Room({
 }: {
   snapshot: SessionSnapshot
   events: EventEnvelope[]
-  onPost: (body: string) => Promise<void>
+  onPost: (body: string, directive: boolean) => Promise<void>
   filterTaskId: string | null
   onClearFilter: () => void
 }) {
@@ -27,6 +27,14 @@ export function Room({
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [unread, setUnread] = useState(0)
+  /**
+   * The room is also a terminal. In `run` mode the message is delivered into
+   * the other participants' Claude Code sessions and acted on there, so the
+   * mode is explicit and sticky rather than inferred from what you typed --
+   * "make it dark" should not silently reach two agents because it read like
+   * an instruction.
+   */
+  const [mode, setMode] = useState<'say' | 'run'>('say')
   const scroller = useRef<HTMLDivElement>(null)
 
   const messages = useMemo(
@@ -49,7 +57,7 @@ export function Room({
     if (!body) return
     setSending(true)
     try {
-      await onPost(body)
+      await onPost(body, mode === 'run')
       setDraft('')
     } finally {
       setSending(false)
@@ -102,23 +110,55 @@ export function Room({
       </div>
 
       {tab === 'chat' ? (
-        <div className="flex gap-2 border-t border-edge p-3">
-          <input
-            className="field"
-            placeholder="message… use #task-id to pin it to a node"
-            value={draft}
-            disabled={sending}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault()
-                void post()
+        <div className="space-y-2 border-t border-edge p-3">
+          <div className="flex gap-2">
+            <div className="flex shrink-0 overflow-hidden rounded border border-edge text-[10px] uppercase tracking-wider">
+              <button
+                className={`px-2 py-1 ${mode === 'say' ? 'bg-neutral-800 text-neutral-200' : 'text-mute hover:text-neutral-400'}`}
+                onClick={() => setMode('say')}
+                title="Talk to the people in the session"
+              >
+                say
+              </button>
+              <button
+                className={`px-2 py-1 ${mode === 'run' ? 'bg-accent/20 text-accent' : 'text-mute hover:text-neutral-400'}`}
+                onClick={() => setMode('run')}
+                title="Send this into the other participants' Claude Code sessions"
+              >
+                run
+              </button>
+            </div>
+            <input
+              className="field"
+              placeholder={
+                mode === 'run'
+                  ? 'instruction for the other agents… @login to aim it at one'
+                  : 'message… use #task-id to pin it to a node'
               }
-            }}
-          />
-          <button className="btn" disabled={!draft.trim() || sending} onClick={() => void post()}>
-            send
-          </button>
+              value={draft}
+              disabled={sending}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault()
+                  void post()
+                }
+              }}
+            />
+            <button
+              className={mode === 'run' ? 'btn btn-accent' : 'btn'}
+              disabled={!draft.trim() || sending}
+              onClick={() => void post()}
+            >
+              {mode === 'run' ? 'run' : 'send'}
+            </button>
+          </div>
+          {mode === 'run' ? (
+            <p className="text-[10px] text-mute">
+              Delivered into the other participants&apos; Claude Code — they act on it when their
+              current turn ends. File leases still apply.
+            </p>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -139,6 +179,7 @@ function ChatLine({
       {message.authorKind === 'agent' ? (
         <span className="shrink-0 text-sky-400/70">agent</span>
       ) : null}
+      {message.directive ? <span className="shrink-0 text-accent">▸run</span> : null}
       {message.taskRef ? <span className="shrink-0 text-accent">#{message.taskRef}</span> : null}
       <span className="min-w-0 break-words text-neutral-300">{message.body}</span>
     </div>
@@ -216,7 +257,7 @@ function describe(envelope: EventEnvelope): string {
     case 'handoff.resolved':
       return body.granted ? 'granted a handoff' : 'refused a handoff'
     case 'chat.message':
-      return `said: ${body.message.body.slice(0, 80)}`
+      return `${body.message.directive ? 'sent the agents' : 'said'}: ${body.message.body.slice(0, 80)}`
     case 'merge.queue':
       return `merge queue: ${body.entries.length} waiting`
     case 'merge.conflict':

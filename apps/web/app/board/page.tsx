@@ -228,8 +228,8 @@ function Board({ slug }: { slug: string }) {
               events={events}
               filterTaskId={chatFilter}
               onClearFilter={() => setChatFilter(null)}
-              onPost={async (body) => {
-                await send({ type: 'chat.post', body, taskRef: null, asAgent: false })
+              onPost={async (body, directive) => {
+                await send({ type: 'chat.post', body, taskRef: null, asAgent: false, directive })
               }}
             />
           </div>
