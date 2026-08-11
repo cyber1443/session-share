@@ -763,6 +763,7 @@ export class SessionService {
       body: command.body,
       taskRef: command.taskRef ?? refs[0] ?? null,
       mentions: parseMentions(command.body, loginToId) as ParticipantId[],
+      directive: command.directive,
       createdAt: Date.now(),
     }
     this.emit(sessionId, participantId, { type: 'chat.message', message })

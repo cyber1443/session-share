@@ -418,6 +418,27 @@ describe('chat', () => {
     assert.equal(message.authorKind, 'agent')
   })
 
+  it('marks a directive and resolves who it is aimed at', async () => {
+    const { alice, bobId } = await buildPhaseSession('chat-directive')
+    const plain = await alice.send({
+      type: 'chat.post',
+      body: 'anyone looked at the storage key yet',
+      taskRef: null,
+      asAgent: false,
+    })
+    assert.equal(plain.message.directive, false, 'talking is the default; driving is not')
+
+    const aimed = await alice.send({
+      type: 'chat.post',
+      body: '@bob add a test for the empty case',
+      taskRef: null,
+      asAgent: false,
+      directive: true,
+    })
+    assert.equal(aimed.message.directive, true)
+    assert.deepEqual(aimed.message.mentions, [bobId])
+  })
+
   it('reaches the other dev live and reads back in order', async () => {
     const { alice, bob } = await buildPhaseSession('chat-live')
     await alice.send({ type: 'chat.post', body: 'first', taskRef: null, asAgent: false })

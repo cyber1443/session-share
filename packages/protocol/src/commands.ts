@@ -108,6 +108,8 @@ export const ClientCommand = z.discriminatedUnion('type', [
     /** Explicit ref; a `#task-id` in the body is also parsed server-side. */
     taskRef: TaskId.nullable().default(null),
     asAgent: z.boolean().default(false),
+    /** Deliver this into the other participants' Claude Code sessions. */
+    directive: z.boolean().default(false),
   }),
   z.object({
     type: z.literal('chat.read'),

@@ -266,6 +266,14 @@ export const ChatMessage = z.object({
   /** Set by a `#<task-id>` ref; links the message to a DAG node. */
   taskRef: TaskId.nullable(),
   mentions: z.array(ParticipantId).default([]),
+  /**
+   * A directive is addressed to the other people's *agents*, not to the people:
+   * their Claude Code picks it up and acts on it, which is what makes the room
+   * usable as a shared terminal rather than only as a place to talk. Mentions
+   * narrow it to specific participants; with none it goes to everyone but the
+   * author.
+   */
+  directive: z.boolean().default(false),
   createdAt: Timestamp,
 })
 export type ChatMessage = z.infer<typeof ChatMessage>
