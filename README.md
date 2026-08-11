@@ -112,9 +112,12 @@ Both of you have the repo cloned and are sitting on `main`. Then:
 | `/ss:sync` | pulls what your teammate landed |
 | `/ss:ship` | opens the PR for the whole session: contract branch → `main` |
 
-`pnpm git-flow-demo` runs exactly this against a throwaway remote and two real
-clones, so you can watch the branches appear before pointing it at anything you
-care about.
+Two ways to try that without involving anyone: `pnpm git-flow-demo` drives the
+whole loop against a throwaway remote and two clones and prints what happened,
+and `pnpm sandbox` sets up the same two clones for you to drive by hand from two
+Claude Codes. For the second, run each with `SESSION_SHARE_LOGIN=alice` and
+`SESSION_SHARE_LOGIN=bob` — identity comes from `gh`, so without the override
+both seats are the same account and the leases can never collide.
 
 What gets committed, whether branches are pushed and whether PRs are opened are
 your choices, not defaults baked in here — `/ss:setup` asks once and stores the

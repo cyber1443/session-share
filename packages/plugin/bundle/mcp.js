@@ -32010,6 +32010,7 @@ function describePreferences(preferences) {
 }
 
 // packages/plugin/src/tools-git.ts
+var OWN_ARTIFACTS = [".session-share/", ".claude/", ".mcp.json", ".gitignore"];
 function registerGitTools(server, ctx) {
   server.registerTool(
     "ss_settings",
@@ -32053,7 +32054,10 @@ Stored in ${PREFERENCES_FILE}.${preferences.configured ? "" : "\n\nThese are def
       if (state.session.phase !== "plan") {
         return ctx.text(`The contract already landed on ${state.session.contractBranch}.`);
       }
-      const dirty = await dirtyFiles(root);
+      const dirty = (await dirtyFiles(root)).filter((line) => {
+        const path = line.replace(/^\S+\s+/, "");
+        return !OWN_ARTIFACTS.some((prefix) => path.startsWith(prefix));
+      });
       if (dirty.length > 0) {
         throw new Error(
           `Your working tree has uncommitted changes:
@@ -32253,6 +32257,14 @@ import { execFile as execFile2 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
 var run2 = promisify2(execFile2);
 async function localIdentity() {
+  const override = process.env.SESSION_SHARE_LOGIN?.trim();
+  if (override) {
+    return {
+      githubLogin: override,
+      displayName: process.env.SESSION_SHARE_NAME?.trim() || titleCase(override),
+      source: "override"
+    };
+  }
   const fromGh = await tryGh();
   if (fromGh) return fromGh;
   const login = await gitConfig("user.name") ?? process.env.USER ?? "dev";
@@ -32316,6 +32328,9 @@ async function currentBranch(cwd) {
   } catch {
     return "main";
   }
+}
+function titleCase(value) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 // packages/plugin/src/mcp.ts

@@ -19,6 +19,9 @@ import {
 } from './git.js'
 import { describePreferences, readPreferences, writePreferences, PREFERENCES_FILE } from './preferences.js'
 
+/** Files session-share puts in a repo itself, which are never someone's work. */
+const OWN_ARTIFACTS = ['.session-share/', '.claude/', '.mcp.json', '.gitignore']
+
 interface Context {
   repoRoot: () => Promise<string>
   config: () => SessionConfig
@@ -85,7 +88,15 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
         return ctx.text(`The contract already landed on ${state.session.contractBranch}.`)
       }
 
-      const dirty = await dirtyFiles(root)
+      /**
+       * session-share's own wiring is not work in progress, and refusing to
+       * land because of files this tool created would be the setup blocking
+       * itself. Git carries these across a checkout unharmed.
+       */
+      const dirty = (await dirtyFiles(root)).filter((line) => {
+        const path = line.replace(/^\S+\s+/, '')
+        return !OWN_ARTIFACTS.some((prefix) => path.startsWith(prefix))
+      })
       if (dirty.length > 0) {
         throw new Error(
           `Your working tree has uncommitted changes:\n${dirty.slice(0, 10).join('\n')}\n\nCommit or stash them first — landing the contract switches branches.`,

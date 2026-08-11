@@ -73,6 +73,43 @@ on a header, so it holds even with the server bound to the LAN.
 
 ---
 
+## Rehearsing it alone, as two people
+
+Before involving anyone else, run both seats on your own machine:
+
+```bash
+pnpm sandbox        # ~/session-share-sandbox: a bare origin and two clones
+```
+
+It prints the exact commands. Two terminals:
+
+```bash
+# terminal 1
+cd ~/session-share-sandbox/alice
+SESSION_SHARE_LOGIN=alice claude
+/ss:host Add a dark mode toggle
+
+# terminal 2
+cd ~/session-share-sandbox/bob
+SESSION_SHARE_LOGIN=bob claude
+/ss:join ssx_...
+```
+
+**`SESSION_SHARE_LOGIN` is the part that makes this a real test.** Identity comes
+from `gh`, so without it both Claude Codes are the same GitHub account — the
+server correctly decides they are one person, and the leases never collide
+because you are only ever colliding with yourself. The override gives one
+machine two participants.
+
+Then drive it: `/ss:plan add a dark mode toggle`, approve on the board, `/ss:land`,
+`/ss:next` in both, `/ss:done` each, `/ss:ship`. Open the board URL in two
+windows to watch both seats move.
+
+Everything happens in the sandbox, against a bare repo in the same directory.
+`rm -rf ~/session-share-sandbox` when you are done.
+
+---
+
 ## The thorough way: verified GitHub accounts
 
 Two developers, two GitHub accounts, two Claude subscriptions, one issue. Nobody

@@ -19,7 +19,8 @@
     "attach": "node scripts/attach.mjs",
     "lint": "turbo run lint",
     "check-bundle": "node scripts/check-bundle.mjs",
-    "git-flow-demo": "pnpm bundle && node --disable-warning=ExperimentalWarning scripts/git-flow-demo.mjs"
+    "git-flow-demo": "pnpm bundle && node --disable-warning=ExperimentalWarning scripts/git-flow-demo.mjs",
+    "sandbox": "pnpm bundle && node scripts/local-sandbox.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

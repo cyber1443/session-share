@@ -7,7 +7,7 @@ export interface LocalIdentity {
   githubLogin: string
   displayName: string
   /** Where the name came from, so the UI can be honest about how sure it is. */
-  source: 'gh' | 'git' | 'system'
+  source: 'override' | 'gh' | 'git' | 'system'
 }
 
 /**
@@ -20,6 +20,21 @@ export interface LocalIdentity {
  * names exist so humans can tell each other apart.
  */
 export async function localIdentity(): Promise<LocalIdentity> {
+  /**
+   * An explicit override, so one machine can hold two participants. Without it
+   * both Claude Codes read the same `gh` account, the server correctly decides
+   * they are the same person, and the leases never collide -- which makes a
+   * local rehearsal silently prove nothing.
+   */
+  const override = process.env.SESSION_SHARE_LOGIN?.trim()
+  if (override) {
+    return {
+      githubLogin: override,
+      displayName: process.env.SESSION_SHARE_NAME?.trim() || titleCase(override),
+      source: 'override',
+    }
+  }
+
   const fromGh = await tryGh()
   if (fromGh) return fromGh
 
@@ -93,4 +108,8 @@ export async function currentBranch(cwd: string): Promise<string> {
   } catch {
     return 'main'
   }
+}
+
+function titleCase(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1)
 }
