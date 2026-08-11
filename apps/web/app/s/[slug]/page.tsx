@@ -5,6 +5,7 @@ import Link from 'next/link'
 import type { Task } from '@session-share/protocol'
 import { AuthProvider, SignIn, useAuth } from '@/components/auth'
 import { Dag } from '@/components/dag'
+import { Graph } from '@/components/graph'
 import { JoinCode } from '@/components/join-code'
 import { Room } from '@/components/room'
 import { useLiveSession } from '@/lib/live'
@@ -26,6 +27,8 @@ function Board({ slug }: { slug: string }) {
   const { me } = useAuth()
   const { snapshot, status, error, activity, events, send } = useLiveSession(slug)
   const [selected, setSelected] = useState<string | null>(null)
+  /** Topics answers "what is this about"; order answers "what unblocks what". */
+  const [view, setView] = useState<'graph' | 'dag'>('graph')
   const [chatFilter, setChatFilter] = useState<string | null>(null)
   const [pairing, setPairing] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -181,14 +184,40 @@ function Board({ slug }: { slug: string }) {
 
         {/* graph + room */}
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1 border-b border-edge">
-            <Dag
-              tasks={snapshot.tasks}
-              participants={snapshot.participants}
-              activity={activity}
-              selected={selected}
-              onSelect={(taskId) => setSelected(taskId === selected ? null : taskId)}
-            />
+          <div className="relative min-h-0 flex-1 border-b border-edge">
+            <div className="absolute right-3 top-3 z-10 flex gap-3 text-[10px] uppercase tracking-wider">
+              <button
+                className={view === 'graph' ? 'text-neutral-200' : 'text-mute hover:text-neutral-400'}
+                onClick={() => setView('graph')}
+              >
+                topics
+              </button>
+              <button
+                className={view === 'dag' ? 'text-neutral-200' : 'text-mute hover:text-neutral-400'}
+                onClick={() => setView('dag')}
+              >
+                order
+              </button>
+            </div>
+
+            {view === 'graph' ? (
+              <Graph
+                tasks={snapshot.tasks}
+                contract={snapshot.decomposition?.contract ?? null}
+                participants={snapshot.participants}
+                activity={activity}
+                selected={selected}
+                onSelect={(taskId) => setSelected(taskId === selected ? null : taskId)}
+              />
+            ) : (
+              <Dag
+                tasks={snapshot.tasks}
+                participants={snapshot.participants}
+                activity={activity}
+                selected={selected}
+                onSelect={(taskId) => setSelected(taskId === selected ? null : taskId)}
+              />
+            )}
           </div>
           <div className="h-64 shrink-0">
             <Room
