@@ -7,7 +7,9 @@ allowed-tools: Bash, mcp__session-share__ss_host, mcp__session-share__ss_status
 Host a session for: **$ARGUMENTS**
 
 1. Call `ss_host` with that as the title. Pass `issueRef` if the argument is or contains an issue URL. It starts a coordination server on this machine if one is not already running, creates the session for this repository, and attaches this checkout.
-2. Show them the `/ss:join ssx_…` line to send, and the board URL. One string carries both the address and the invite.
+2. Show them the `/ss:join ssx_…` line to send. The board opens in their browser automatically.
+
+If `ss_host` reports that the address is loopback, say so plainly rather than handing over the invite: an invite minted from a loopback-bound server names *the recipient's* machine, so it fails on every machine but this one.
 
 Tell them plainly what is now exposed: with the default `expose: "lan"` the server listens on their local network, and anyone holding the invite can join. Nobody without it can. If they are on an untrusted network, re-run with `expose: "loopback"` and use a tunnel.
 

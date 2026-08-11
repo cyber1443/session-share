@@ -20,6 +20,14 @@ export const Preferences = z.object({
   openPullRequests: z.boolean().default(true),
   /** Whether hosting binds the local network or only this machine. */
   expose: z.enum(['lan', 'loopback']).default('lan'),
+  /** Open the live board automatically when you host or join. */
+  openBoard: z.boolean().default(true),
+  /**
+   * Let messages sent to the room as directives run in this Claude Code
+   * session. Off makes the room read-only: you still see everything, but
+   * nothing anyone types reaches your agent.
+   */
+  acceptDirectives: z.boolean().default(true),
   /** Set once the setup questions have been answered. */
   configured: z.boolean().default(false),
 })
@@ -52,5 +60,7 @@ export function describePreferences(preferences: Preferences): string {
     `push:     ${preferences.push ? 'branches are pushed to origin' : 'nothing leaves this machine'}`,
     `PRs:      ${preferences.openPullRequests ? 'opened per task and for the session' : 'never opened'}`,
     `hosting:  ${preferences.expose === 'lan' ? 'reachable on your local network' : 'this machine only'}`,
+    `board:    ${preferences.openBoard ? 'opens in your browser on host and join' : 'never opened for you'}`,
+    `room:     ${preferences.acceptDirectives ? 'directives from the room run in this session' : 'read-only; nothing from the room reaches your agent'}`,
   ].join('\n')
 }

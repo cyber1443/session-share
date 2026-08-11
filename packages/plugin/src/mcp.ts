@@ -3,6 +3,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import {
+  INVITE_PREFIX,
+  findInvite,
+  isLoopbackUrl,
   packInvite,
   unpackInvite,
   type RepoRef,
@@ -11,7 +14,9 @@ import {
 } from '@session-share/protocol'
 import { CommandError, pair, peerJoin, runCommand } from './client.js'
 import { readConfig, writeConfig, type SessionConfig } from './config.js'
-import { ensureDaemon, stopDaemon } from './daemon.js'
+import { ensureDaemon, probe, stopDaemon } from './daemon.js'
+import { markCaughtUp } from './inbox.js'
+import { boardUrl, openInBrowser } from './open.js'
 import {
   checkoutBranch,
   contractBranch,
@@ -70,6 +75,45 @@ async function mintInvite(serverUrl: string, slug: string): Promise<string> {
 }
 
 /**
+ * Fails a join before it starts, with the reason rather than the symptom.
+ *
+ * "That invite is not valid for this server" is what the *server* can say, and
+ * it is nearly always wrong about the cause: the token is fine, the guest just
+ * reached a different server -- usually their own, because the invite carried a
+ * loopback address. Only this side can tell the difference, because only this
+ * side knows which server the invite claims to come from.
+ */
+async function checkReachable(url: string, expectedServerId: string | null): Promise<void> {
+  const health = await probe(url, 4000)
+
+  if (!health) {
+    throw new Error(
+      [
+        `Nothing answered at ${url}.`,
+        '',
+        isLoopbackUrl(url)
+          ? 'That address means "this machine", so the invite was minted by a host bound to loopback. Ask them to re-run /ss:host -- their invite cannot reach them from anywhere else.'
+          : 'Check that you are on the same network as the host, that their machine is awake, and that their firewall allows incoming connections on that port. If you are not on the same network, they need a tunnel.',
+      ].join('\n'),
+    )
+  }
+
+  if (expectedServerId && health.serverId && health.serverId !== expectedServerId) {
+    throw new Error(
+      [
+        `${url} answered, but it is not the server that minted this invite.`,
+        `  invite expects: ${expectedServerId}`,
+        `  answered:       ${health.serverId}`,
+        '',
+        isLoopbackUrl(url)
+          ? 'The address inside the invite is loopback, so on your machine it points at your own session-share. The host must re-run /ss:host so the invite carries their network address.'
+          : 'Another session-share is listening on that address. The host should re-host, or free the port.',
+      ].join('\n'),
+    )
+  }
+}
+
+/**
  * The agent's own handle on the session. These tools exist so Claude can take
  * part in the coordination rather than being narrated by it: it claims its own
  * work, reports its own progress, and talks in the room when it discovers
@@ -112,8 +156,10 @@ export function createServer(): McpServer {
         issueRef: z.string().nullish().describe('Issue URL, if there is one'),
         expose: z
           .enum(['lan', 'loopback'])
-          .default('lan')
-          .describe('lan lets teammates on the same network connect; loopback is this machine only'),
+          .nullish()
+          .describe(
+            'lan lets teammates on the same network connect; loopback is this machine only. Defaults to your saved preference.',
+          ),
       },
     },
     async ({ title, issueRef, expose }) => {
@@ -153,11 +199,17 @@ export function createServer(): McpServer {
         throw new Error('This server verifies identity with GitHub; use the board to invite people.')
       }
 
-      // Everything a guest needs in one string: where to dial and how to get in.
-      const packed = packInvite({ url: daemon.url, token: created.invite })
+      // Everything a guest needs in one string: where to dial, how to get in,
+      // and which server minted it so they can tell if they reached the wrong one.
+      const health = await probe(loopback)
+      const packed = packInvite({
+        url: daemon.url,
+        token: created.invite,
+        serverId: health?.serverId ?? null,
+      })
       const joined = await peerJoin(loopback, created.invite, identity, root)
 
-      writeConfig(root, {
+      const cfg: SessionConfig = {
         serverUrl: loopback,
         sessionRef: joined.sessionRef,
         participantId: joined.participantId,
@@ -165,9 +217,14 @@ export function createServer(): McpServer {
         githubLogin: joined.githubLogin,
         displayName: joined.displayName,
         repoPath: root,
-      })
+      }
+      writeConfig(root, cfg)
+      markCaughtUp(cfg) // the room starts here; do not replay an old session at the agent
 
-      const reachable = daemon.url.includes('127.0.0.1')
+      const board = boardUrl(daemon.url, packed, joined.githubLogin)
+      const opened = readPreferences().openBoard && openInBrowser(board)
+      const loopbackOnly = isLoopbackUrl(daemon.url)
+
       return text(
         [
           created.resumed
@@ -177,10 +234,17 @@ export function createServer(): McpServer {
           'Send your teammate this line:',
           `  /ss:join ${packed}`,
           '',
-          `Board: ${daemon.url}/board/?join=${packed}`,
+          opened ? `Board opened: ${board}` : `Board: ${board}`,
           '',
-          reachable
-            ? 'Bound to loopback only, so nobody else can reach it. Re-run with expose="lan" to let a teammate on your network in.'
+          loopbackOnly
+            ? [
+                'This invite only works on this machine: the server is bound to loopback,',
+                'so the address inside it points at whatever is running on the other person\'s',
+                'own port 4310. Re-run with expose="lan"' +
+                  (readPreferences().expose === 'lan'
+                    ? ' -- and check you are on a network, because no LAN address was found.'
+                    : ' to let a teammate on your network in.'),
+              ].join('\n')
             : `Reachable on your network at ${daemon.url}. Anyone who has the invite can join; anyone who does not, cannot.`,
           '',
           `Every edit in ${basename(root)} is now checked against this session's file leases.`,
@@ -204,14 +268,22 @@ export function createServer(): McpServer {
     },
     async ({ code, serverUrl }) => {
       const root = await repoRoot(REPO_ROOT)
-      const trimmed = code.trim()
+      // Accept the invite, the whole `/ss:join …` line, or a pasted board URL.
+      const trimmed = findInvite(code) ?? code.trim()
       const packed = unpackInvite(trimmed)
+
+      if (!packed && trimmed.startsWith(INVITE_PREFIX)) {
+        throw new Error(
+          'That looks like an invite but it is damaged -- most likely it was cut short or wrapped when it was copied. Ask for it again, or have the host re-run /ss:host.',
+        )
+      }
+      if (packed) await checkReachable(packed.url, packed.serverId ?? null)
 
       const result = packed
         ? await peerJoin(packed.url, packed.token, await localIdentity(), root)
         : await pair(serverUrl ?? DEFAULT_SERVER_URL, trimmed, root)
 
-      const path = writeConfig(root, {
+      const cfg: SessionConfig = {
         serverUrl: packed?.url ?? serverUrl ?? DEFAULT_SERVER_URL,
         sessionRef: result.sessionRef,
         participantId: result.participantId,
@@ -219,18 +291,51 @@ export function createServer(): McpServer {
         githubLogin: result.githubLogin,
         displayName: result.displayName,
         repoPath: root,
-      })
+      }
+      const path = writeConfig(root, cfg)
+      markCaughtUp(cfg)
+
+      const board = packed ? boardUrl(packed.url, trimmed, result.githubLogin) : null
+      const opened = Boolean(board) && readPreferences().openBoard && openInBrowser(board!)
 
       return text(
         [
           `Joined "${result.sessionTitle}" as ${result.displayName}.`,
-          packed ? `Board: ${packed.url}/board/?join=${trimmed}` : '',
+          board ? (opened ? `Board opened: ${board}` : `Board: ${board}`) : '',
           `Config at ${path}.`,
           `Every edit in ${basename(root)} is now checked against the session's file leases.`,
         ]
           .filter(Boolean)
           .join('\n'),
       )
+    },
+  )
+
+  server.registerTool(
+    'ss_board',
+    {
+      description:
+        'Open the live board for the session this checkout is attached to, in the browser. Use it when the board was closed or never opened.',
+      inputSchema: {},
+    },
+    async () => {
+      const cfg = config()
+      const response = await fetch(new URL(`/api/sessions/${cfg.sessionRef}/invite`, cfg.serverUrl), {
+        method: 'POST',
+        headers: cfg.participantToken ? { authorization: `Bearer ${cfg.participantToken}` } : {},
+      })
+      const payload = (await response.json()) as { invite?: string; message?: string }
+      if (!response.ok || !payload.invite) {
+        throw new Error(payload.message ?? 'Could not get a board link for this session.')
+      }
+
+      const health = await probe(cfg.serverUrl)
+      const board = boardUrl(
+        cfg.serverUrl,
+        packInvite({ url: cfg.serverUrl, token: payload.invite, serverId: health?.serverId ?? null }),
+        cfg.githubLogin,
+      )
+      return text(openInBrowser(board) ? `Opened ${board}` : board)
     },
   )
 
@@ -555,17 +660,29 @@ export function createServer(): McpServer {
     {
       description:
         'Say something in the session room. Use it when you learn something the other agent must know BEFORE it acts -- a contract gap, a shared assumption that broke, a path you need. Mention a task as #task-id to pin the message to it.',
-      inputSchema: { body: z.string().min(1).max(8000), taskRef: z.string().nullish() },
+      inputSchema: {
+        body: z.string().min(1).max(8000),
+        taskRef: z.string().nullish(),
+        directive: z
+          .boolean()
+          .nullish()
+          .describe(
+            'Deliver this into the other agents\' Claude Code sessions instead of only showing it in the room. Use @login to aim it at one person.',
+          ),
+      },
     },
-    async ({ body, taskRef }) => {
+    async ({ body, taskRef, directive }) => {
       const cfg = config()
       const { message } = await runCommand(cfg, {
         type: 'chat.post',
         body,
         taskRef: (taskRef ?? null) as never,
         asAgent: true,
+        directive: directive ?? false,
       })
-      return text(`Posted${message.taskRef ? ` on #${message.taskRef}` : ''}.`)
+      return text(
+        `Posted${message.taskRef ? ` on #${message.taskRef}` : ''}${message.directive ? ' as a directive -- it will run in the other agents.' : '.'}`,
+      )
     },
   )
 
