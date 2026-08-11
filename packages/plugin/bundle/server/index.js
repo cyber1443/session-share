@@ -63501,6 +63501,11 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     branch: external_exports.string().min(1),
     prNumber: external_exports.number().int().nullable().default(null)
   }),
+  /**
+   * The task's work is in the contract branch. This is what unblocks whatever
+   * was waiting on it, so it is the event that actually moves the DAG.
+   */
+  external_exports.object({ type: external_exports.literal("task.merged"), taskId: TaskId }),
   /** Called by the PreToolUse hook before every Edit/Write. Must be fast. */
   external_exports.object({ type: external_exports.literal("lease.check"), paths: external_exports.array(external_exports.string().min(1)).min(1) }),
   external_exports.object({
@@ -64663,6 +64668,8 @@ var SessionService = class {
         return this.testResult(command, ctx);
       case "task.branch":
         return this.setBranch(command, ctx);
+      case "task.merged":
+        return this.markMerged(command, ctx);
       case "lease.check":
         return this.checkLease(command, ctx);
       case "handoff.request":
@@ -64998,6 +65005,42 @@ var SessionService = class {
       prNumber: command.prNumber
     });
     return { ok: true };
+  }
+  /**
+   * The task's work has landed in the contract branch. This releases its lease
+   * and re-evaluates everything that was waiting on it, which is the only way
+   * a blocked task ever becomes claimable.
+   */
+  markMerged(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const task = state.tasks.get(command.taskId);
+    if (!task) throw new ServiceError("not_found", `No task "${command.taskId}".`);
+    if (task.state === "merged") return { unblocked: [] };
+    const isLead = state.session?.leadId === participantId;
+    if (task.ownerId !== participantId && !isLead) {
+      throw new ServiceError("forbidden", `"${command.taskId}" is held by someone else.`);
+    }
+    if (state.leases.has(task.id)) {
+      this.emit(sessionId, participantId, {
+        type: "lease.released",
+        taskId: task.id,
+        holderId: task.ownerId ?? participantId
+      });
+    }
+    this.emit(sessionId, participantId, {
+      type: "task.state",
+      taskId: task.id,
+      state: "merged",
+      ownerId: task.ownerId
+    });
+    const blockedBefore = [...state.tasks.values()].filter((t) => t.state === "blocked");
+    this.refreshBlockedStates(sessionId, participantId, state);
+    const unblocked = blockedBefore.filter((t) => state.tasks.get(t.id)?.state === "ready").map((t) => t.id);
+    const remaining = [...state.tasks.values()].filter((t) => t.state !== "merged");
+    if (remaining.length === 0 && state.session?.phase === "build") {
+      this.emit(sessionId, participantId, { type: "session.phase", phase: "integrate" });
+    }
+    return { unblocked };
   }
   /**
    * The lease gate. Called by the PreToolUse hook before every single edit, so

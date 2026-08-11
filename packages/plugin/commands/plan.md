@@ -31,4 +31,6 @@ Call the `ss_propose` MCP tool with the contract and the tasks. The server valid
 
 If it comes back with errors, fix them and propose once more. Do not argue with the validator: an overlap it reports is an overlap two agents would have hit for real.
 
-When it passes, tell the team what you split and why, and ask them to approve on the board. Nothing becomes claimable until the split is approved and the contract has landed.
+When it passes, tell the team what you split and why, and ask them to approve on the board.
+
+Once they have, run `/ss:land`. That creates the session branch, commits the contract onto it and pushes — and only then does anything become claimable, because every task was planned against those files.

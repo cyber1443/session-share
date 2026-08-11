@@ -18,7 +18,8 @@
     "server": "turbo run build && pnpm --filter @session-share/server start",
     "attach": "node scripts/attach.mjs",
     "lint": "turbo run lint",
-    "check-bundle": "node scripts/check-bundle.mjs"
+    "check-bundle": "node scripts/check-bundle.mjs",
+    "git-flow-demo": "pnpm bundle && node --disable-warning=ExperimentalWarning scripts/git-flow-demo.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

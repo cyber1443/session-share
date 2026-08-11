@@ -139,6 +139,8 @@ export class SessionService {
         return this.testResult(command, ctx)
       case 'task.branch':
         return this.setBranch(command, ctx)
+      case 'task.merged':
+        return this.markMerged(command, ctx)
       case 'lease.check':
         return this.checkLease(command, ctx)
       case 'handoff.request':
@@ -578,6 +580,52 @@ export class SessionService {
       prNumber: command.prNumber,
     })
     return { ok: true as const }
+  }
+
+  /**
+   * The task's work has landed in the contract branch. This releases its lease
+   * and re-evaluates everything that was waiting on it, which is the only way
+   * a blocked task ever becomes claimable.
+   */
+  private markMerged(command: Extract<ClientCommand, { type: 'task.merged' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const task = state.tasks.get(command.taskId)
+    if (!task) throw new ServiceError('not_found', `No task "${command.taskId}".`)
+    if (task.state === 'merged') return { unblocked: [] }
+
+    // The holder merges their own work; the lead can also land a stalled task.
+    const isLead = state.session?.leadId === participantId
+    if (task.ownerId !== participantId && !isLead) {
+      throw new ServiceError('forbidden', `"${command.taskId}" is held by someone else.`)
+    }
+
+    if (state.leases.has(task.id)) {
+      this.emit(sessionId, participantId, {
+        type: 'lease.released',
+        taskId: task.id,
+        holderId: task.ownerId ?? participantId,
+      })
+    }
+    this.emit(sessionId, participantId, {
+      type: 'task.state',
+      taskId: task.id,
+      state: 'merged',
+      ownerId: task.ownerId,
+    })
+
+    const blockedBefore = [...state.tasks.values()].filter((t) => t.state === 'blocked')
+    this.refreshBlockedStates(sessionId, participantId, state)
+    const unblocked = blockedBefore
+      .filter((t) => state.tasks.get(t.id)?.state === 'ready')
+      .map((t) => t.id)
+
+    // Everything merged means the build phase is over.
+    const remaining = [...state.tasks.values()].filter((t) => t.state !== 'merged')
+    if (remaining.length === 0 && state.session?.phase === 'build') {
+      this.emit(sessionId, participantId, { type: 'session.phase', phase: 'integrate' })
+    }
+
+    return { unblocked }
   }
 
   /**

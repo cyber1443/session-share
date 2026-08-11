@@ -2,7 +2,7 @@
 
 Split one issue across several developers and their Claude Codes, without them colliding.
 
-Each dev keeps their own Claude account, their own quota and their own GitHub identity. **session-share never proxies inference** — it is a coordination layer: it owns the task graph, the file leases, the shared room and (later) the merge queue. Nothing about how you already run Claude Code changes.
+Each dev keeps their own Claude account, their own quota and their own GitHub identity. **session-share never proxies inference** — it is a coordination layer: it owns the task graph, the file leases, the shared room and the branch each task lands on. Nothing about how you already run Claude Code changes.
 
 ## The idea in one screen
 
@@ -17,12 +17,12 @@ Each dev keeps their own Claude account, their own quota and their own GitHub id
 | Phase | | |
 |---|---|---|
 | **P0** Protocol, event log, WS gateway, reconnect | done | 37 + 28 tests |
-| **P1** Decomposition, validation, approval, contract | done | server-side; git commit of the contract still to wire |
+| **P1** Decomposition, validation, approval, contract | done | contract lands on its own branch via `/ss:land` |
 | **P2** Leases, claim, `PreToolUse` gate, handoff | done | 16 tests, real subprocess |
 | **P3** Board: sign-in, sessions, live DAG, room, feed | done | verified in a browser |
 | **P4** WebRTC mesh | interface in place (`ActivityTransport`), ws-fanout live | |
-| **P5** GitHub App, PRs, merge queue | not started | |
-| **P6** Final integration PR | not started | |
+| **P5** Branches, PRs, merging back | done | 47 server tests + a two-clone git demo |
+| **P6** Final integration PR | done | `/ss:ship` |
 
 ## Installing
 
@@ -94,6 +94,32 @@ host   /ss:host Add a dark mode toggle
 
 guest  /ss:join ssx_eyJ1Ijoi…
 ```
+
+### The whole loop
+
+Both of you have the repo cloned and are sitting on `main`. Then:
+
+| | |
+|---|---|
+| `/ss:host Add a dark mode toggle` | starts the server, creates the session, hands you one string to send |
+| `/ss:join ssx_…` | your teammate attaches their own clone |
+| `/ss:plan add dark mode` | Claude reads the repo and proposes a contract plus tasks; the validator rejects overlaps before anyone sees them |
+| approve on the board | both of you, or the lead if there are more than three |
+| `/ss:land` | creates `ss/<session>/contract` off `main`, commits the contract files, pushes, opens a draft PR. Only now is anything claimable |
+| `/ss:next` (each) | you each get a different task, a lease over its files, **and your own branch** off the contract |
+| — work — | simultaneously. The lease gate blocks either agent from editing the other's files. The board shows both live |
+| `/ss:done` | runs the acceptance test, commits your owned paths, pushes, opens a PR, merges into the contract branch, and unblocks whatever was waiting |
+| `/ss:sync` | pulls what your teammate landed |
+| `/ss:ship` | opens the PR for the whole session: contract branch → `main` |
+
+`pnpm git-flow-demo` runs exactly this against a throwaway remote and two real
+clones, so you can watch the branches appear before pointing it at anything you
+care about.
+
+What gets committed, whether branches are pushed and whether PRs are opened are
+your choices, not defaults baked in here — `/ss:setup` asks once and stores the
+answers. The cautious options are the defaults: nothing is committed until you
+run `/ss:done`.
 
 The guest has to be able to reach the host: same network works out of the box,
 different networks need a tunnel (`cloudflared tunnel --url http://127.0.0.1:4310`
@@ -245,6 +271,11 @@ and once the split is approved and the contract has landed, on every machine:
 |---|---|
 | `/ss:host` | start hosting from this machine, get one string to send |
 | `/ss:join` | attach this checkout to a session |
+| `/ss:setup` | choose what may be committed, pushed and opened on your behalf |
+| `/ss:land` | create the session branch and commit the approved contract |
+| `/ss:done` | finish a task: test, commit, push, PR, merge back |
+| `/ss:sync` | pull what teammates have landed |
+| `/ss:ship` | open the PR for the finished session |
 | `/ss:plan` | decompose an issue into a contract plus tasks |
 | `/ss:next` | claim the next ready task and work it |
 | `/ss:status` | phase, people, DAG, blockers |
@@ -304,7 +335,7 @@ only, and never gains write access to a repository.
 
 ## Not done yet
 
-- Git: the contract branch commit and task branches are recorded by the server but not yet performed by it.
-- GitHub App, CI status, the serial merge queue and `/ss:resolve` (P5).
+- **CI status is not read.** `/ss:done` runs the acceptance command locally and merges on that; it does not wait for checks on the PR.
+- **Merging is first-come, not queued.** Two people finishing at once both merge into the contract branch; git handles it because their files are disjoint, but there is no serialisation and no automatic conflict resolution.
 - The WebRTC mesh (P4). Agent activity lines already stream over `ws-fanout`, and they are ephemeral by design — reload the board and they are gone until the next one arrives.
 - Authorization is coarse: any signed-in user can read and join any session. Authentication is real; per-session membership rules are not.

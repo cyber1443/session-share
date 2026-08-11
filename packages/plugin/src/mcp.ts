@@ -12,6 +12,14 @@ import {
 import { CommandError, pair, peerJoin, runCommand } from './client.js'
 import { readConfig, writeConfig, type SessionConfig } from './config.js'
 import { ensureDaemon, stopDaemon } from './daemon.js'
+import {
+  checkoutBranch,
+  contractBranch,
+  fetch as gitFetch,
+  taskBranch,
+} from './git.js'
+import { readPreferences } from './preferences.js'
+import { registerGitTools } from './tools-git.js'
 import { currentBranch, localIdentity, repoRemote, repoRoot } from './identity.js'
 
 const DEFAULT_SERVER_URL = process.env.SESSION_SHARE_URL ?? 'http://127.0.0.1:4310'
@@ -101,7 +109,7 @@ export function createServer(): McpServer {
     async ({ title, issueRef, expose }) => {
       const root = await repoRoot(REPO_ROOT)
       const identity = await localIdentity()
-      const daemon = await ensureDaemon({ expose })
+      const daemon = await ensureDaemon({ expose: expose ?? readPreferences().expose })
       const loopback = `http://127.0.0.1:${daemon.port}`
 
       const remote = await repoRemote(root)
@@ -383,8 +391,29 @@ export function createServer(): McpServer {
       const cfg = config()
       const result = await runCommand(cfg, { type: 'task.claim', taskId: (taskId ?? null) as never })
       if (!result.task) return text(result.reason ?? 'Nothing to claim.')
+
+      // Claiming puts you on the task's branch, off the contract. Working on
+      // the wrong branch is the failure the whole split exists to avoid.
+      const root = await repoRoot(REPO_ROOT)
+      const state = await snapshot(cfg)
+      const branch = taskBranch(state.session.slug, result.task.id)
+      let branchNote = `on ${branch}`
+      try {
+        await gitFetch(root)
+        await checkoutBranch(root, branch, contractBranch(state.session.slug))
+        await runCommand(cfg, {
+          type: 'task.branch',
+          taskId: result.task.id,
+          branch,
+          prNumber: null,
+        })
+      } catch (error) {
+        branchNote = `could not switch branch: ${error instanceof Error ? error.message : error}`
+      }
+
       return text({
         claimed: result.task.id,
+        branch: branchNote,
         intent: result.task.intent,
         youNowOwn: result.lease?.paths,
         acceptance: result.task.acceptance,
@@ -545,6 +574,13 @@ export function createServer(): McpServer {
       )
     },
   )
+
+  registerGitTools(server, {
+    repoRoot: () => repoRoot(REPO_ROOT),
+    config,
+    snapshot,
+    text,
+  })
 
   return server
 }

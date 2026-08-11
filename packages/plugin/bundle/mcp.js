@@ -31400,6 +31400,11 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     branch: external_exports.string().min(1),
     prNumber: external_exports.number().int().nullable().default(null)
   }),
+  /**
+   * The task's work is in the contract branch. This is what unblocks whatever
+   * was waiting on it, so it is the event that actually moves the DAG.
+   */
+  external_exports.object({ type: external_exports.literal("task.merged"), taskId: TaskId }),
   /** Called by the PreToolUse hook before every Edit/Write. Must be fast. */
   external_exports.object({ type: external_exports.literal("lease.check"), paths: external_exports.array(external_exports.string().min(1)).min(1) }),
   external_exports.object({
@@ -31819,10 +31824,434 @@ function openLog() {
 }
 var sleep = (ms) => new Promise((resolve3) => setTimeout(resolve3, ms));
 
-// packages/plugin/src/identity.ts
+// packages/plugin/src/git.ts
 import { execFile } from "node:child_process";
+import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname3, join as join3 } from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
+var GitError = class extends Error {
+  constructor(message, stderr) {
+    super(message);
+    this.stderr = stderr;
+    this.name = "GitError";
+  }
+  stderr;
+};
+var contractBranch = (slug) => `ss/${slug}/contract`;
+var taskBranch = (slug, taskId) => `ss/${slug}/${taskId}`;
+async function git(cwd, args) {
+  try {
+    const { stdout } = await run("git", args, { cwd, timeout: 6e4, maxBuffer: 10 * 1024 * 1024 });
+    return stdout.trim();
+  } catch (error51) {
+    const failure = error51;
+    throw new GitError(
+      `git ${args[0]} failed: ${(failure.stderr ?? failure.message ?? "").trim().split("\n")[0]}`,
+      failure.stderr ?? ""
+    );
+  }
+}
+async function hasRemote(cwd) {
+  try {
+    await git(cwd, ["remote", "get-url", "origin"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function dirtyFiles(cwd) {
+  const output = await git(cwd, ["status", "--porcelain"]);
+  return output ? output.split("\n").map((line) => line.trim()) : [];
+}
+async function branchExists(cwd, branch) {
+  try {
+    await git(cwd, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function remoteBranchExists(cwd, branch) {
+  try {
+    const output = await git(cwd, ["ls-remote", "--heads", "origin", branch]);
+    return output.length > 0;
+  } catch {
+    return false;
+  }
+}
+async function fetch2(cwd) {
+  if (await hasRemote(cwd)) await git(cwd, ["fetch", "origin", "--prune"]);
+}
+async function checkoutBranch(cwd, branch, from) {
+  if (await branchExists(cwd, branch)) {
+    await git(cwd, ["checkout", branch]);
+    return "switched";
+  }
+  await fetch2(cwd);
+  if (await remoteBranchExists(cwd, branch)) {
+    await git(cwd, ["checkout", "-b", branch, `origin/${branch}`]);
+    return "switched";
+  }
+  const base = await remoteBranchExists(cwd, from) ? `origin/${from}` : from;
+  await git(cwd, ["checkout", "-b", branch, base]);
+  return "created";
+}
+async function writeFiles(cwd, files) {
+  const written = [];
+  for (const file2 of files) {
+    const absolute = join3(cwd, file2.path);
+    mkdirSync3(dirname3(absolute), { recursive: true });
+    writeFileSync3(absolute, file2.contents);
+    written.push(file2.path);
+  }
+  return written;
+}
+async function commit(cwd, paths, message) {
+  await git(cwd, ["add", "--", ...paths]);
+  const staged = await git(cwd, ["diff", "--cached", "--name-only"]);
+  if (!staged) return null;
+  await git(cwd, ["commit", "-m", message]);
+  return git(cwd, ["rev-parse", "HEAD"]);
+}
+async function push(cwd, branch) {
+  if (!await hasRemote(cwd)) return false;
+  await git(cwd, ["push", "-u", "origin", branch]);
+  return true;
+}
+async function mergeInto(cwd, into, from) {
+  await git(cwd, ["checkout", into]);
+  try {
+    await git(cwd, ["merge", "--no-ff", from, "-m", `Merge ${from} into ${into}`]);
+    return { merged: true, conflicts: [] };
+  } catch {
+    const conflicts = (await git(cwd, ["diff", "--name-only", "--diff-filter=U"])).split("\n").filter(Boolean);
+    await git(cwd, ["merge", "--abort"]).catch(() => void 0);
+    return { merged: false, conflicts };
+  }
+}
+async function openPullRequest(cwd, options) {
+  try {
+    const args = [
+      "pr",
+      "create",
+      "--head",
+      options.head,
+      "--base",
+      options.base,
+      "--title",
+      options.title,
+      "--body",
+      options.body
+    ];
+    if (options.draft) args.push("--draft");
+    const { stdout } = await run("gh", args, { cwd, timeout: 6e4 });
+    const match = stdout.trim().match(/\/pull\/(\d+)/);
+    return match ? Number(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+async function existingPullRequest(cwd, head) {
+  try {
+    const { stdout } = await run("gh", ["pr", "list", "--head", head, "--json", "number"], {
+      cwd,
+      timeout: 3e4
+    });
+    const parsed = JSON.parse(stdout);
+    return parsed[0]?.number ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// packages/plugin/src/preferences.ts
+import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname4, join as join4 } from "node:path";
+var Preferences = external_exports.object({
+  /**
+   * explicit: nothing is committed until you run /ss:done.
+   * auto-on-green: the agent commits when it reports a passing acceptance test.
+   */
+  commitPolicy: external_exports.enum(["explicit", "auto-on-green"]).default("explicit"),
+  /** Push branches to origin. Off means two clones never exchange code. */
+  push: external_exports.boolean().default(true),
+  /** Open a pull request per task, and one for the finished session. */
+  openPullRequests: external_exports.boolean().default(true),
+  /** Whether hosting binds the local network or only this machine. */
+  expose: external_exports.enum(["lan", "loopback"]).default("lan"),
+  /** Set once the setup questions have been answered. */
+  configured: external_exports.boolean().default(false)
+});
+var PREFERENCES_PATH = join4(STATE_DIR, "preferences.json");
+function readPreferences() {
+  if (!existsSync3(PREFERENCES_PATH)) return Preferences.parse({});
+  try {
+    return Preferences.parse(JSON.parse(readFileSync3(PREFERENCES_PATH, "utf8")));
+  } catch {
+    return Preferences.parse({});
+  }
+}
+function writePreferences(update) {
+  const merged = Preferences.parse({ ...readPreferences(), ...update });
+  mkdirSync4(dirname4(PREFERENCES_PATH), { recursive: true });
+  writeFileSync4(PREFERENCES_PATH, `${JSON.stringify(merged, null, 2)}
+`);
+  return merged;
+}
+var PREFERENCES_FILE = PREFERENCES_PATH;
+function describePreferences(preferences) {
+  return [
+    `commits:  ${preferences.commitPolicy === "explicit" ? "only when you run /ss:done" : "automatically when the acceptance test passes"}`,
+    `push:     ${preferences.push ? "branches are pushed to origin" : "nothing leaves this machine"}`,
+    `PRs:      ${preferences.openPullRequests ? "opened per task and for the session" : "never opened"}`,
+    `hosting:  ${preferences.expose === "lan" ? "reachable on your local network" : "this machine only"}`
+  ].join("\n");
+}
+
+// packages/plugin/src/tools-git.ts
+function registerGitTools(server, ctx) {
+  server.registerTool(
+    "ss_settings",
+    {
+      description: "Read or change how session-share touches this machine: when work is committed, whether branches are pushed, whether pull requests are opened, and whether hosting is reachable on the local network.",
+      inputSchema: {
+        commitPolicy: external_exports.enum(["explicit", "auto-on-green"]).nullish(),
+        push: external_exports.boolean().nullish(),
+        openPullRequests: external_exports.boolean().nullish(),
+        expose: external_exports.enum(["lan", "loopback"]).nullish()
+      }
+    },
+    async (input) => {
+      const update = {};
+      for (const [key, value] of Object.entries(input)) {
+        if (value !== null && value !== void 0) update[key] = value;
+      }
+      const preferences = Object.keys(update).length > 0 ? writePreferences({ ...update, configured: true }) : readPreferences();
+      return ctx.text(
+        `${describePreferences(preferences)}
+
+Stored in ${PREFERENCES_FILE}.${preferences.configured ? "" : "\n\nThese are defaults; nothing has been chosen yet."}`
+      );
+    }
+  );
+  server.registerTool(
+    "ss_land_contract",
+    {
+      description: "Create the session branch, write the approved contract files onto it, commit and push. Tasks only become claimable once this has happened, because every task was planned against these files.",
+      inputSchema: {}
+    },
+    async () => {
+      const config3 = ctx.config();
+      const root = await ctx.repoRoot();
+      const preferences = readPreferences();
+      const state = await ctx.snapshot(config3);
+      if (!state.decomposition) throw new Error("There is no decomposition yet. Run /ss:plan first.");
+      if (state.decomposition.status !== "approved") {
+        throw new Error("The split has not been approved yet. Approve it on the board first.");
+      }
+      if (state.session.phase !== "plan") {
+        return ctx.text(`The contract already landed on ${state.session.contractBranch}.`);
+      }
+      const dirty = await dirtyFiles(root);
+      if (dirty.length > 0) {
+        throw new Error(
+          `Your working tree has uncommitted changes:
+${dirty.slice(0, 10).join("\n")}
+
+Commit or stash them first \u2014 landing the contract switches branches.`
+        );
+      }
+      const branch = contractBranch(state.session.slug);
+      await checkoutBranch(root, branch, state.session.repo.baseBranch);
+      const written = await writeFiles(root, state.decomposition.contract.files);
+      const sha = await commit(
+        root,
+        written,
+        `contract: ${state.session.title}
+
+${state.decomposition.contract.summary}`
+      );
+      const pushed = preferences.push ? await push(root, branch) : false;
+      let prNumber = null;
+      if (preferences.openPullRequests && pushed) {
+        prNumber = await existingPullRequest(root, branch) ?? await openPullRequest(root, {
+          head: branch,
+          base: state.session.repo.baseBranch,
+          title: state.session.title,
+          body: `${state.decomposition.contract.summary}
+
+Tasks land on this branch as they finish.`,
+          draft: true
+        });
+      }
+      await runCommand(config3, {
+        type: "contract.committed",
+        branch,
+        commitSha: sha ?? "unchanged",
+        prNumber
+      });
+      return ctx.text(
+        [
+          `Contract landed on ${branch}.`,
+          written.length > 0 ? `  ${written.join("\n  ")}` : "  (files already present)",
+          "",
+          pushed ? "Pushed to origin." : "Not pushed \u2014 your teammate cannot see it yet.",
+          prNumber ? `Draft PR #${prNumber} opened.` : "",
+          "",
+          "Tasks are now claimable. Everyone runs /ss:next."
+        ].filter(Boolean).join("\n")
+      );
+    }
+  );
+  server.registerTool(
+    "ss_start_task",
+    {
+      description: "Put this checkout on the branch for a task you hold, branching from the contract. Called automatically by ss_claim; use it directly only to get back onto a task branch.",
+      inputSchema: { taskId: external_exports.string() }
+    },
+    async ({ taskId }) => {
+      const config3 = ctx.config();
+      const root = await ctx.repoRoot();
+      const state = await ctx.snapshot(config3);
+      const branch = taskBranch(state.session.slug, taskId);
+      await fetch2(root);
+      await checkoutBranch(root, branch, contractBranch(state.session.slug));
+      await runCommand(config3, { type: "task.branch", taskId, branch, prNumber: null });
+      return ctx.text(`On ${branch}, branched from ${contractBranch(state.session.slug)}.`);
+    }
+  );
+  server.registerTool(
+    "ss_done",
+    {
+      description: "Finish a task: commit everything under its owned paths, push, open a pull request, and merge it into the contract branch so whatever was waiting on it becomes claimable.",
+      inputSchema: {
+        taskId: external_exports.string(),
+        summary: external_exports.string().max(500).describe("One line for the commit message")
+      }
+    },
+    async ({ taskId, summary }) => {
+      const config3 = ctx.config();
+      const root = await ctx.repoRoot();
+      const preferences = readPreferences();
+      const state = await ctx.snapshot(config3);
+      const task = state.tasks.find((t) => t.id === taskId);
+      if (!task) throw new Error(`No task "${taskId}" in this session.`);
+      if (task.ownerId !== config3.participantId) throw new Error(`You do not hold "${taskId}".`);
+      const branch = taskBranch(state.session.slug, taskId);
+      const contract = contractBranch(state.session.slug);
+      await checkoutBranch(root, branch, contract);
+      const sha = await commit(root, task.ownedPaths, `${taskId}: ${summary}`);
+      const pushed = preferences.push ? await push(root, branch) : false;
+      let prNumber = null;
+      if (preferences.openPullRequests && pushed) {
+        prNumber = await existingPullRequest(root, branch) ?? await openPullRequest(root, {
+          head: branch,
+          base: contract,
+          title: `${taskId}: ${task.title}`,
+          body: `${task.intent}
+
+Proven by \`${task.acceptance.testCommand}\`.`
+        });
+        if (prNumber) {
+          await runCommand(config3, { type: "task.branch", taskId, branch, prNumber });
+        }
+      }
+      const merge2 = await mergeInto(root, contract, branch);
+      if (!merge2.merged) {
+        await checkoutBranch(root, branch, contract);
+        return ctx.text(
+          [
+            `Committed${sha ? ` (${sha.slice(0, 7)})` : ""} and pushed, but the merge into ${contract} conflicts:`,
+            ...merge2.conflicts.map((path) => `  ${path}`),
+            "",
+            "The merge was aborted, so nothing is half-applied and you are back on your branch.",
+            "A conflict here means two tasks touched the same file, which the split was supposed to prevent \u2014",
+            "say so in chat before resolving it, because the seam is probably in the wrong place."
+          ].join("\n")
+        );
+      }
+      if (preferences.push) await push(root, contract);
+      const { unblocked } = await runCommand(config3, { type: "task.merged", taskId });
+      await checkoutBranch(root, contract, state.session.repo.baseBranch);
+      return ctx.text(
+        [
+          `${taskId} is merged into ${contract}.`,
+          sha ? `  commit ${sha.slice(0, 7)}` : "  nothing new to commit",
+          prNumber ? `  PR #${prNumber}` : "",
+          pushed ? "  pushed" : "  not pushed",
+          "",
+          unblocked.length > 0 ? `Unblocked: ${unblocked.join(", ")}. Run /ss:next to take one.` : "Nothing was waiting on it. Run /ss:next for whatever is ready."
+        ].filter(Boolean).join("\n")
+      );
+    }
+  );
+  server.registerTool(
+    "ss_sync",
+    {
+      description: "Fetch and fast-forward the contract branch, so this checkout has whatever your teammates have landed.",
+      inputSchema: {}
+    },
+    async () => {
+      const config3 = ctx.config();
+      const root = await ctx.repoRoot();
+      const state = await ctx.snapshot(config3);
+      const contract = contractBranch(state.session.slug);
+      if (!await hasRemote(root)) return ctx.text("No origin remote, so there is nothing to sync.");
+      await fetch2(root);
+      const merge2 = await mergeInto(root, contract, `origin/${contract}`);
+      return ctx.text(
+        merge2.merged ? `${contract} is up to date with origin.` : `Could not fast-forward ${contract}: ${merge2.conflicts.join(", ")}`
+      );
+    }
+  );
+  server.registerTool(
+    "ss_ship",
+    {
+      description: "Open the pull request for the finished session: the contract branch, with everything merged into it, against the base branch.",
+      inputSchema: {}
+    },
+    async () => {
+      const config3 = ctx.config();
+      const root = await ctx.repoRoot();
+      const preferences = readPreferences();
+      const state = await ctx.snapshot(config3);
+      const unfinished = state.tasks.filter((task) => task.state !== "merged");
+      if (unfinished.length > 0) {
+        return ctx.text(
+          [
+            `${unfinished.length} task(s) have not landed yet:`,
+            ...unfinished.map((task) => `  ${task.id} \u2014 ${task.state}`),
+            "",
+            "Ship once they are merged, or say in chat that you are shipping without them."
+          ].join("\n")
+        );
+      }
+      const contract = contractBranch(state.session.slug);
+      if (preferences.push) await push(root, contract);
+      const body = [
+        state.decomposition?.contract.summary ?? "",
+        "",
+        "## What landed",
+        ...state.tasks.map((task) => `- **${task.id}** \u2014 ${task.title} (\`${task.acceptance.testCommand}\`)`)
+      ].join("\n");
+      const prNumber = await existingPullRequest(root, contract) ?? await openPullRequest(root, {
+        head: contract,
+        base: state.session.repo.baseBranch,
+        title: state.session.title,
+        body
+      });
+      return ctx.text(
+        prNumber ? `PR #${prNumber}: ${state.session.title} \u2014 ${state.tasks.length} tasks, ${contract} \u2192 ${state.session.repo.baseBranch}.` : `Everything is merged into ${contract}. Open the PR yourself; gh could not (not installed, not authenticated, or no remote).`
+      );
+    }
+  );
+}
+
+// packages/plugin/src/identity.ts
+import { execFile as execFile2 } from "node:child_process";
+import { promisify as promisify2 } from "node:util";
+var run2 = promisify2(execFile2);
 async function localIdentity() {
   const fromGh = await tryGh();
   if (fromGh) return fromGh;
@@ -31836,7 +32265,7 @@ async function localIdentity() {
 }
 async function tryGh() {
   try {
-    const { stdout } = await run("gh", ["api", "user", "--jq", "{login: .login, name: .name}"], {
+    const { stdout } = await run2("gh", ["api", "user", "--jq", "{login: .login, name: .name}"], {
       timeout: 5e3
     });
     const parsed = JSON.parse(stdout);
@@ -31852,7 +32281,7 @@ async function tryGh() {
 }
 async function gitConfig(key) {
   try {
-    const { stdout } = await run("git", ["config", "--get", key], { timeout: 3e3 });
+    const { stdout } = await run2("git", ["config", "--get", key], { timeout: 3e3 });
     return stdout.trim() || null;
   } catch {
     return null;
@@ -31860,7 +32289,7 @@ async function gitConfig(key) {
 }
 async function repoRoot(cwd) {
   try {
-    const { stdout } = await run("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 3e3 });
+    const { stdout } = await run2("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 3e3 });
     return stdout.trim() || cwd;
   } catch {
     return cwd;
@@ -31868,7 +32297,7 @@ async function repoRoot(cwd) {
 }
 async function repoRemote(cwd) {
   try {
-    const { stdout } = await run("git", ["remote", "get-url", "origin"], { cwd, timeout: 3e3 });
+    const { stdout } = await run2("git", ["remote", "get-url", "origin"], { cwd, timeout: 3e3 });
     const remoteUrl = stdout.trim();
     const match = remoteUrl.match(/[:/]([^/:]+)\/([^/]+?)(?:\.git)?$/);
     if (!match) return null;
@@ -31879,7 +32308,7 @@ async function repoRemote(cwd) {
 }
 async function currentBranch(cwd) {
   try {
-    const { stdout } = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+    const { stdout } = await run2("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
       cwd,
       timeout: 3e3
     });
@@ -31943,7 +32372,7 @@ function createServer() {
     async ({ title, issueRef, expose }) => {
       const root = await repoRoot(REPO_ROOT);
       const identity = await localIdentity();
-      const daemon = await ensureDaemon({ expose });
+      const daemon = await ensureDaemon({ expose: expose ?? readPreferences().expose });
       const loopback = `http://127.0.0.1:${daemon.port}`;
       const remote = await repoRemote(root);
       const slug = slugify2(title);
@@ -32184,8 +32613,25 @@ function createServer() {
       const cfg = config2();
       const result = await runCommand(cfg, { type: "task.claim", taskId: taskId ?? null });
       if (!result.task) return text(result.reason ?? "Nothing to claim.");
+      const root = await repoRoot(REPO_ROOT);
+      const state = await snapshot(cfg);
+      const branch = taskBranch(state.session.slug, result.task.id);
+      let branchNote = `on ${branch}`;
+      try {
+        await fetch2(root);
+        await checkoutBranch(root, branch, contractBranch(state.session.slug));
+        await runCommand(cfg, {
+          type: "task.branch",
+          taskId: result.task.id,
+          branch,
+          prNumber: null
+        });
+      } catch (error51) {
+        branchNote = `could not switch branch: ${error51 instanceof Error ? error51.message : error51}`;
+      }
       return text({
         claimed: result.task.id,
+        branch: branchNote,
         intent: result.task.intent,
         youNowOwn: result.lease?.paths,
         acceptance: result.task.acceptance
@@ -32326,6 +32772,12 @@ function createServer() {
       );
     }
   );
+  registerGitTools(server, {
+    repoRoot: () => repoRoot(REPO_ROOT),
+    config: config2,
+    snapshot,
+    text
+  });
   return server;
 }
 var isEntrypoint = process.argv[1]?.endsWith("mcp.js") ?? false;

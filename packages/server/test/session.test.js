@@ -568,3 +568,73 @@ async function aliceIdOf(client, slug) {
   })
   return result.participantId
 }
+
+describe('merging', () => {
+  it('unblocks whatever was waiting on the task', async () => {
+    const { alice, bob } = await buildPhaseSession('merge-unblocks')
+    await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
+    await bob.send({ type: 'task.claim', taskId: 'theme-persist' })
+
+    const first = await alice.send({ type: 'task.merged', taskId: 'theme-toggle' })
+    assert.deepEqual(first.unblocked, [], 'theme-docs still waits on the other one')
+
+    const second = await bob.send({ type: 'task.merged', taskId: 'theme-persist' })
+    assert.deepEqual(second.unblocked, ['theme-docs'], 'the last dependency landing frees it')
+  })
+
+  it('releases the lease so the paths are editable again', async () => {
+    const { alice, bob } = await buildPhaseSession('merge-releases')
+    await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
+
+    const before = await bob.send({
+      type: 'lease.check',
+      paths: ['src/components/theme-toggle/index.tsx'],
+    })
+    assert.equal(before.allowed, false)
+
+    await alice.send({ type: 'task.merged', taskId: 'theme-toggle' })
+    const after = await bob.send({
+      type: 'lease.check',
+      paths: ['src/components/theme-toggle/index.tsx'],
+    })
+    assert.equal(after.allowed, true, 'merged work is no longer anyone task')
+  })
+
+  it('refuses to merge a task someone else holds', async () => {
+    const { alice, bob } = await buildPhaseSession('merge-forbidden')
+    // Alice created the session and is therefore the lead, who may land
+    // anything; Bob is an ordinary participant and may not.
+    await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
+    await expectError(bob.send({ type: 'task.merged', taskId: 'theme-toggle' }), 'forbidden')
+  })
+
+  it('lets the session lead land a task that is stuck', async () => {
+    const { alice, bob } = await buildPhaseSession('merge-lead')
+    await bob.send({ type: 'task.claim', taskId: 'theme-persist' })
+    // Alice created the session, so she is the lead.
+    const result = await alice.send({ type: 'task.merged', taskId: 'theme-persist' })
+    assert.ok(result)
+  })
+
+  it('is idempotent', async () => {
+    const { alice } = await buildPhaseSession('merge-twice')
+    await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
+    await alice.send({ type: 'task.merged', taskId: 'theme-toggle' })
+    const again = await alice.send({ type: 'task.merged', taskId: 'theme-toggle' })
+    assert.deepEqual(again.unblocked, [])
+  })
+
+  it('moves the session to integrate once everything has landed', async () => {
+    const { alice, bob } = await buildPhaseSession('merge-phase')
+    await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
+    await bob.send({ type: 'task.claim', taskId: 'theme-persist' })
+    await alice.send({ type: 'task.merged', taskId: 'theme-toggle' })
+    await bob.send({ type: 'task.merged', taskId: 'theme-persist' })
+    await alice.send({ type: 'task.claim', taskId: 'theme-docs' })
+    await alice.send({ type: 'task.merged', taskId: 'theme-docs' })
+    await settle()
+
+    const phase = alice.eventsOfType('session.phase').at(-1)
+    assert.equal(phase.body.phase, 'integrate')
+  })
+})

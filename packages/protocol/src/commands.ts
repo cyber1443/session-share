@@ -83,6 +83,11 @@ export const ClientCommand = z.discriminatedUnion('type', [
     branch: z.string().min(1),
     prNumber: z.number().int().nullable().default(null),
   }),
+  /**
+   * The task's work is in the contract branch. This is what unblocks whatever
+   * was waiting on it, so it is the event that actually moves the DAG.
+   */
+  z.object({ type: z.literal('task.merged'), taskId: TaskId }),
 
   /** Called by the PreToolUse hook before every Edit/Write. Must be fast. */
   z.object({ type: z.literal('lease.check'), paths: z.array(z.string().min(1)).min(1) }),
@@ -174,6 +179,7 @@ export interface CommandResultMap {
   'task.progress': { ok: true }
   'task.testResult': { ok: true }
   'task.branch': { ok: true }
+  'task.merged': { unblocked: TaskId[] }
   'lease.check': LeaseCheckResult
   'handoff.request': { request: HandoffRequest }
   'handoff.resolve': { ok: true }
