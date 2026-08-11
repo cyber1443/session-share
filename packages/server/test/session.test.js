@@ -179,6 +179,83 @@ describe('joining', () => {
   })
 })
 
+describe('planning from the board', () => {
+  it('hands the brief to a participant with a checkout', async () => {
+    const { alice, bob, aliceId } = await twoDevSession('plan-request')
+    const result = await bob.send({
+      type: 'plan.request',
+      goal: 'Add due dates to todos',
+      issueRef: null,
+      plannerId: null,
+    })
+    // The lead is Alice: she created the session.
+    assert.equal(result.plannerId, aliceId)
+    await settle()
+
+    const requested = alice.eventsOfType('plan.requested').at(-1)
+    assert.equal(requested.body.goal, 'Add due dates to todos')
+
+    /**
+     * The browser cannot read a repo, so the request only means anything if it
+     * reaches an agent that can. It travels as a directive, like any other
+     * instruction from the room.
+     */
+    const directive = alice
+      .eventsOfType('chat.message')
+      .map((event) => event.body.message)
+      .findLast((message) => message.directive)
+    assert.ok(directive, 'the request has to arrive somewhere')
+    assert.deepEqual(directive.mentions, [aliceId])
+    assert.match(directive.body, /Add due dates to todos/)
+    assert.match(directive.body, /ss_propose/)
+  })
+
+  it('records the brief on the session so the board can show it', async () => {
+    const { alice } = await twoDevSession('plan-goal')
+    await alice.send({
+      type: 'plan.request',
+      goal: 'Ship dark mode',
+      issueRef: 'https://github.com/acme/web/issues/42',
+      plannerId: null,
+    })
+    const snapshot = await alice.send({
+      type: 'session.join',
+      sessionRef: 'plan-goal',
+      githubLogin: 'alice',
+      displayName: 'Alice',
+      repoPath: '/tmp/alice/web',
+      fromSeq: null,
+    })
+    assert.equal(snapshot.snapshot.session.goal, 'Ship dark mode')
+    assert.equal(snapshot.snapshot.session.issueRef, 'https://github.com/acme/web/issues/42')
+  })
+
+  it('refuses to hand planning to someone with no checkout', async () => {
+    const { alice } = await twoDevSession('plan-no-checkout')
+    const watcher = await new TestClient(url).connect()
+    const joined = await watcher.send({
+      type: 'session.join',
+      sessionRef: 'plan-no-checkout',
+      githubLogin: 'cara',
+      displayName: 'Cara',
+      repoPath: null,
+      fromSeq: null,
+    })
+
+    const error = await expectError(
+      alice.send({
+        type: 'plan.request',
+        goal: 'anything',
+        issueRef: null,
+        plannerId: joined.participantId,
+      }),
+      'not_ready',
+    )
+    assert.match(error.message, /no checkout attached/)
+    await watcher.close()
+  })
+})
+
 describe('decomposition', () => {
   it('records a failing proposal and blocks approval on it', async () => {
     const { alice } = await twoDevSession('decomp-invalid')
@@ -233,6 +310,124 @@ describe('decomposition', () => {
     assert.equal(byId.get('theme-toggle').state, 'ready')
     assert.equal(byId.get('theme-docs').state, 'blocked')
     assert.equal(byId.get('theme-docs').depth, 1)
+  })
+
+  it('proposes who does what as soon as a split arrives', async () => {
+    const { alice, aliceId, bobId } = await twoDevSession('decomp-assign')
+    await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+    })
+    await settle()
+
+    const assigned = alice.eventsOfType('decomposition.assigned').at(-1)
+    assert.ok(assigned, 'a split with nobody on it leaves the team to negotiate')
+    assert.equal(assigned.body.assignments.length, tasks.length, 'every task goes to someone')
+
+    const by = Object.fromEntries(
+      assigned.body.assignments.map((a) => [a.taskId, a.participantId]),
+    )
+    assert.notEqual(
+      by['theme-toggle'],
+      by['theme-persist'],
+      'two tasks that can run at once must not land on one person',
+    )
+    for (const owner of Object.values(by)) assert.ok([aliceId, bobId].includes(owner))
+  })
+
+  it('lets a person move a card, and keeps it moved', async () => {
+    const { alice, bob, aliceId } = await twoDevSession('decomp-move')
+    await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+    })
+    await settle()
+
+    const moved = await bob.send({
+      type: 'task.assign',
+      taskId: 'theme-toggle',
+      participantId: aliceId,
+    })
+    const pinned = moved.assignments.find((a) => a.taskId === 'theme-toggle')
+    assert.equal(pinned.participantId, aliceId)
+    assert.equal(pinned.manual, true, 'a hand-placed card is pinned against the next rebalance')
+
+    // Moving another card must not undo it.
+    const again = await bob.send({
+      type: 'task.assign',
+      taskId: 'theme-docs',
+      participantId: aliceId,
+    })
+    assert.equal(
+      again.assignments.find((a) => a.taskId === 'theme-toggle').participantId,
+      aliceId,
+    )
+  })
+
+  it('carries the assignment onto the live tasks and tells each agent', async () => {
+    const { alice, bob, aliceId, bobId } = await twoDevSession('decomp-dispatch')
+    const proposal = await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+    })
+    await alice.send({ type: 'decomposition.approve', decompositionId: proposal.decompositionId })
+    await bob.send({ type: 'decomposition.approve', decompositionId: proposal.decompositionId })
+    await settle()
+
+    const seeded = alice.eventsOfType('tasks.seeded').at(-1)
+    assert.ok(
+      seeded.body.tasks.every((task) => task.assigneeId),
+      'approval turns the arrangement into work, so every task knows whose it is',
+    )
+
+    /**
+     * The point of approving on the board is that nobody then has to walk over
+     * and say "we approved it". Each assignee is told, in their own session.
+     */
+    const directives = alice
+      .eventsOfType('chat.message')
+      .map((event) => event.body.message)
+      .filter((message) => message.directive)
+    assert.equal(directives.length, 2, 'one briefing each')
+    assert.deepEqual(
+      directives.flatMap((message) => message.mentions).sort(),
+      [aliceId, bobId].sort(),
+    )
+    assert.match(directives[0].body, /The split was approved/)
+  })
+
+  it('hands you your own task first', async () => {
+    const { alice, bob, aliceId } = await twoDevSession('decomp-pick')
+    const proposal = await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+    })
+    // Put both ready tasks on Alice, so affinity cannot explain the result.
+    await alice.send({ type: 'task.assign', taskId: 'theme-toggle', participantId: aliceId })
+    await alice.send({ type: 'task.assign', taskId: 'theme-persist', participantId: aliceId })
+    await alice.send({ type: 'decomposition.approve', decompositionId: proposal.decompositionId })
+    await bob.send({ type: 'decomposition.approve', decompositionId: proposal.decompositionId })
+    await alice.send({
+      type: 'contract.committed',
+      branch: 'ss/decomp-pick/contract',
+      commitSha: 'abc1234',
+      prNumber: null,
+    })
+
+    const mine = await alice.send({ type: 'task.claim', taskId: null })
+    assert.equal(mine.task.assigneeId, aliceId, 'an assignment has to survive into /ss:next')
   })
 
   it('keeps tasks unclaimable until the contract lands', async () => {
@@ -445,17 +640,20 @@ describe('chat', () => {
     await bob.send({ type: 'chat.post', body: 'second', taskRef: null, asAgent: false })
     await settle()
 
-    assert.equal(bob.eventsOfType('chat.message').length, 2)
+    // The session briefs each agent in the same room, so filter to what people said.
+    const said = (messages) => messages.filter((m) => m.authorKind !== 'system').map((m) => m.body)
+
+    assert.deepEqual(
+      said(bob.eventsOfType('chat.message').map((e) => e.body.message)),
+      ['first', 'second'],
+    )
     const { messages } = await bob.send({
       type: 'chat.read',
       limit: 50,
       beforeSeq: null,
       taskRef: null,
     })
-    assert.deepEqual(
-      messages.map((m) => m.body),
-      ['first', 'second'],
-    )
+    assert.deepEqual(said(messages), ['first', 'second'])
   })
 
   it('filters history down to one task', async () => {
@@ -573,7 +771,12 @@ describe('reconnect', () => {
     assert.equal(rebuilt.seq, live.seq)
     assert.equal(rebuilt.tasks.get('theme-toggle').state, 'claimed')
     assert.equal(rebuilt.leases.size, 1)
-    assert.equal(rebuilt.chat.length, 1)
+    assert.deepEqual(
+      rebuilt.chat.map((m) => m.body),
+      live.chat.map((m) => m.body),
+      'the room folds back identically, briefings included',
+    )
+    assert.equal(rebuilt.tasks.get('theme-toggle').assigneeId, live.tasks.find((t) => t.id === 'theme-toggle').assigneeId)
   })
 })
 

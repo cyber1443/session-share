@@ -17,6 +17,7 @@ import {
   type Task,
   type TaskId,
   analyzeDag,
+  autoAssign,
   globsIntersect,
   parseMentions,
   parseTaskRefs,
@@ -121,8 +122,12 @@ export class SessionService {
         return this.join(command, ctx)
       case 'session.sync':
         return { upToSeq: this.store.maxSeq(this.requireSession(ctx)) }
+      case 'plan.request':
+        return this.requestPlan(command, ctx)
       case 'decomposition.propose':
         return this.propose(command, ctx)
+      case 'task.assign':
+        return this.assign(command, ctx)
       case 'decomposition.approve':
         return this.approve(command, ctx)
       case 'decomposition.reject':
@@ -176,6 +181,7 @@ export class SessionService {
       phase: 'plan',
       leadId: null,
       contractBranch: null,
+      goal: null,
       createdAt,
     }
     this.emit(sessionId, null, { type: 'session.created', session })
@@ -276,6 +282,104 @@ export class SessionService {
 
   // -- decomposition -------------------------------------------------------
 
+  /**
+   * The board's half of planning. It cannot read a repo or run a model, so it
+   * does the part it is good at -- capturing the brief and choosing whose agent
+   * does the work -- and hands the rest over as a directive, which is the same
+   * mechanism the room already uses to drive an agent.
+   */
+  private requestPlan(
+    command: Extract<ClientCommand, { type: 'plan.request' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    if (state.session?.phase !== 'plan') {
+      throw new ServiceError('not_ready', 'This session is past planning.')
+    }
+
+    /**
+     * Planning needs a checkout to read. Someone watching from the board with
+     * no repo attached cannot do it, and silently picking them would look like
+     * the request vanished.
+     */
+    const candidates = [...state.participants.values()].filter((p) => p.repoPath && p.connected)
+    const requested = command.plannerId ? state.participants.get(command.plannerId) : null
+    if (command.plannerId && !requested) {
+      throw new ServiceError('not_found', 'That participant is not in this session.')
+    }
+    if (requested && !requested.repoPath) {
+      throw new ServiceError(
+        'not_ready',
+        `${requested.displayName} is watching from the board with no checkout attached, so their Claude Code cannot read the repo. Ask them to run /ss:join in their clone.`,
+      )
+    }
+
+    const planner =
+      requested ??
+      candidates.find((p) => p.id === state.session?.leadId) ??
+      candidates.find((p) => p.id === participantId) ??
+      candidates[0]
+
+    if (!planner) {
+      throw new ServiceError(
+        'not_ready',
+        'Nobody here has a checkout attached, so there is no repo to plan against. Run /ss:host or /ss:join in a clone first.',
+      )
+    }
+
+    this.emit(sessionId, participantId, {
+      type: 'plan.requested',
+      goal: command.goal,
+      issueRef: command.issueRef,
+      plannerId: planner.id,
+    })
+
+    const asker = state.participants.get(participantId)?.displayName ?? 'Someone'
+    this.systemDirective(
+      sessionId,
+      participantId,
+      [planner.id],
+      [
+        `${asker} asked for a split of this session, from the board:`,
+        '',
+        command.goal,
+        command.issueRef ? `\nIssue: ${command.issueRef}` : '',
+        '',
+        'Read the repository, then propose the split with ss_propose: a contract of the shared',
+        'types and stubs every task will import, plus tasks that own disjoint file globs and are',
+        'each proved by one command. The server validates it and the team approves on the board.',
+      ]
+        .filter((line) => line !== '')
+        .join('\n'),
+    )
+
+    return { plannerId: planner.id, goal: command.goal }
+  }
+
+  /**
+   * A message from the session itself rather than from a person, delivered into
+   * the named participants' Claude Code the same way a human directive is.
+   */
+  private systemDirective(
+    sessionId: SessionId,
+    actorId: ParticipantId | null,
+    mentions: ParticipantId[],
+    body: string,
+  ): void {
+    const message: ChatMessage = {
+      id: randomUUID() as MessageId,
+      sessionId,
+      authorId: null,
+      authorKind: 'system',
+      body,
+      taskRef: null,
+      mentions,
+      directive: true,
+      createdAt: Date.now(),
+    }
+    this.emit(sessionId, actorId, { type: 'chat.message', message })
+  }
+
   private propose(
     command: Extract<ClientCommand, { type: 'decomposition.propose' }>,
     ctx: CommandContext,
@@ -309,12 +413,95 @@ export class SessionService {
         proposedBy: participantId,
         status: 'proposed',
         approvals: [],
+        assignments: [],
         createdAt: Date.now(),
       },
       validation,
     })
 
+    /**
+     * Balance it immediately rather than waiting to be asked. An unassigned
+     * split leaves the team to negotiate who does what, which is exactly the
+     * coordination this is supposed to remove -- and the arrangement is a
+     * proposal like everything else here, so it can be dragged around before
+     * anyone approves.
+     */
+    if (validation.ok) this.rebalance(sessionId, participantId, state, [])
+
     return { decompositionId, validation }
+  }
+
+  /** Recomputes the automatic part of the assignment around whatever is pinned. */
+  private rebalance(
+    sessionId: SessionId,
+    actorId: ParticipantId,
+    state: SessionState,
+    pinned: Array<{ taskId: TaskId; participantId: ParticipantId }>,
+  ) {
+    const assignments = autoAssign({
+      tasks: state.decomposition?.tasks ?? [],
+      // Board-only watchers are left out: work goes to people with a checkout.
+      participants: [...state.participants.values()]
+        .filter((p) => p.repoPath)
+        .sort((a, b) => a.joinedAt - b.joinedAt)
+        .map((p) => p.id),
+      pinned,
+    })
+    this.emit(sessionId, actorId, { type: 'decomposition.assigned', assignments })
+    return assignments
+  }
+
+  /**
+   * Moving a card. During planning this edits the proposed arrangement; once
+   * tasks are live it re-points an unclaimed one, which is how you hand work
+   * over without anyone having to release a lease.
+   */
+  private assign(command: Extract<ClientCommand, { type: 'task.assign' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+
+    if (command.participantId && !state.participants.has(command.participantId)) {
+      throw new ServiceError('not_found', 'That participant is not in this session.')
+    }
+
+    const live = state.tasks.get(command.taskId)
+    if (live) {
+      if (live.ownerId && live.ownerId !== command.participantId) {
+        throw new ServiceError(
+          'conflict',
+          `"${live.id}" is already being worked on by ${state.participants.get(live.ownerId)?.displayName ?? 'someone'}. They have to release it first.`,
+        )
+      }
+      this.emit(sessionId, participantId, {
+        type: 'task.assigned',
+        taskId: command.taskId,
+        assigneeId: command.participantId,
+      })
+      return {
+        assignments: [...state.tasks.values()]
+          .filter((task) => task.assigneeId)
+          .map((task) => ({ taskId: task.id, participantId: task.assigneeId! })),
+      }
+    }
+
+    const decomposition = state.decomposition
+    if (!decomposition?.tasks.some((task) => task.id === command.taskId)) {
+      throw new ServiceError('not_found', `No task "${command.taskId}" in this session.`)
+    }
+
+    /**
+     * Only choices people made are pinned. Everything the balancer decided is
+     * recomputed around them, so moving one card redistributes the rest instead
+     * of leaving the previous arrangement frozen with one hole in it.
+     */
+    const pinned = decomposition.assignments
+      .filter((a) => a.manual && a.taskId !== command.taskId)
+      .concat(
+        command.participantId
+          ? [{ taskId: command.taskId, participantId: command.participantId, manual: true }]
+          : [],
+      )
+
+    return { assignments: this.rebalance(sessionId, participantId, state, pinned) }
   }
 
   private approve(
@@ -370,11 +557,15 @@ export class SessionService {
   private seedTasks(sessionId: SessionId, actorId: ParticipantId, state: SessionState): void {
     const specs = state.decomposition?.tasks ?? []
     const { depthByTask } = analyzeDag(specs)
+    const assignedTo = new Map(
+      (state.decomposition?.assignments ?? []).map((a) => [a.taskId, a.participantId]),
+    )
 
     const tasks: Task[] = specs.map((spec) => ({
       ...spec,
       sessionId,
       state: spec.dependsOn.length === 0 ? 'ready' : 'blocked',
+      assigneeId: assignedTo.get(spec.id) ?? null,
       ownerId: null,
       branch: null,
       prNumber: null,
@@ -384,6 +575,48 @@ export class SessionService {
     }))
 
     this.emit(sessionId, actorId, { type: 'tasks.seeded', tasks })
+    this.dispatch(sessionId, actorId, tasks, state)
+  }
+
+  /**
+   * Approval is the moment the plan becomes work, so it is the moment each
+   * person's agent should hear about it. Without this the board would show a
+   * finished plan that nobody had been told about, and someone would have to
+   * walk over and say "we approved it, run /ss:next".
+   */
+  private dispatch(
+    sessionId: SessionId,
+    actorId: ParticipantId,
+    tasks: Task[],
+    state: SessionState,
+  ): void {
+    const byAssignee = new Map<ParticipantId, Task[]>()
+    for (const task of tasks) {
+      if (!task.assigneeId) continue
+      byAssignee.set(task.assigneeId, [...(byAssignee.get(task.assigneeId) ?? []), task])
+    }
+
+    const contractLanded = Boolean(state.session?.contractBranch)
+    for (const [assignee, theirs] of byAssignee) {
+      const listed = theirs
+        .map((task) => `  ${task.id} -- ${task.title} (${task.estimateMinutes}m)${task.state === 'blocked' ? `, waiting on ${task.dependsOn.join(', ')}` : ''}`)
+        .join('\n')
+
+      this.systemDirective(
+        sessionId,
+        actorId,
+        [assignee],
+        [
+          `The split was approved. ${theirs.length} task(s) are yours:`,
+          '',
+          listed,
+          '',
+          contractLanded
+            ? 'Run ss_next to claim the first one and start.'
+            : 'Nothing is claimable until the contract lands. If you are the lead, run ss_land_contract; otherwise wait for it and then run ss_next.',
+        ].join('\n'),
+      )
+    }
   }
 
   private reject(
@@ -418,7 +651,34 @@ export class SessionService {
     })
     // Only now is the seam real, so only now can tasks be claimed.
     this.emit(sessionId, participantId, { type: 'session.phase', phase: 'build' })
+
+    /**
+     * The people who were told to wait are the people who now need to know they
+     * can stop waiting. Whoever landed the contract already knows.
+     */
+    for (const [assignee, theirs] of this.tasksByAssignee(state)) {
+      if (assignee === participantId) continue
+      const ready = theirs.filter((task) => task.state === 'ready')
+      if (ready.length === 0) continue
+      this.systemDirective(
+        sessionId,
+        participantId,
+        [assignee],
+        `The contract landed on ${command.branch}. Your ${ready.length === 1 ? 'task is' : 'tasks are'} claimable now: ${ready
+          .map((task) => task.id)
+          .join(', ')}. Run ss_sync then ss_next to start.`,
+      )
+    }
     return { ok: true as const }
+  }
+
+  private tasksByAssignee(state: SessionState): Map<ParticipantId, Task[]> {
+    const byAssignee = new Map<ParticipantId, Task[]>()
+    for (const task of state.tasks.values()) {
+      if (!task.assigneeId) continue
+      byAssignee.set(task.assigneeId, [...(byAssignee.get(task.assigneeId) ?? []), task])
+    }
+    return byAssignee
   }
 
   // -- tasks and leases ----------------------------------------------------
@@ -618,6 +878,26 @@ export class SessionService {
     const unblocked = blockedBefore
       .filter((t) => state.tasks.get(t.id)?.state === 'ready')
       .map((t) => t.id)
+
+    /**
+     * Landing work is what wakes up whoever was waiting on it. Telling them is
+     * the difference between a DAG that flows and one where each person has to
+     * keep checking whether their turn has come.
+     */
+    const waking = new Map<ParticipantId, TaskId[]>()
+    for (const taskId of unblocked) {
+      const assignee = state.tasks.get(taskId)?.assigneeId
+      if (!assignee || assignee === participantId) continue
+      waking.set(assignee, [...(waking.get(assignee) ?? []), taskId])
+    }
+    for (const [assignee, taskIds] of waking) {
+      this.systemDirective(
+        sessionId,
+        participantId,
+        [assignee],
+        `${task.id} landed, which unblocks ${taskIds.join(', ')} -- yours. Run ss_sync then ss_next.`,
+      )
+    }
 
     // Everything merged means the build phase is over.
     const remaining = [...state.tasks.values()].filter((t) => t.state !== 'merged')
