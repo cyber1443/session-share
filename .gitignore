@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.next/
+.turbo/
+*.tsbuildinfo
+*.log
+
+# local state
+*.db
+*.db-shm
+*.db-wal
+.data/
+.env
+.env.local
+generated-images/
+.DS_Store

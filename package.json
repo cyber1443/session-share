@@ -1,0 +1,23 @@
+{
+  "name": "session-share",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.20.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "demo": "turbo run build && node --disable-warning=ExperimentalWarning scripts/demo.mjs",
+    "server": "turbo run build && pnpm --filter @session-share/server start",
+    "attach": "node scripts/attach.mjs",
+    "lint": "turbo run lint"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2"
+  }
+}
