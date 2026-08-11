@@ -10,8 +10,7 @@ Both people install the plugin. One hosts, the other pastes one string.
 
 ### Installing, per person
 
-If this repository is private, give your teammate read access on GitHub first —
-their Claude Code clones it with their own credentials. Then each of them runs,
+This repository is public, so there is nothing to grant. Each of them runs,
 once, in Claude Code:
 
 ```
@@ -89,9 +88,14 @@ host — the address the other machine should dial. Most failures in this setup
 are network or credentials, and they are far easier to read here than as a
 session that mysteriously does nothing.
 
-**1. Access.** Laptop B's GitHub account needs read access to
-`cyber1443/session-share` while it is private (Settings → Collaborators), and
-**both** accounts need push access to the project repo you are collaborating on.
+**1. Access.** `cyber1443/session-share` is public, so installing needs nothing.
+But **both accounts need _push_ access to the project repo you are working in** —
+public means anyone can read, not write, and `/ss:done` pushes a branch. Add the
+second account under Settings → Collaborators on that repo.
+
+A ready-made one to try against: **`cyber1443/todo-app-colab`** — a small todo
+app with `src/lib`, `src/components` and `docs`, which is enough structure for a
+split to land on real seams.
 
 **2. Install, on each laptop:**
 

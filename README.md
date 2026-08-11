@@ -56,7 +56,11 @@ built into Node. A native database driver would have meant a compile step on
 every machine.)
 
 They still clone **the project you are working on together** — one checkout per
-person, which the lease gate depends on. Just not this repo.
+person, which the lease gate depends on. Just not this repo. Both people need
+push access to that project repo, since finishing a task pushes a branch.
+
+To try it against something disposable, use
+[cyber1443/todo-app-colab](https://github.com/cyber1443/todo-app-colab).
 
 For local development of session-share itself, `pnpm bundle && pnpm attach
 /path/to/repo` wires a checkout straight to your working copy instead.
