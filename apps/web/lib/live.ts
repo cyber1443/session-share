@@ -12,7 +12,17 @@ import {
 } from '@session-share/protocol'
 import { api } from './api'
 
-const WS_URL = process.env.NEXT_PUBLIC_SESSION_SHARE_WS ?? 'ws://127.0.0.1:4310/ws'
+/**
+ * Same origin when the coordination server is also serving this page, which is
+ * the peer-mode shape. In development the board is on its own port and needs to
+ * be told where the server is, since a WebSocket cannot be proxied by a rewrite.
+ */
+function wsUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_SESSION_SHARE_WS
+  if (configured) return configured
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${protocol}//${window.location.host}/ws`
+}
 const RECONNECT_MIN_MS = 500
 const RECONNECT_MAX_MS = 10_000
 
@@ -85,7 +95,7 @@ export function useLiveSession(sessionRef: string) {
       if (closed.current) return
       try {
         const { ticket } = await api.wsTicket()
-        const socket = new WebSocket(`${WS_URL}?ticket=${encodeURIComponent(ticket)}`)
+        const socket = new WebSocket(`${wsUrl()}?ticket=${encodeURIComponent(ticket)}`)
         socketRef.current = socket
 
         socket.onopen = () => {

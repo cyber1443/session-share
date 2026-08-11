@@ -5,6 +5,8 @@ import { api, type Me } from '@/lib/api'
 
 interface AuthState {
   me: Me | null
+  /** peer: the invite is the credential. oauth: GitHub says who you are. */
+  mode: 'oauth' | 'peer'
   devLogin: boolean
   githubConfigured: boolean
   loading: boolean
@@ -18,12 +20,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [me, setMe] = useState<Me | null>(null)
   const [devLogin, setDevLogin] = useState(false)
   const [githubConfigured, setGithubConfigured] = useState(true)
+  const [mode, setMode] = useState<'oauth' | 'peer'>('oauth')
   const [loading, setLoading] = useState(true)
 
   const refresh = useCallback(async () => {
     try {
       const result = await api.me()
       setMe(result.user)
+      setMode(result.mode)
       setDevLogin(result.devLogin)
       setGithubConfigured(result.githubConfigured)
     } catch {
@@ -43,7 +47,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [refresh])
 
   return (
-    <AuthContext.Provider value={{ me, devLogin, githubConfigured, loading, refresh, logout }}>
+    <AuthContext.Provider
+      value={{ me, mode, devLogin, githubConfigured, loading, refresh, logout }}
+    >
       {children}
     </AuthContext.Provider>
   )

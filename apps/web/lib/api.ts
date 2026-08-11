@@ -42,12 +42,30 @@ export class ApiError extends Error {
   }
 }
 
+const TOKEN_KEY = 'session-share.participantToken'
+
+/**
+ * In peer mode there is no cookie: the board holds the participant token it got
+ * by redeeming an invite, and presents that instead. Kept in localStorage so a
+ * reload does not send someone back to the invite link.
+ */
+export const peerToken = {
+  get: () => (typeof window === 'undefined' ? null : window.localStorage.getItem(TOKEN_KEY)),
+  set: (token: string) => window.localStorage.setItem(TOKEN_KEY, token),
+  clear: () => window.localStorage.removeItem(TOKEN_KEY),
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = peerToken.get()
   // A JSON content-type with no body is rejected outright, so only set it when
   // there is something to send.
   const response = await fetch(path, {
     ...init,
-    headers: init?.body ? { 'content-type': 'application/json', ...init.headers } : init?.headers,
+    headers: {
+      ...(init?.body ? { 'content-type': 'application/json' } : {}),
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...init?.headers,
+    },
   })
   const payload = response.status === 204 ? null : await response.json().catch(() => null)
   if (!response.ok) {
@@ -61,9 +79,29 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T
 }
 
+export interface PeerJoinResult {
+  participantId: string
+  participantToken: string
+  sessionRef: string
+  sessionTitle: string
+  displayName: string
+  githubLogin: string
+}
+
 export const api = {
   me: () =>
-    request<{ user: Me | null; devLogin: boolean; githubConfigured: boolean }>('/api/me'),
+    request<{
+      mode: 'oauth' | 'peer'
+      user: Me | null
+      devLogin: boolean
+      githubConfigured: boolean
+    }>('/api/me'),
+  /** Redeem an invite for a browser seat -- no checkout, so no lease. */
+  peerJoin: (invite: string, identity: { githubLogin: string; displayName: string }) =>
+    request<PeerJoinResult>('/api/peer/join', {
+      method: 'POST',
+      body: JSON.stringify({ invite, repoPath: null, ...identity }),
+    }),
   devLogin: (login: string) =>
     request<{ user: Me }>('/auth/dev', { method: 'POST', body: JSON.stringify({ login }) }),
   logout: () => request<{ ok: true }>('/auth/logout', { method: 'POST' }),
@@ -77,6 +115,11 @@ export const api = {
   joinToken: (ref: string) =>
     request<{ token: string; expiresAt: number; command: string }>(
       `/api/sessions/${ref}/join-token`,
+      { method: 'POST' },
+    ),
+  invite: (ref: string) =>
+    request<{ invite: string; sessionRef: string; sessionTitle: string }>(
+      `/api/sessions/${ref}/invite`,
       { method: 'POST' },
     ),
   wsTicket: () => request<{ ticket: string }>('/api/ws-ticket'),

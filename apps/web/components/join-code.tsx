@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { packInvite } from '@session-share/protocol'
 import { api } from '@/lib/api'
 
 /**
@@ -8,7 +9,15 @@ import { api } from '@/lib/api'
  * this hands that identity to a checkout on some machine, without anyone typing
  * a server URL or an id.
  */
-export function JoinCode({ sessionRef, onClose }: { sessionRef: string; onClose: () => void }) {
+export function JoinCode({
+  sessionRef,
+  mode,
+  onClose,
+}: {
+  sessionRef: string
+  mode: 'oauth' | 'peer'
+  onClose: () => void
+}) {
   const [token, setToken] = useState<string | null>(null)
   const [expiresAt, setExpiresAt] = useState<number>(0)
   const [error, setError] = useState<string | null>(null)
@@ -16,21 +25,27 @@ export function JoinCode({ sessionRef, onClose }: { sessionRef: string; onClose:
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
-    api
-      .joinToken(sessionRef)
+    /**
+     * Peer sessions hand out the invite itself -- reusable, and it names the
+     * server so nobody has to be told an address. Hosted sessions mint a
+     * single-use code instead, because there identity is worth protecting.
+     */
+    const request = mode === 'peer' ? api.invite(sessionRef) : api.joinToken(sessionRef)
+    request
       .then((result) => {
-        setToken(result.token)
-        setExpiresAt(result.expiresAt)
+        setToken('invite' in result ? packInvite({ url: window.location.origin, token: result.invite }) : result.token)
+        setExpiresAt('expiresAt' in result ? result.expiresAt : 0)
       })
       .catch((failure: Error) => setError(failure.message))
-  }, [sessionRef])
+  }, [sessionRef, mode])
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
   }, [])
 
-  const remaining = Math.max(0, expiresAt - now)
+  const expires = expiresAt > 0
+  const remaining = expires ? Math.max(0, expiresAt - now) : Infinity
   const minutes = Math.floor(remaining / 60000)
   const seconds = Math.floor((remaining % 60000) / 1000)
   const command = token ? `/ss:join ${token}` : ''
@@ -68,7 +83,9 @@ export function JoinCode({ sessionRef, onClose }: { sessionRef: string; onClose:
 
             <div className="flex items-center justify-between gap-4">
               <p className="text-xs text-mute">
-                {remaining > 0 ? (
+                {!expires ? (
+                  <>anyone with this can join · reusable</>
+                ) : remaining > 0 ? (
                   <>
                     single use · expires in {minutes}:{String(seconds).padStart(2, '0')}
                   </>
@@ -80,7 +97,7 @@ export function JoinCode({ sessionRef, onClose }: { sessionRef: string; onClose:
                 <button className="btn" onClick={onClose}>
                   close
                 </button>
-                <button className="btn btn-accent" onClick={() => void copy()} disabled={remaining === 0}>
+                <button className="btn btn-accent" onClick={() => void copy()} disabled={expires && remaining === 0}>
                   {copied ? 'copied' : 'copy'}
                 </button>
               </div>

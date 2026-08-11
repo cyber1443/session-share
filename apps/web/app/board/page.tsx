@@ -1,9 +1,12 @@
 'use client'
 
-import { use, useState } from 'react'
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import type { Task } from '@session-share/protocol'
 import { AuthProvider, SignIn, useAuth } from '@/components/auth'
+import { PeerGate } from '@/components/peer-gate'
+import { api, peerToken } from '@/lib/api'
+import { useQueryParam } from '@/lib/query'
 import { Dag } from '@/components/dag'
 import { Graph } from '@/components/graph'
 import { JoinCode } from '@/components/join-code'
@@ -24,7 +27,7 @@ const DOT = [
 const PHASES = ['plan', 'build', 'integrate', 'done'] as const
 
 function Board({ slug }: { slug: string }) {
-  const { me } = useAuth()
+  const { me, mode } = useAuth()
   const { snapshot, status, error, activity, events, send } = useLiveSession(slug)
   const [selected, setSelected] = useState<string | null>(null)
   /** Topics answers "what is this about"; order answers "what unblocks what". */
@@ -245,7 +248,7 @@ function Board({ slug }: { slug: string }) {
         ) : null}
       </div>
 
-      {pairing ? <JoinCode sessionRef={slug} onClose={() => setPairing(false)} /> : null}
+      {pairing ? <JoinCode sessionRef={slug} mode={mode} onClose={() => setPairing(false)} /> : null}
     </div>
   )
 }
@@ -331,17 +334,46 @@ function Row({ label, value }: { label: string; value: string }) {
   )
 }
 
-function Gate({ slug }: { slug: string }) {
-  const { me, loading } = useAuth()
-  if (loading) return <div className="p-6 text-xs text-mute">…</div>
-  return me ? <Board slug={slug} /> : <SignIn />
+function Gate() {
+  const { me, mode, loading } = useAuth()
+  const { value: slug, ready } = useQueryParam('s')
+  const [peerSlug, setPeerSlug] = useState<string | null>(null)
+  const [resolving, setResolving] = useState(false)
+
+  /**
+   * A returning peer visitor has a token but no session in the URL. Their token
+   * is scoped to exactly one session, so the server can say which.
+   */
+  useEffect(() => {
+    if (loading || !ready || mode !== 'peer' || peerSlug || slug) return
+    if (!peerToken.get()) return
+
+    setResolving(true)
+    api
+      .sessions()
+      .then((result) => setPeerSlug(result.sessions[0]?.slug ?? null))
+      .catch(() => peerToken.clear())
+      .finally(() => setResolving(false))
+  }, [loading, ready, mode, peerSlug, slug])
+
+  if (loading || !ready || resolving) return <div className="p-6 text-xs text-mute">…</div>
+
+  // A peer board is authorised by the token it holds, not by an account.
+  if (mode === 'peer') {
+    const seated = peerSlug ?? (peerToken.get() ? slug : null)
+    if (!seated) return <PeerGate onSeated={(seat) => setPeerSlug(seat.sessionRef)} />
+    return <Board slug={seated} />
+  }
+
+  if (!me) return <SignIn />
+  if (!slug) return <div className="p-6 text-xs text-mute">No session selected.</div>
+  return <Board slug={slug} />
 }
 
-export default function SessionPage({ params }: { params: Promise<{ slug: string }> }) {
-  const { slug } = use(params)
+export default function SessionPage() {
   return (
     <AuthProvider>
-      <Gate slug={slug} />
+      <Gate />
     </AuthProvider>
   )
 }

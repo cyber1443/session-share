@@ -1,17 +1,28 @@
 /**
- * Everything the browser talks to is proxied to the coordination server, so the
- * app is one origin: the session cookie works, OAuth callbacks land in the right
- * place, and there is no CORS anywhere.
+ * Two shapes, one app.
+ *
+ * In development the board runs on its own port and proxies to the
+ * coordination server, so the session cookie and the OAuth callback stay
+ * same-origin. For a peer session it is exported to static files and served BY
+ * the coordination server, so hosting is one process on one port rather than
+ * two things to start and a proxy between them.
  */
 const SERVER = process.env.SESSION_SHARE_URL ?? 'http://127.0.0.1:4310'
+const isExport = process.env.SESSION_SHARE_EXPORT === '1'
 
 /** @type {import('next').NextConfig} */
-export default {
-  async rewrites() {
-    return [
-      { source: '/auth/:path*', destination: `${SERVER}/auth/:path*` },
-      { source: '/api/:path*', destination: `${SERVER}/api/:path*` },
-      { source: '/sessions/:ref/snapshot', destination: `${SERVER}/sessions/:ref/snapshot` },
-    ]
-  },
-}
+const config = isExport
+  ? // Directory-style output (`board/index.html`) so a plain static file server
+    // resolves `/board` without needing rewrite rules of its own.
+    { output: 'export', trailingSlash: true, images: { unoptimized: true } }
+  : {
+      async rewrites() {
+        return [
+          { source: '/auth/:path*', destination: `${SERVER}/auth/:path*` },
+          { source: '/api/:path*', destination: `${SERVER}/api/:path*` },
+          { source: '/sessions/:ref/snapshot', destination: `${SERVER}/sessions/:ref/snapshot` },
+        ]
+      },
+    }
+
+export default config

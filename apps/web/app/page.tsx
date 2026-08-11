@@ -18,7 +18,7 @@ const PALETTE = [
 ]
 
 function Sessions() {
-  const { me, logout } = useAuth()
+  const { me, mode, logout } = useAuth()
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [creating, setCreating] = useState(false)
   const [pairing, setPairing] = useState<string | null>(null)
@@ -63,7 +63,7 @@ function Sessions() {
           <li key={session.id} className="panel p-4">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <Link href={`/s/${session.slug}`} className="text-sm hover:text-accent">
+                <Link href={`/board?s=${session.slug}`} className="text-sm hover:text-accent">
                   {session.title}
                 </Link>
                 <p className="mt-1 truncate text-xs text-mute">
@@ -115,7 +115,7 @@ function Sessions() {
           }}
         />
       ) : null}
-      {pairing ? <JoinCode sessionRef={pairing} onClose={() => setPairing(null)} /> : null}
+      {pairing ? <JoinCode sessionRef={pairing} mode={mode} onClose={() => setPairing(null)} /> : null}
     </div>
   )
 }
@@ -221,8 +221,20 @@ function CreateSession({ onClose, onCreated }: { onClose: () => void; onCreated:
 }
 
 function Gate() {
-  const { me, loading } = useAuth()
-  if (loading) return <div className="p-6 text-xs text-mute">…</div>
+  const { me, mode, loading } = useAuth()
+
+  /**
+   * A peer server has no account to land on and no list to browse -- it hosts
+   * one session per invite. Send people straight to the board, which knows how
+   * to redeem an invite or resume with the token it already holds.
+   */
+  useEffect(() => {
+    if (loading || mode !== 'peer') return
+    const invite = new URLSearchParams(window.location.search).get('join')
+    window.location.replace(invite ? `/board?join=${encodeURIComponent(invite)}` : '/board')
+  }, [loading, mode])
+
+  if (loading || mode === 'peer') return <div className="p-6 text-xs text-mute">…</div>
   return me ? <Sessions /> : <SignIn />
 }
 
