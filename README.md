@@ -45,6 +45,9 @@ A participant is a person, not a checkout. You can watch, chat and approve from
 the board with nothing attached; attaching is what turns the lease gate on for a
 particular working tree.
 
+For a real run with two GitHub accounts and two Claude subscriptions, follow
+[docs/testing-with-real-users.md](docs/testing-with-real-users.md).
+
 ### Configuring GitHub sign-in
 
 Register an OAuth App with callback `http://127.0.0.1:3000/auth/github/callback`,
@@ -100,6 +103,20 @@ pnpm --filter @session-share/web dev                             # :3000
 Open <http://localhost:3000>. Everything the browser touches is proxied to the
 coordination server, so it is one origin — no CORS, and the OAuth callback lands
 where it should.
+
+The board shows the same tasks two ways:
+
+- **Topics** — a force-directed knowledge graph. A hub per area of the codebase,
+  tasks orbiting the hub they belong to, and the contract files in the middle
+  with dotted links to every task that assumes them, so the seam is visibly the
+  centre of the work. Hovering isolates a neighbourhood; nodes drag, the canvas
+  pans and zooms. Ring colour is the topic, fill is the task state.
+- **Order** — the dependency DAG, left to right by depth, which answers the
+  different question of what unblocks what.
+
+Topics are derived from the paths a task owns rather than from labels anyone has
+to maintain: tasks are cut as vertical slices, so the folder structure already
+says what they are about.
 
 ### With your own Claude Code
 
