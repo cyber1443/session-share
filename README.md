@@ -49,6 +49,22 @@ person, which the lease gate depends on. Just not this repo.
 For local development of session-share itself, `pnpm bundle && pnpm attach
 /path/to/repo` wires a checkout straight to your working copy instead.
 
+### Keeping the bundle honest
+
+`packages/plugin/bundle` is committed build output, which means it can fall
+behind the source it came from — and the failure lands on whoever installs next,
+not on you. So it is checked rather than remembered:
+
+- `pnpm bundle` stamps the bundle with a hash of every source it was built from.
+- `pnpm check-bundle` compares that stamp against the working tree.
+- A **pre-push hook** runs the same check and refuses to push a stale bundle. It
+  rebuilds for you and asks you to commit the result. The check is a hash
+  comparison, so pushes with an up-to-date bundle pay nothing.
+- The hook installs itself: `pnpm install` sets `core.hooksPath` to `.githooks`.
+
+The export uses a fixed build id, so rebuilding identical sources produces an
+identical bundle and no diff noise.
+
 ## Two ways to run it
 
 **Peer** is the default and needs no setup at all. One person runs `/ss:host`;
