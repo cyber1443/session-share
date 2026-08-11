@@ -14639,6 +14639,12 @@ var Session = external_exports.object({
   /** Whoever ran /ss:plan. Holds the approval vote once participants > 3. */
   leadId: ParticipantId.nullable(),
   contractBranch: external_exports.string().nullable(),
+  /**
+   * What the session was asked to build, in the words of whoever asked. Set
+   * from the board's plan panel; the title is a name, this is the brief the
+   * planner works from.
+   */
+  goal: external_exports.string().nullable().default(null),
   createdAt: Timestamp
 });
 var ParticipantActivity = external_exports.object({
@@ -14697,6 +14703,11 @@ var TaskSpec = external_exports.object({
   acceptance: Acceptance,
   estimateMinutes: external_exports.number().int().min(5).max(240)
 });
+var Assignment = external_exports.object({
+  taskId: TaskId,
+  participantId: ParticipantId,
+  manual: external_exports.boolean().default(false)
+});
 var DecompositionStatus = external_exports.enum(["proposed", "approved", "rejected"]);
 var Decomposition = external_exports.object({
   id: DecompositionId,
@@ -14709,6 +14720,15 @@ var Decomposition = external_exports.object({
   proposedBy: ParticipantId,
   status: DecompositionStatus,
   approvals: external_exports.array(ParticipantId).default([]),
+  /**
+   * Who is meant to do what, decided while the split is still a proposal.
+   *
+   * Kept here rather than on the TaskSpec because the planner does not decide
+   * it: the server proposes a balanced assignment the moment a split arrives,
+   * people move cards around on the board, and approval is what turns the
+   * final arrangement into tasks.
+   */
+  assignments: external_exports.array(Assignment).default([]),
   createdAt: Timestamp
 });
 var ValidationCode = external_exports.enum([
@@ -14765,6 +14785,12 @@ var TestResult = external_exports.object({
 var Task = TaskSpec.extend({
   sessionId: SessionId,
   state: TaskState,
+  /**
+   * Who it is meant for, carried over from the approved split. Distinct from
+   * `ownerId`, which is who actually holds the lease right now: an assignment
+   * is a plan, a claim is a fact.
+   */
+  assigneeId: ParticipantId.nullable().default(null),
   ownerId: ParticipantId.nullable(),
   branch: external_exports.string().nullable(),
   prNumber: external_exports.number().int().nullable(),
@@ -14859,6 +14885,13 @@ var EventBody = external_exports.discriminatedUnion("type", [
     repoPath: external_exports.string().min(1)
   }),
   // -- decomposition --------------------------------------------------------
+  /** Someone asked for a split from the board and named whose agent does it. */
+  external_exports.object({
+    type: external_exports.literal("plan.requested"),
+    goal: external_exports.string(),
+    issueRef: external_exports.string().nullable(),
+    plannerId: ParticipantId
+  }),
   external_exports.object({
     type: external_exports.literal("decomposition.proposed"),
     decomposition: Decomposition,
@@ -14870,6 +14903,15 @@ var EventBody = external_exports.discriminatedUnion("type", [
     approvals: external_exports.array(ParticipantId),
     /** True once the approval rule is satisfied: unanimous at <=3, lead above. */
     satisfied: external_exports.boolean()
+  }),
+  /**
+   * Who is meant to do what. Emitted once automatically per proposal and again
+   * on every manual move, always as the complete arrangement rather than a
+   * delta -- a partial update replayed out of order would be unreadable.
+   */
+  external_exports.object({
+    type: external_exports.literal("decomposition.assigned"),
+    assignments: external_exports.array(Assignment)
   }),
   external_exports.object({
     type: external_exports.literal("decomposition.rejected"),
@@ -14884,6 +14926,7 @@ var EventBody = external_exports.discriminatedUnion("type", [
   }),
   // -- tasks ----------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("tasks.seeded"), tasks: external_exports.array(Task) }),
+  external_exports.object({ type: external_exports.literal("task.assigned"), taskId: TaskId, assigneeId: ParticipantId.nullable() }),
   external_exports.object({
     type: external_exports.literal("task.state"),
     taskId: TaskId,
@@ -14977,12 +15020,30 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     fromSeq: Seq.nullable().default(null)
   }),
   external_exports.object({ type: external_exports.literal("session.sync"), fromSeq: Seq }),
+  /**
+   * Ask for a split from the board. Planning needs a repo and a model, neither
+   * of which the browser has -- so this hands the brief to a participant's
+   * Claude Code, which reads the repo and answers with `decomposition.propose`.
+   */
+  external_exports.object({
+    type: external_exports.literal("plan.request"),
+    goal: external_exports.string().min(1).max(4e3),
+    issueRef: external_exports.string().nullable().default(null),
+    /** Whose agent should do it. Null means the session lead. */
+    plannerId: ParticipantId.nullable().default(null)
+  }),
   external_exports.object({
     type: external_exports.literal("decomposition.propose"),
     contract: Contract,
     tasks: external_exports.array(TaskSpec).min(1),
     participantCount: external_exports.number().int().min(1),
     issueRef: external_exports.string().nullable().default(null)
+  }),
+  /** Move a card to someone, or to nobody. Overrides the automatic split. */
+  external_exports.object({
+    type: external_exports.literal("task.assign"),
+    taskId: TaskId,
+    participantId: ParticipantId.nullable()
   }),
   external_exports.object({ type: external_exports.literal("decomposition.approve"), decompositionId: DecompositionId }),
   external_exports.object({

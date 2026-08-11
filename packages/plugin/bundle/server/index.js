@@ -63136,6 +63136,12 @@ var Session = external_exports.object({
   /** Whoever ran /ss:plan. Holds the approval vote once participants > 3. */
   leadId: ParticipantId.nullable(),
   contractBranch: external_exports.string().nullable(),
+  /**
+   * What the session was asked to build, in the words of whoever asked. Set
+   * from the board's plan panel; the title is a name, this is the brief the
+   * planner works from.
+   */
+  goal: external_exports.string().nullable().default(null),
   createdAt: Timestamp
 });
 var ParticipantActivity = external_exports.object({
@@ -63194,6 +63200,11 @@ var TaskSpec = external_exports.object({
   acceptance: Acceptance,
   estimateMinutes: external_exports.number().int().min(5).max(240)
 });
+var Assignment = external_exports.object({
+  taskId: TaskId,
+  participantId: ParticipantId,
+  manual: external_exports.boolean().default(false)
+});
 var DecompositionStatus = external_exports.enum(["proposed", "approved", "rejected"]);
 var Decomposition = external_exports.object({
   id: DecompositionId,
@@ -63206,6 +63217,15 @@ var Decomposition = external_exports.object({
   proposedBy: ParticipantId,
   status: DecompositionStatus,
   approvals: external_exports.array(ParticipantId).default([]),
+  /**
+   * Who is meant to do what, decided while the split is still a proposal.
+   *
+   * Kept here rather than on the TaskSpec because the planner does not decide
+   * it: the server proposes a balanced assignment the moment a split arrives,
+   * people move cards around on the board, and approval is what turns the
+   * final arrangement into tasks.
+   */
+  assignments: external_exports.array(Assignment).default([]),
   createdAt: Timestamp
 });
 var ValidationCode = external_exports.enum([
@@ -63262,6 +63282,12 @@ var TestResult = external_exports.object({
 var Task = TaskSpec.extend({
   sessionId: SessionId,
   state: TaskState,
+  /**
+   * Who it is meant for, carried over from the approved split. Distinct from
+   * `ownerId`, which is who actually holds the lease right now: an assignment
+   * is a plan, a claim is a fact.
+   */
+  assigneeId: ParticipantId.nullable().default(null),
   ownerId: ParticipantId.nullable(),
   branch: external_exports.string().nullable(),
   prNumber: external_exports.number().int().nullable(),
@@ -63356,6 +63382,13 @@ var EventBody = external_exports.discriminatedUnion("type", [
     repoPath: external_exports.string().min(1)
   }),
   // -- decomposition --------------------------------------------------------
+  /** Someone asked for a split from the board and named whose agent does it. */
+  external_exports.object({
+    type: external_exports.literal("plan.requested"),
+    goal: external_exports.string(),
+    issueRef: external_exports.string().nullable(),
+    plannerId: ParticipantId
+  }),
   external_exports.object({
     type: external_exports.literal("decomposition.proposed"),
     decomposition: Decomposition,
@@ -63367,6 +63400,15 @@ var EventBody = external_exports.discriminatedUnion("type", [
     approvals: external_exports.array(ParticipantId),
     /** True once the approval rule is satisfied: unanimous at <=3, lead above. */
     satisfied: external_exports.boolean()
+  }),
+  /**
+   * Who is meant to do what. Emitted once automatically per proposal and again
+   * on every manual move, always as the complete arrangement rather than a
+   * delta -- a partial update replayed out of order would be unreadable.
+   */
+  external_exports.object({
+    type: external_exports.literal("decomposition.assigned"),
+    assignments: external_exports.array(Assignment)
   }),
   external_exports.object({
     type: external_exports.literal("decomposition.rejected"),
@@ -63381,6 +63423,7 @@ var EventBody = external_exports.discriminatedUnion("type", [
   }),
   // -- tasks ----------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("tasks.seeded"), tasks: external_exports.array(Task) }),
+  external_exports.object({ type: external_exports.literal("task.assigned"), taskId: TaskId, assigneeId: ParticipantId.nullable() }),
   external_exports.object({
     type: external_exports.literal("task.state"),
     taskId: TaskId,
@@ -63474,12 +63517,30 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     fromSeq: Seq.nullable().default(null)
   }),
   external_exports.object({ type: external_exports.literal("session.sync"), fromSeq: Seq }),
+  /**
+   * Ask for a split from the board. Planning needs a repo and a model, neither
+   * of which the browser has -- so this hands the brief to a participant's
+   * Claude Code, which reads the repo and answers with `decomposition.propose`.
+   */
+  external_exports.object({
+    type: external_exports.literal("plan.request"),
+    goal: external_exports.string().min(1).max(4e3),
+    issueRef: external_exports.string().nullable().default(null),
+    /** Whose agent should do it. Null means the session lead. */
+    plannerId: ParticipantId.nullable().default(null)
+  }),
   external_exports.object({
     type: external_exports.literal("decomposition.propose"),
     contract: Contract,
     tasks: external_exports.array(TaskSpec).min(1),
     participantCount: external_exports.number().int().min(1),
     issueRef: external_exports.string().nullable().default(null)
+  }),
+  /** Move a card to someone, or to nobody. Overrides the automatic split. */
+  external_exports.object({
+    type: external_exports.literal("task.assign"),
+    taskId: TaskId,
+    participantId: ParticipantId.nullable()
   }),
   external_exports.object({ type: external_exports.literal("decomposition.approve"), decompositionId: DecompositionId }),
   external_exports.object({
@@ -64006,6 +64067,60 @@ function validateDecomposition(input) {
   };
 }
 
+// packages/protocol/dist/assign.js
+function topicOf(spec) {
+  const glob = spec.ownedPaths[0] ?? "";
+  const meaningful = glob.split("/").find((segment) => segment && !segment.includes("*"));
+  return meaningful ?? glob;
+}
+function autoAssign(input) {
+  const people = input.participants;
+  if (people.length === 0 || input.tasks.length === 0)
+    return [];
+  const known = new Set(people);
+  const pinned = new Map((input.pinned ?? []).filter((a) => known.has(a.participantId)).map((a) => [a.taskId, a.participantId]));
+  const { depthByTask } = analyzeDag(input.tasks);
+  const load = new Map(people.map((id) => [id, 0]));
+  const topics = new Map(people.map((id) => [id, /* @__PURE__ */ new Set()]));
+  const assigned = [];
+  for (const spec of input.tasks) {
+    const owner = pinned.get(spec.id);
+    if (!owner || !load.has(owner))
+      continue;
+    load.set(owner, load.get(owner) + spec.estimateMinutes);
+    topics.get(owner).add(topicOf(spec));
+    assigned.push({ taskId: spec.id, participantId: owner, manual: true });
+  }
+  const queue = input.tasks.filter((spec) => !pinned.has(spec.id)).sort((a, b) => (depthByTask.get(a.id) ?? 0) - (depthByTask.get(b.id) ?? 0) || b.estimateMinutes - a.estimateMinutes || a.id.localeCompare(b.id));
+  const busyAtDepth = /* @__PURE__ */ new Map();
+  for (const { taskId, participantId } of assigned) {
+    const depth = depthByTask.get(taskId) ?? 0;
+    if (!busyAtDepth.has(depth))
+      busyAtDepth.set(depth, /* @__PURE__ */ new Set());
+    busyAtDepth.get(depth).add(participantId);
+  }
+  for (const spec of queue) {
+    const depth = depthByTask.get(spec.id) ?? 0;
+    const busy = busyAtDepth.get(depth) ?? /* @__PURE__ */ new Set();
+    const topic = topicOf(spec);
+    const free = people.filter((id) => !busy.has(id));
+    const candidates = free.length > 0 ? free : people;
+    const best = [...candidates].sort((a, b) => {
+      const affinityA = topics.get(a).has(topic) ? 1 : 0;
+      const affinityB = topics.get(b).has(topic) ? 1 : 0;
+      return load.get(a) - load.get(b) || affinityB - affinityA || people.indexOf(a) - people.indexOf(b);
+    })[0];
+    load.set(best, load.get(best) + spec.estimateMinutes);
+    topics.get(best).add(topic);
+    if (!busyAtDepth.has(depth))
+      busyAtDepth.set(depth, /* @__PURE__ */ new Set());
+    busyAtDepth.get(depth).add(best);
+    assigned.push({ taskId: spec.id, participantId: best, manual: false });
+  }
+  const order = new Map(input.tasks.map((spec, index) => [spec.id, index]));
+  return assigned.sort((a, b) => (order.get(a.taskId) ?? 0) - (order.get(b.taskId) ?? 0));
+}
+
 // packages/protocol/dist/projection.js
 var ACTIVE_STATES = /* @__PURE__ */ new Set(["claimed", "running", "testing", "failed"]);
 var CLAIM_CAP = 1;
@@ -64068,9 +64183,18 @@ var SessionState = class {
         }
         break;
       }
+      case "plan.requested":
+        if (this.session)
+          this.session = { ...this.session, goal: body.goal, issueRef: body.issueRef };
+        break;
       case "decomposition.proposed":
         this.decomposition = body.decomposition;
         this.validation = body.validation;
+        break;
+      case "decomposition.assigned":
+        if (this.decomposition) {
+          this.decomposition = { ...this.decomposition, assignments: body.assignments };
+        }
         break;
       case "decomposition.approval":
         if (this.decomposition) {
@@ -64093,6 +64217,12 @@ var SessionState = class {
         for (const task of body.tasks)
           this.tasks.set(task.id, task);
         break;
+      case "task.assigned": {
+        const task = this.tasks.get(body.taskId);
+        if (task)
+          this.tasks.set(body.taskId, { ...task, assigneeId: body.assigneeId });
+        break;
+      }
       case "task.state": {
         const task = this.tasks.get(body.taskId);
         if (task) {
@@ -64192,12 +64322,13 @@ var SessionState = class {
       for (const glob of task.ownedPaths)
         touched.add(topLevel(glob));
     }
+    const rank = (task) => task.assigneeId === participantId ? 0 : task.assigneeId === null ? 1 : 2;
     const scored = this.readyTasks().map((task) => {
       const affinity = task.ownedPaths.some((glob) => touched.has(topLevel(glob))) ? 1 : 0;
       const unblocks = [...this.tasks.values()].filter((t) => t.dependsOn.includes(task.id)).length;
-      return { task, affinity, unblocks };
+      return { task, affinity, unblocks, rank: rank(task) };
     });
-    scored.sort((a, b) => b.unblocks - a.unblocks || b.affinity - a.affinity || b.task.estimateMinutes - a.task.estimateMinutes || a.task.id.localeCompare(b.task.id));
+    scored.sort((a, b) => a.rank - b.rank || b.unblocks - a.unblocks || b.affinity - a.affinity || b.task.estimateMinutes - a.task.estimateMinutes || a.task.id.localeCompare(b.task.id));
     return scored[0]?.task ?? null;
   }
   /** Tasks whose blocked/ready state no longer matches their dependencies. */
@@ -64663,8 +64794,12 @@ var SessionService = class {
         return this.join(command, ctx);
       case "session.sync":
         return { upToSeq: this.store.maxSeq(this.requireSession(ctx)) };
+      case "plan.request":
+        return this.requestPlan(command, ctx);
       case "decomposition.propose":
         return this.propose(command, ctx);
+      case "task.assign":
+        return this.assign(command, ctx);
       case "decomposition.approve":
         return this.approve(command, ctx);
       case "decomposition.reject":
@@ -64714,6 +64849,7 @@ var SessionService = class {
       phase: "plan",
       leadId: null,
       contractBranch: null,
+      goal: null,
       createdAt
     };
     this.emit(sessionId, null, { type: "session.created", session });
@@ -64789,6 +64925,78 @@ var SessionService = class {
     };
   }
   // -- decomposition -------------------------------------------------------
+  /**
+   * The board's half of planning. It cannot read a repo or run a model, so it
+   * does the part it is good at -- capturing the brief and choosing whose agent
+   * does the work -- and hands the rest over as a directive, which is the same
+   * mechanism the room already uses to drive an agent.
+   */
+  requestPlan(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    if (state.session?.phase !== "plan") {
+      throw new ServiceError("not_ready", "This session is past planning.");
+    }
+    const candidates = [...state.participants.values()].filter((p) => p.repoPath && p.connected);
+    const requested = command.plannerId ? state.participants.get(command.plannerId) : null;
+    if (command.plannerId && !requested) {
+      throw new ServiceError("not_found", "That participant is not in this session.");
+    }
+    if (requested && !requested.repoPath) {
+      throw new ServiceError(
+        "not_ready",
+        `${requested.displayName} is watching from the board with no checkout attached, so their Claude Code cannot read the repo. Ask them to run /ss:join in their clone.`
+      );
+    }
+    const planner = requested ?? candidates.find((p) => p.id === state.session?.leadId) ?? candidates.find((p) => p.id === participantId) ?? candidates[0];
+    if (!planner) {
+      throw new ServiceError(
+        "not_ready",
+        "Nobody here has a checkout attached, so there is no repo to plan against. Run /ss:host or /ss:join in a clone first."
+      );
+    }
+    this.emit(sessionId, participantId, {
+      type: "plan.requested",
+      goal: command.goal,
+      issueRef: command.issueRef,
+      plannerId: planner.id
+    });
+    const asker = state.participants.get(participantId)?.displayName ?? "Someone";
+    this.systemDirective(
+      sessionId,
+      participantId,
+      [planner.id],
+      [
+        `${asker} asked for a split of this session, from the board:`,
+        "",
+        command.goal,
+        command.issueRef ? `
+Issue: ${command.issueRef}` : "",
+        "",
+        "Read the repository, then propose the split with ss_propose: a contract of the shared",
+        "types and stubs every task will import, plus tasks that own disjoint file globs and are",
+        "each proved by one command. The server validates it and the team approves on the board."
+      ].filter((line) => line !== "").join("\n")
+    );
+    return { plannerId: planner.id, goal: command.goal };
+  }
+  /**
+   * A message from the session itself rather than from a person, delivered into
+   * the named participants' Claude Code the same way a human directive is.
+   */
+  systemDirective(sessionId, actorId, mentions, body) {
+    const message = {
+      id: randomUUID2(),
+      sessionId,
+      authorId: null,
+      authorKind: "system",
+      body,
+      taskRef: null,
+      mentions,
+      directive: true,
+      createdAt: Date.now()
+    };
+    this.emit(sessionId, actorId, { type: "chat.message", message });
+  }
   propose(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     if (state.session?.phase !== "plan") {
@@ -64812,11 +65020,60 @@ var SessionService = class {
         proposedBy: participantId,
         status: "proposed",
         approvals: [],
+        assignments: [],
         createdAt: Date.now()
       },
       validation
     });
+    if (validation.ok) this.rebalance(sessionId, participantId, state, []);
     return { decompositionId, validation };
+  }
+  /** Recomputes the automatic part of the assignment around whatever is pinned. */
+  rebalance(sessionId, actorId, state, pinned) {
+    const assignments = autoAssign({
+      tasks: state.decomposition?.tasks ?? [],
+      // Board-only watchers are left out: work goes to people with a checkout.
+      participants: [...state.participants.values()].filter((p) => p.repoPath).sort((a, b) => a.joinedAt - b.joinedAt).map((p) => p.id),
+      pinned
+    });
+    this.emit(sessionId, actorId, { type: "decomposition.assigned", assignments });
+    return assignments;
+  }
+  /**
+   * Moving a card. During planning this edits the proposed arrangement; once
+   * tasks are live it re-points an unclaimed one, which is how you hand work
+   * over without anyone having to release a lease.
+   */
+  assign(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    if (command.participantId && !state.participants.has(command.participantId)) {
+      throw new ServiceError("not_found", "That participant is not in this session.");
+    }
+    const live = state.tasks.get(command.taskId);
+    if (live) {
+      if (live.ownerId && live.ownerId !== command.participantId) {
+        throw new ServiceError(
+          "conflict",
+          `"${live.id}" is already being worked on by ${state.participants.get(live.ownerId)?.displayName ?? "someone"}. They have to release it first.`
+        );
+      }
+      this.emit(sessionId, participantId, {
+        type: "task.assigned",
+        taskId: command.taskId,
+        assigneeId: command.participantId
+      });
+      return {
+        assignments: [...state.tasks.values()].filter((task) => task.assigneeId).map((task) => ({ taskId: task.id, participantId: task.assigneeId }))
+      };
+    }
+    const decomposition = state.decomposition;
+    if (!decomposition?.tasks.some((task) => task.id === command.taskId)) {
+      throw new ServiceError("not_found", `No task "${command.taskId}" in this session.`);
+    }
+    const pinned = decomposition.assignments.filter((a) => a.manual && a.taskId !== command.taskId).concat(
+      command.participantId ? [{ taskId: command.taskId, participantId: command.participantId, manual: true }] : []
+    );
+    return { assignments: this.rebalance(sessionId, participantId, state, pinned) };
   }
   approve(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
@@ -64857,10 +65114,14 @@ var SessionService = class {
   seedTasks(sessionId, actorId, state) {
     const specs = state.decomposition?.tasks ?? [];
     const { depthByTask } = analyzeDag(specs);
+    const assignedTo = new Map(
+      (state.decomposition?.assignments ?? []).map((a) => [a.taskId, a.participantId])
+    );
     const tasks = specs.map((spec) => ({
       ...spec,
       sessionId,
       state: spec.dependsOn.length === 0 ? "ready" : "blocked",
+      assigneeId: assignedTo.get(spec.id) ?? null,
       ownerId: null,
       branch: null,
       prNumber: null,
@@ -64869,6 +65130,36 @@ var SessionService = class {
       depth: depthByTask.get(spec.id) ?? 0
     }));
     this.emit(sessionId, actorId, { type: "tasks.seeded", tasks });
+    this.dispatch(sessionId, actorId, tasks, state);
+  }
+  /**
+   * Approval is the moment the plan becomes work, so it is the moment each
+   * person's agent should hear about it. Without this the board would show a
+   * finished plan that nobody had been told about, and someone would have to
+   * walk over and say "we approved it, run /ss:next".
+   */
+  dispatch(sessionId, actorId, tasks, state) {
+    const byAssignee = /* @__PURE__ */ new Map();
+    for (const task of tasks) {
+      if (!task.assigneeId) continue;
+      byAssignee.set(task.assigneeId, [...byAssignee.get(task.assigneeId) ?? [], task]);
+    }
+    const contractLanded = Boolean(state.session?.contractBranch);
+    for (const [assignee, theirs] of byAssignee) {
+      const listed = theirs.map((task) => `  ${task.id} -- ${task.title} (${task.estimateMinutes}m)${task.state === "blocked" ? `, waiting on ${task.dependsOn.join(", ")}` : ""}`).join("\n");
+      this.systemDirective(
+        sessionId,
+        actorId,
+        [assignee],
+        [
+          `The split was approved. ${theirs.length} task(s) are yours:`,
+          "",
+          listed,
+          "",
+          contractLanded ? "Run ss_next to claim the first one and start." : "Nothing is claimable until the contract lands. If you are the lead, run ss_land_contract; otherwise wait for it and then run ss_next."
+        ].join("\n")
+      );
+    }
   }
   reject(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
@@ -64894,7 +65185,26 @@ var SessionService = class {
       prNumber: command.prNumber
     });
     this.emit(sessionId, participantId, { type: "session.phase", phase: "build" });
+    for (const [assignee, theirs] of this.tasksByAssignee(state)) {
+      if (assignee === participantId) continue;
+      const ready = theirs.filter((task) => task.state === "ready");
+      if (ready.length === 0) continue;
+      this.systemDirective(
+        sessionId,
+        participantId,
+        [assignee],
+        `The contract landed on ${command.branch}. Your ${ready.length === 1 ? "task is" : "tasks are"} claimable now: ${ready.map((task) => task.id).join(", ")}. Run ss_sync then ss_next to start.`
+      );
+    }
     return { ok: true };
+  }
+  tasksByAssignee(state) {
+    const byAssignee = /* @__PURE__ */ new Map();
+    for (const task of state.tasks.values()) {
+      if (!task.assigneeId) continue;
+      byAssignee.set(task.assigneeId, [...byAssignee.get(task.assigneeId) ?? [], task]);
+    }
+    return byAssignee;
   }
   // -- tasks and leases ----------------------------------------------------
   claim(command, ctx) {
@@ -65049,6 +65359,20 @@ var SessionService = class {
     const blockedBefore = [...state.tasks.values()].filter((t) => t.state === "blocked");
     this.refreshBlockedStates(sessionId, participantId, state);
     const unblocked = blockedBefore.filter((t) => state.tasks.get(t.id)?.state === "ready").map((t) => t.id);
+    const waking = /* @__PURE__ */ new Map();
+    for (const taskId of unblocked) {
+      const assignee = state.tasks.get(taskId)?.assigneeId;
+      if (!assignee || assignee === participantId) continue;
+      waking.set(assignee, [...waking.get(assignee) ?? [], taskId]);
+    }
+    for (const [assignee, taskIds] of waking) {
+      this.systemDirective(
+        sessionId,
+        participantId,
+        [assignee],
+        `${task.id} landed, which unblocks ${taskIds.join(", ")} -- yours. Run ss_sync then ss_next.`
+      );
+    }
     const remaining = [...state.tasks.values()].filter((t) => t.state !== "merged");
     if (remaining.length === 0 && state.session?.phase === "build") {
       this.emit(sessionId, participantId, { type: "session.phase", phase: "integrate" });
@@ -65554,7 +65878,9 @@ function createApp(options = {}) {
     return { ok: true };
   });
   fastify.get("/api/me", async (request) => {
-    const user = currentUser(request);
+    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
+    const claims = bearer ? readParticipantToken(auth, bearer) : null;
+    const user = (claims ? store.findUserById(claims.userId) : null) ?? currentUser(request);
     return {
       mode: auth.mode,
       user: user ? toAuthUser(user) : null,

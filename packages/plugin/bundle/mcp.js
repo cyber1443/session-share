@@ -2989,7 +2989,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve3.call(this, root, ref);
+      let _sch = resolve4.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3016,7 +3016,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve3(root, ref) {
+    function resolve4(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3647,7 +3647,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve3(baseURI, relativeURI, options) {
+    function resolve4(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
       const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
@@ -3931,7 +3931,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve3,
+      resolve: resolve4,
       resolveComponent,
       equal,
       serialize,
@@ -6921,7 +6921,7 @@ var require_dist = __commonJS({
 });
 
 // packages/plugin/src/mcp.ts
-import { basename } from "node:path";
+import { basename, resolve as resolve3 } from "node:path";
 
 // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v3/helpers/util.js
 var util;
@@ -28881,7 +28881,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
+        await new Promise((resolve4) => setTimeout(resolve4, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error51) {
@@ -28898,7 +28898,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       const earlyReject = (error51) => {
         reject(error51);
       };
@@ -28976,7 +28976,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve3(parseResult.data);
+            resolve4(parseResult.data);
           }
         } catch (error51) {
           reject(error51);
@@ -29237,12 +29237,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve3, interval);
+      const timeoutId = setTimeout(resolve4, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -30333,7 +30333,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
+      await new Promise((resolve4) => setTimeout(resolve4, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -30997,12 +30997,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve3) => {
+    return new Promise((resolve4) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve3();
+        resolve4();
       } else {
-        this._stdout.once("drain", resolve3);
+        this._stdout.once("drain", resolve4);
       }
     });
   }
@@ -31035,6 +31035,12 @@ var Session = external_exports.object({
   /** Whoever ran /ss:plan. Holds the approval vote once participants > 3. */
   leadId: ParticipantId.nullable(),
   contractBranch: external_exports.string().nullable(),
+  /**
+   * What the session was asked to build, in the words of whoever asked. Set
+   * from the board's plan panel; the title is a name, this is the brief the
+   * planner works from.
+   */
+  goal: external_exports.string().nullable().default(null),
   createdAt: Timestamp
 });
 var ParticipantActivity = external_exports.object({
@@ -31093,6 +31099,11 @@ var TaskSpec = external_exports.object({
   acceptance: Acceptance,
   estimateMinutes: external_exports.number().int().min(5).max(240)
 });
+var Assignment = external_exports.object({
+  taskId: TaskId,
+  participantId: ParticipantId,
+  manual: external_exports.boolean().default(false)
+});
 var DecompositionStatus = external_exports.enum(["proposed", "approved", "rejected"]);
 var Decomposition = external_exports.object({
   id: DecompositionId,
@@ -31105,6 +31116,15 @@ var Decomposition = external_exports.object({
   proposedBy: ParticipantId,
   status: DecompositionStatus,
   approvals: external_exports.array(ParticipantId).default([]),
+  /**
+   * Who is meant to do what, decided while the split is still a proposal.
+   *
+   * Kept here rather than on the TaskSpec because the planner does not decide
+   * it: the server proposes a balanced assignment the moment a split arrives,
+   * people move cards around on the board, and approval is what turns the
+   * final arrangement into tasks.
+   */
+  assignments: external_exports.array(Assignment).default([]),
   createdAt: Timestamp
 });
 var ValidationCode = external_exports.enum([
@@ -31161,6 +31181,12 @@ var TestResult = external_exports.object({
 var Task = TaskSpec.extend({
   sessionId: SessionId,
   state: TaskState,
+  /**
+   * Who it is meant for, carried over from the approved split. Distinct from
+   * `ownerId`, which is who actually holds the lease right now: an assignment
+   * is a plan, a claim is a fact.
+   */
+  assigneeId: ParticipantId.nullable().default(null),
   ownerId: ParticipantId.nullable(),
   branch: external_exports.string().nullable(),
   prNumber: external_exports.number().int().nullable(),
@@ -31255,6 +31281,13 @@ var EventBody = external_exports.discriminatedUnion("type", [
     repoPath: external_exports.string().min(1)
   }),
   // -- decomposition --------------------------------------------------------
+  /** Someone asked for a split from the board and named whose agent does it. */
+  external_exports.object({
+    type: external_exports.literal("plan.requested"),
+    goal: external_exports.string(),
+    issueRef: external_exports.string().nullable(),
+    plannerId: ParticipantId
+  }),
   external_exports.object({
     type: external_exports.literal("decomposition.proposed"),
     decomposition: Decomposition,
@@ -31266,6 +31299,15 @@ var EventBody = external_exports.discriminatedUnion("type", [
     approvals: external_exports.array(ParticipantId),
     /** True once the approval rule is satisfied: unanimous at <=3, lead above. */
     satisfied: external_exports.boolean()
+  }),
+  /**
+   * Who is meant to do what. Emitted once automatically per proposal and again
+   * on every manual move, always as the complete arrangement rather than a
+   * delta -- a partial update replayed out of order would be unreadable.
+   */
+  external_exports.object({
+    type: external_exports.literal("decomposition.assigned"),
+    assignments: external_exports.array(Assignment)
   }),
   external_exports.object({
     type: external_exports.literal("decomposition.rejected"),
@@ -31280,6 +31322,7 @@ var EventBody = external_exports.discriminatedUnion("type", [
   }),
   // -- tasks ----------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("tasks.seeded"), tasks: external_exports.array(Task) }),
+  external_exports.object({ type: external_exports.literal("task.assigned"), taskId: TaskId, assigneeId: ParticipantId.nullable() }),
   external_exports.object({
     type: external_exports.literal("task.state"),
     taskId: TaskId,
@@ -31373,12 +31416,30 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     fromSeq: Seq.nullable().default(null)
   }),
   external_exports.object({ type: external_exports.literal("session.sync"), fromSeq: Seq }),
+  /**
+   * Ask for a split from the board. Planning needs a repo and a model, neither
+   * of which the browser has -- so this hands the brief to a participant's
+   * Claude Code, which reads the repo and answers with `decomposition.propose`.
+   */
+  external_exports.object({
+    type: external_exports.literal("plan.request"),
+    goal: external_exports.string().min(1).max(4e3),
+    issueRef: external_exports.string().nullable().default(null),
+    /** Whose agent should do it. Null means the session lead. */
+    plannerId: ParticipantId.nullable().default(null)
+  }),
   external_exports.object({
     type: external_exports.literal("decomposition.propose"),
     contract: Contract,
     tasks: external_exports.array(TaskSpec).min(1),
     participantCount: external_exports.number().int().min(1),
     issueRef: external_exports.string().nullable().default(null)
+  }),
+  /** Move a card to someone, or to nobody. Overrides the automatic split. */
+  external_exports.object({
+    type: external_exports.literal("task.assign"),
+    taskId: TaskId,
+    participantId: ParticipantId.nullable()
   }),
   external_exports.object({ type: external_exports.literal("decomposition.approve"), decompositionId: DecompositionId }),
   external_exports.object({
@@ -31896,7 +31957,7 @@ function stopDaemon() {
 function openLog() {
   return openSync(LOG_FILE, "a");
 }
-var sleep = (ms) => new Promise((resolve3) => setTimeout(resolve3, ms));
+var sleep = (ms) => new Promise((resolve4) => setTimeout(resolve4, ms));
 
 // packages/plugin/src/inbox.ts
 import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
@@ -31946,7 +32007,7 @@ function boardUrl(serverUrl, packedInvite, as) {
 
 // packages/plugin/src/git.ts
 import { execFile } from "node:child_process";
-import { mkdirSync as mkdirSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname3, join as join4 } from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
@@ -32084,6 +32145,14 @@ async function existingPullRequest(cwd, head) {
     return null;
   }
 }
+async function addWorktree(cwd, path, branch, from) {
+  if (existsSync4(path)) return "existing";
+  await fetch2(cwd);
+  const base = await remoteBranchExists(cwd, from) ? `origin/${from}` : from;
+  const args = await branchExists(cwd, branch) ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, base];
+  await git(cwd, args);
+  return "created";
+}
 async function canPush(cwd) {
   try {
     await git(cwd, ["ls-remote", "--exit-code", "origin", "HEAD"]);
@@ -32094,7 +32163,7 @@ async function canPush(cwd) {
 }
 
 // packages/plugin/src/preferences.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname4, join as join5 } from "node:path";
 var Preferences = external_exports.object({
   /**
@@ -32121,7 +32190,7 @@ var Preferences = external_exports.object({
 });
 var PREFERENCES_PATH = join5(STATE_DIR, "preferences.json");
 function readPreferences() {
-  if (!existsSync4(PREFERENCES_PATH)) return Preferences.parse({});
+  if (!existsSync5(PREFERENCES_PATH)) return Preferences.parse({});
   try {
     return Preferences.parse(JSON.parse(readFileSync4(PREFERENCES_PATH, "utf8")));
   } catch {
@@ -32775,6 +32844,38 @@ function createServer() {
     }
   );
   server.registerTool(
+    "ss_worktree",
+    {
+      description: "Create a separate working tree of this repository for a session, so several sessions can run against one clone at the same time. Returns the directory to open a second Claude Code in.",
+      inputSchema: {
+        title: external_exports.string().describe("What that session is for; also names the directory and the branch"),
+        issueRef: external_exports.string().nullish(),
+        /** An existing session to join there instead of hosting a new one. */
+        invite: external_exports.string().nullish().describe("An ssx_ invite, if joining a session rather than hosting one")
+      }
+    },
+    async ({ title, issueRef, invite }) => {
+      const root = await repoRoot(REPO_ROOT);
+      const slug = slugify2(title);
+      const path = resolve3(root, "..", `${basename(root)}-${slug}`);
+      const branch = `ss/${slug}/work`;
+      const created = await addWorktree(root, path, branch, await currentBranch(root));
+      return text(
+        [
+          created === "existing" ? `${path} already exists -- reusing it.` : `Created a worktree at ${path} on ${branch}.`,
+          "",
+          "Open a second Claude Code there and run:",
+          invite ? `  /ss:join ${invite.trim()}` : `  /ss:host ${title}`,
+          "",
+          `  cd ${path}`,
+          "",
+          "It shares this clone's history and remote, so pushes and fetches behave",
+          "exactly as they do here. Remove it later with: git worktree remove " + path
+        ].join("\n")
+      );
+    }
+  );
+  server.registerTool(
     "ss_stop_host",
     {
       description: "Stop the coordination server running on this machine. Everyone loses the session until it is started again; the event log survives.",
@@ -32894,12 +32995,18 @@ function createServer() {
         issueRef: state.session.issueRef
       });
       if (result.validation.ok) {
+        const after = await snapshot(cfg);
+        const names = new Map(after.participants.map((p) => [p.id, p.displayName]));
         return text({
           accepted: true,
           decompositionId: result.decompositionId,
           maxParallel: result.validation.maxFrontier,
           warnings: result.validation.issues,
-          next: "Ask the team to approve on the board."
+          assigned: (after.decomposition?.assignments ?? []).map((a) => ({
+            task: a.taskId,
+            to: names.get(a.participantId) ?? a.participantId
+          })),
+          next: "The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns."
         });
       }
       return text({
@@ -32922,7 +33029,7 @@ function createServer() {
         decompositionId
       });
       return text(
-        result.satisfied ? "Approved. Tasks are seeded; commit the contract to make them claimable." : `Recorded. ${result.approvals.length} approval(s) so far.`
+        result.satisfied ? "Approved. Tasks are seeded and each assignee has been told what they own; land the contract to make them claimable." : `Recorded. ${result.approvals.length} approval(s) so far.`
       );
     }
   );
