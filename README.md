@@ -10,7 +10,7 @@ Each dev keeps their own Claude account, their own quota and their own GitHub id
 2. A **deterministic validator** rejects the split if two concurrently-runnable tasks own the same path, if the graph has a cycle, if a task has nothing to prove it, or if a task tries to own a contract file. An LLM never decides whether two agents are about to collide.
 3. The team approves. The contract lands on its own branch. Only then do tasks become claimable.
 4. Each dev claims a task and gets a **lease** on its paths. A `PreToolUse` hook denies any Edit or Write outside that lease, with the fix in the message. This is what makes two autonomous agents in one repo safe.
-5. Everyone — humans and agents — shares one durable room, and the board shows the DAG live.
+5. Everyone — humans and agents — shares one durable room, and the board shows the DAG live. The room is also a terminal: a message sent in **run** mode is delivered into the other participants' Claude Code and acted on there.
 
 ## Status
 
@@ -94,10 +94,23 @@ each other a link and the wrong one for a public URL.
 ```
 host   /ss:host Add a dark mode toggle
        → send: /ss:join ssx_eyJ1Ijoi…
-       → board: http://192.168.0.36:4310/board/?join=ssx_…
+       → board opens in the browser, already seated as you
 
 guest  /ss:join ssx_eyJ1Ijoi…
+       → same, on their machine
 ```
+
+Hosting and joining open the board for you and seat it — the plugin has just
+joined as you, so making you retype your handle on the page it opened would be
+theatre. `/ss:board` reopens it; `/ss:setup` turns the opening off.
+
+If a join fails, the plugin says which of the two things went wrong before it
+sends anything: nothing answered at that address, or something answered that is
+**not the server that minted the invite**. The second is what happens when a host
+was bound to loopback — then `127.0.0.1` inside the invite names the *guest's*
+machine, and their own server rejects a token it never signed. Hosting refuses to
+hand out that invite silently, and `/ss:doctor` says which address a teammate
+should dial.
 
 ### The whole loop
 
@@ -199,7 +212,7 @@ Only two tables are persisted: a `sessions` index and the append-only `events` l
 pnpm install
 pnpm peer-demo   # host + guest + a real daemon, no accounts anywhere
 pnpm demo        # the same flow through the hosted (OAuth) path
-pnpm test        # 94 tests
+pnpm test        # 118 tests
 ```
 
 `pnpm demo` runs a real server, two real participants and the real hook binary as
@@ -233,6 +246,35 @@ The board shows the same tasks two ways:
 Topics are derived from the paths a task owns rather than from labels anyone has
 to maintain: tasks are cut as vertical slices, so the folder structure already
 says what they are about.
+
+### The room is a terminal
+
+The composer has two modes. **say** posts to the room and stops there. **run**
+delivers the message into the other participants' Claude Code, where it is acted
+on as an instruction — so you can drive a teammate's agent from the board without
+either of you touching the other's terminal. `@login` aims it at one person;
+without a mention it goes to everyone but you. Agents can do the same from their
+side with `ss_chat_post({ directive: true })`, or `/ss:say`.
+
+The modes are explicit and sticky rather than inferred from what you typed. "make
+it dark" reads like an instruction and is often just a remark, and guessing wrong
+means two agents start editing.
+
+**How delivery actually works, and what it cannot do.** Claude Code cannot be
+pushed into from outside, so the plugin pulls at the three moments a hook gets to
+speak: when a turn ends (`Stop`, which blocks and hands the agent the message as
+its next instruction), when the human types (`UserPromptSubmit`), and at
+`SessionStart`. The consequence is worth knowing: **a directive lands when the
+recipient's agent finishes its current turn.** If their Claude is sitting idle
+with nobody typing, it waits until either of them does something. It is not a
+push, and pretending otherwise would be the wrong mental model.
+
+A checkout starts caught up — joining a long-running session does not replay its
+whole room at your agent — and each directive is delivered exactly once. Your own
+messages never come back to you, `stop_hook_active` stops a delivery from
+triggering another, and file leases still apply, so an instruction to edit
+someone else's files is refused exactly as if you had typed it yourself. Turn the
+whole thing off per machine with `/ss:setup`.
 
 ### With your own Claude Code
 
@@ -288,11 +330,12 @@ and once the split is approved and the contract has landed, on every machine:
 | `/ss:next` | claim the next ready task and work it |
 | `/ss:status` | phase, people, DAG, blockers |
 | `/ss:request` | ask the holder for a file outside your lease |
-| `/ss:say` | post to the session room |
+| `/ss:say` | post to the session room, or send it to the other agents |
+| `/ss:board` | reopen the live board |
 
 ### MCP tools
 
-The agent is a participant, not a subject: `ss_claim`, `ss_get_my_task`, `ss_get_contract`, `ss_report_progress`, `ss_check_lease`, `ss_request_handoff`, `ss_report_test`, `ss_propose`, `ss_approve`, and `ss_chat_post` / `ss_chat_read` so one dev's Claude can tell the other's what it just learned *before* it acts on it.
+The agent is a participant, not a subject: `ss_claim`, `ss_get_my_task`, `ss_get_contract`, `ss_report_progress`, `ss_check_lease`, `ss_request_handoff`, `ss_report_test`, `ss_propose`, `ss_approve`, and `ss_chat_post` / `ss_chat_read` so one dev's Claude can tell the other's what it just learned *before* it acts on it — with `directive: true` when it should be done rather than read.
 
 ## Design notes worth knowing
 
@@ -347,3 +390,4 @@ only, and never gains write access to a repository.
 - **Merging is first-come, not queued.** Two people finishing at once both merge into the contract branch; git handles it because their files are disjoint, but there is no serialisation and no automatic conflict resolution.
 - The WebRTC mesh (P4). Agent activity lines already stream over `ws-fanout`, and they are ephemeral by design — reload the board and they are gone until the next one arrives.
 - Authorization is coarse: any signed-in user can read and join any session. Authentication is real; per-session membership rules are not.
+- Room directives are delivered on a hook, not pushed: they land when the recipient's agent finishes a turn. An agent sitting idle with nobody typing will not pick one up until something else wakes it.

@@ -48,14 +48,23 @@ Send your teammate this line:
 Board: http://192.168.0.36:4310/board/?join=ssx_…
 ```
 
+The board opens by itself, already seated as you. `/ss:board` reopens it later.
+
 **Guest**, in Claude Code inside *their own clone*:
 
 ```
 /ss:join ssx_eyJ1IjoiaHR0cDovLzE5Mi4xNjguMC4zNjo0MzEwIiwidCI6…
 ```
 
-That is the whole setup. Both open the board URL; it asks for a handle once and
-nothing else. Then `/ss:plan`, approve, `/ss:next` each.
+That is the whole setup. The board opens on both machines, seated -- no handle to
+type, because each side already joined as itself. Then `/ss:plan`, approve,
+`/ss:next` each.
+
+If the join fails, read which failure it is. "Nothing answered at <address>" is a
+network or firewall problem. "It is not the server that minted this invite" means
+the guest reached a *different* session-share -- almost always their own, because
+the invite carried a loopback address. Neither is a bad token; do not re-mint,
+fix the address. `/ss:doctor` on the host prints what a teammate should dial.
 
 **What this costs you.** Nothing verifies identity — whoever holds the invite is
 in the room, and they can call themselves anything. The host machine is the
@@ -133,14 +142,19 @@ a meeting link. On laptop B, inside its own clone:
 /ss:join ssx_…
 ```
 
-Both open the board URL. Then `/ss:plan`, approve, `/ss:land`, `/ss:next` on
-both, `/ss:done` each, `/ss:ship`.
+The board opens on both, seated. Then `/ss:plan`, approve, `/ss:land`,
+`/ss:next` on both, `/ss:done` each, `/ss:ship`.
 
 **What to actually watch for**, since this is the test that matters:
 
 - Ask laptop B's Claude to edit a file laptop A holds. It should be denied by
   name. If it is allowed, the two laptops are not seeing the same session.
 - Watch the board on both while each of you works.
+- From laptop A's board, switch the composer to **run** and send
+  `@<their-login> add a test for the empty case`. It should turn up inside laptop
+  B's Claude Code and be acted on -- when B's current turn ends, which is the one
+  thing to be patient about: an idle agent picks it up on its next turn, not
+  instantly.
 - Close the lid on the host mid-session. Everything pauses; `/ss:host` again
   brings it back, and the event log survived.
 
@@ -350,6 +364,9 @@ Also worth exercising:
 
 - `/ss:say` and the board's chat — including a Claude posting to it, which is
   what stops the second agent building on a wrong assumption.
+- The board's **run** mode: a message that goes into the other person's Claude
+  Code and is acted on there, rather than only being read. It arrives when their
+  agent's current turn ends.
 - Requesting a handoff and granting it from the board; only that one path opens.
 - Killing the coordination server mid-session. Editing keeps working. The gate
   fails open on purpose: a missed check costs a merge conflict, a false block
@@ -361,12 +378,12 @@ Also worth exercising:
 
 Be prepared for these, so they read as known gaps rather than bugs:
 
-- **The server does not touch git.** It records the contract branch, task
-  branches and PR numbers, but does not create them. Someone has to commit the
-  contract branch and push task branches by hand.
-- **No merge queue** (P5). Tasks reach `pr` and stop there; nothing reaches
-  `merged`, so dependent tasks stay blocked. A session runs cleanly up to "all
-  tasks green" and then needs a human to integrate.
+- **Merging is first-come, not queued.** `/ss:done` merges your task into the
+  contract branch when its acceptance test passes. Two tasks finishing at the
+  same moment are not serialised, so a conflict is possible where a queue would
+  have prevented it.
+- **CI is not read.** `/ss:done` trusts the acceptance command it ran locally;
+  a red pipeline on the pushed branch does not stop anything.
 - **Authorization is coarse.** Authentication is real, but any signed-in user
   can read or join any session on that server. Fine for one team on a private
   network; not fine on a public URL.
@@ -383,3 +400,8 @@ Be prepared for these, so they read as known gaps rather than bugs:
 | Everyone signed out after a restart | `SESSION_SHARE_SECRET` was not set, so a random one was generated at boot. |
 | Board says "reconnecting" | It retries with backoff and replays what it missed; if it persists, the server is unreachable from the browser. |
 | The lease gate never blocks anything | That checkout is not attached — no `.session-share/session.json`. Re-run `/ss:join`. |
+| "It is not the server that minted this invite" | You reached a different session-share — usually your own, because the invite carried a loopback address. The host must re-host so the invite names their network address. Not a bad token; re-minting will not help. |
+| "Nothing answered at http://…" | Firewall, sleeping host, or you are not on the same network. `/ss:doctor` on the host says what to dial. |
+| "Port 4310 is already serving a different session-share" | Another server holds the port. Stop it, or set `SESSION_SHARE_PORT`. |
+| A run-mode message never arrives | The recipient's agent has not finished a turn since it was sent, or `acceptDirectives` is off there (`/ss:setup`). |
+| The board asks for a handle | It was opened without the `as=` the plugin adds — a hand-copied URL. Harmless: type your handle, or reopen with `/ss:board`. |
