@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import {
+  Assignment,
   ChatMessage,
   Decomposition,
   HandoffRequest,
@@ -51,6 +52,13 @@ export const EventBody = z.discriminatedUnion('type', [
   }),
 
   // -- decomposition --------------------------------------------------------
+  /** Someone asked for a split from the board and named whose agent does it. */
+  z.object({
+    type: z.literal('plan.requested'),
+    goal: z.string(),
+    issueRef: z.string().nullable(),
+    plannerId: ParticipantId,
+  }),
   z.object({
     type: z.literal('decomposition.proposed'),
     decomposition: Decomposition,
@@ -62,6 +70,15 @@ export const EventBody = z.discriminatedUnion('type', [
     approvals: z.array(ParticipantId),
     /** True once the approval rule is satisfied: unanimous at <=3, lead above. */
     satisfied: z.boolean(),
+  }),
+  /**
+   * Who is meant to do what. Emitted once automatically per proposal and again
+   * on every manual move, always as the complete arrangement rather than a
+   * delta -- a partial update replayed out of order would be unreadable.
+   */
+  z.object({
+    type: z.literal('decomposition.assigned'),
+    assignments: z.array(Assignment),
   }),
   z.object({
     type: z.literal('decomposition.rejected'),
@@ -77,6 +94,7 @@ export const EventBody = z.discriminatedUnion('type', [
 
   // -- tasks ----------------------------------------------------------------
   z.object({ type: z.literal('tasks.seeded'), tasks: z.array(Task) }),
+  z.object({ type: z.literal('task.assigned'), taskId: TaskId, assigneeId: ParticipantId.nullable() }),
   z.object({
     type: z.literal('task.state'),
     taskId: TaskId,

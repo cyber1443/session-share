@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import {
+  Assignment,
   ChatMessage,
   Contract,
   HandoffRequest,
@@ -47,12 +48,30 @@ export const ClientCommand = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('session.sync'), fromSeq: Seq }),
 
+  /**
+   * Ask for a split from the board. Planning needs a repo and a model, neither
+   * of which the browser has -- so this hands the brief to a participant's
+   * Claude Code, which reads the repo and answers with `decomposition.propose`.
+   */
+  z.object({
+    type: z.literal('plan.request'),
+    goal: z.string().min(1).max(4000),
+    issueRef: z.string().nullable().default(null),
+    /** Whose agent should do it. Null means the session lead. */
+    plannerId: ParticipantId.nullable().default(null),
+  }),
   z.object({
     type: z.literal('decomposition.propose'),
     contract: Contract,
     tasks: z.array(TaskSpec).min(1),
     participantCount: z.number().int().min(1),
     issueRef: z.string().nullable().default(null),
+  }),
+  /** Move a card to someone, or to nobody. Overrides the automatic split. */
+  z.object({
+    type: z.literal('task.assign'),
+    taskId: TaskId,
+    participantId: ParticipantId.nullable(),
   }),
   z.object({ type: z.literal('decomposition.approve'), decompositionId: DecompositionId }),
   z.object({
@@ -172,7 +191,9 @@ export interface CommandResultMap {
   'session.create': { sessionId: SessionId; slug: string }
   'session.join': JoinResult
   'session.sync': { upToSeq: Seq }
+  'plan.request': { plannerId: ParticipantId; goal: string }
   'decomposition.propose': ProposeResult
+  'task.assign': { assignments: Assignment[] }
   'decomposition.approve': { approvals: ParticipantId[]; satisfied: boolean }
   'decomposition.reject': { ok: true }
   'contract.committed': { ok: true }

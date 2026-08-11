@@ -95,9 +95,17 @@ export class SessionState {
         break
       }
 
+      case 'plan.requested':
+        if (this.session) this.session = { ...this.session, goal: body.goal, issueRef: body.issueRef }
+        break
       case 'decomposition.proposed':
         this.decomposition = body.decomposition
         this.validation = body.validation
+        break
+      case 'decomposition.assigned':
+        if (this.decomposition) {
+          this.decomposition = { ...this.decomposition, assignments: body.assignments }
+        }
         break
       case 'decomposition.approval':
         if (this.decomposition) {
@@ -118,6 +126,11 @@ export class SessionState {
       case 'tasks.seeded':
         for (const task of body.tasks) this.tasks.set(task.id, task)
         break
+      case 'task.assigned': {
+        const task = this.tasks.get(body.taskId)
+        if (task) this.tasks.set(body.taskId, { ...task, assigneeId: body.assigneeId })
+        break
+      }
       case 'task.state': {
         const task = this.tasks.get(body.taskId)
         if (task) {
@@ -220,16 +233,26 @@ export class SessionState {
       for (const glob of task.ownedPaths) touched.add(topLevel(glob))
     }
 
+    /**
+     * An assignment made during planning has to survive into `/ss:next`, or it
+     * was decoration. Your own tasks come first, then anything nobody was given;
+     * someone else's assignment is a last resort, taken only when the
+     * alternative is sitting idle -- their agent will be handed something else.
+     */
+    const rank = (task: Task) =>
+      task.assigneeId === participantId ? 0 : task.assigneeId === null ? 1 : 2
+
     const scored = this.readyTasks().map((task) => {
       const affinity = task.ownedPaths.some((glob) => touched.has(topLevel(glob))) ? 1 : 0
       const unblocks = [...this.tasks.values()].filter((t) =>
         t.dependsOn.includes(task.id),
       ).length
-      return { task, affinity, unblocks }
+      return { task, affinity, unblocks, rank: rank(task) }
     })
 
     scored.sort(
       (a, b) =>
+        a.rank - b.rank ||
         b.unblocks - a.unblocks ||
         b.affinity - a.affinity ||
         b.task.estimateMinutes - a.task.estimateMinutes ||

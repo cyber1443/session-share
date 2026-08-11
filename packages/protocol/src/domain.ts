@@ -38,6 +38,12 @@ export const Session = z.object({
   /** Whoever ran /ss:plan. Holds the approval vote once participants > 3. */
   leadId: ParticipantId.nullable(),
   contractBranch: z.string().nullable(),
+  /**
+   * What the session was asked to build, in the words of whoever asked. Set
+   * from the board's plan panel; the title is a name, this is the brief the
+   * planner works from.
+   */
+  goal: z.string().nullable().default(null),
   createdAt: Timestamp,
 })
 export type Session = z.infer<typeof Session>
@@ -124,6 +130,18 @@ export const TaskSpec = z.object({
 })
 export type TaskSpec = z.infer<typeof TaskSpec>
 
+/**
+ * One card and who has it. `manual` marks a choice a person made, which the
+ * automatic balancer treats as fixed -- otherwise moving one card would be
+ * undone by the next rebalance.
+ */
+export const Assignment = z.object({
+  taskId: TaskId,
+  participantId: ParticipantId,
+  manual: z.boolean().default(false),
+})
+export type Assignment = z.infer<typeof Assignment>
+
 export const DecompositionStatus = z.enum(['proposed', 'approved', 'rejected'])
 export type DecompositionStatus = z.infer<typeof DecompositionStatus>
 
@@ -138,6 +156,15 @@ export const Decomposition = z.object({
   proposedBy: ParticipantId,
   status: DecompositionStatus,
   approvals: z.array(ParticipantId).default([]),
+  /**
+   * Who is meant to do what, decided while the split is still a proposal.
+   *
+   * Kept here rather than on the TaskSpec because the planner does not decide
+   * it: the server proposes a balanced assignment the moment a split arrives,
+   * people move cards around on the board, and approval is what turns the
+   * final arrangement into tasks.
+   */
+  assignments: z.array(Assignment).default([]),
   createdAt: Timestamp,
 })
 export type Decomposition = z.infer<typeof Decomposition>
@@ -206,6 +233,12 @@ export type TestResult = z.infer<typeof TestResult>
 export const Task = TaskSpec.extend({
   sessionId: SessionId,
   state: TaskState,
+  /**
+   * Who it is meant for, carried over from the approved split. Distinct from
+   * `ownerId`, which is who actually holds the lease right now: an assignment
+   * is a plan, a claim is a fact.
+   */
+  assigneeId: ParticipantId.nullable().default(null),
   ownerId: ParticipantId.nullable(),
   branch: z.string().nullable(),
   prNumber: z.number().int().nullable(),
