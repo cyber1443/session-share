@@ -12,6 +12,7 @@
     "test": "tsc -p tsconfig.json && node --disable-warning=ExperimentalWarning --test test/*.test.js"
   },
   "dependencies": {
+    "@fastify/static": "^8.0.4",
     "@session-share/protocol": "workspace:*",
     "fastify": "^5.2.0",
     "ws": "^8.18.0",

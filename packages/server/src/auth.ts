@@ -10,8 +10,17 @@ export interface User {
   avatarUrl: string | null
 }
 
+/**
+ * `oauth` verifies who someone is against GitHub, which is what a shared
+ * deployment needs. `peer` trusts whoever holds the invite and takes their name
+ * from their own machine -- the right trade for two people who can hand each
+ * other a link, and the wrong one for a public URL.
+ */
+export type AuthMode = 'oauth' | 'peer'
+
 export interface AuthConfig {
-  /** Signs cookies, participant tokens and ws tickets. */
+  mode: AuthMode
+  /** Signs cookies, invites, participant tokens and ws tickets. */
   secret: string
   githubClientId: string | null
   githubClientSecret: string | null
@@ -160,6 +169,46 @@ export interface JoinTokenRow {
 }
 
 // ---------------------------------------------------------------------------
+// Invites: the whole of peer mode's trust model
+// ---------------------------------------------------------------------------
+
+export interface InviteClaims {
+  kind: 'invite'
+  sessionId: SessionId
+  exp: number
+}
+
+/**
+ * Long-lived on purpose. An invite is the session -- you paste it once to join
+ * and once more per extra checkout -- so an expiry measured in minutes would
+ * just mean re-minting it constantly for no security gain, given that anyone
+ * who can read it could have joined at any point anyway.
+ */
+export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+export function issueInvite(config: AuthConfig, sessionId: SessionId): string {
+  return encodeToken(config.secret, {
+    kind: 'invite',
+    sessionId,
+    exp: Date.now() + INVITE_TTL_MS,
+  })
+}
+
+export function readInvite(config: AuthConfig, invite: string): InviteClaims | null {
+  const claims = decodeToken<InviteClaims>(config.secret, invite.trim())
+  return claims?.kind === 'invite' ? claims : null
+}
+
+/**
+ * In peer mode a participant's name comes from their own machine and is not
+ * checked against anything. That is the deal: the invite is the credential, and
+ * the names exist so humans can tell each other apart, not to prove anything.
+ */
+export function peerUserId(githubLogin: string): string {
+  return `peer:${githubLogin.toLowerCase()}`
+}
+
+// ---------------------------------------------------------------------------
 // GitHub
 // ---------------------------------------------------------------------------
 
@@ -228,20 +277,27 @@ export function upsertUser(store: Store, profile: Omit<User, 'id'>): User {
 }
 
 export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig {
+  const githubClientId = env.GITHUB_CLIENT_ID ?? null
   return {
+    // Registering an OAuth App is the opt-in to verified identity. Without one,
+    // the server runs in peer mode rather than refusing to start.
+    mode: (env.SESSION_SHARE_MODE as AuthMode | undefined) ?? (githubClientId ? 'oauth' : 'peer'),
     secret: env.SESSION_SHARE_SECRET ?? randomBytes(32).toString('hex'),
-    githubClientId: env.GITHUB_CLIENT_ID ?? null,
+    githubClientId,
     githubClientSecret: env.GITHUB_CLIENT_SECRET ?? null,
     callbackUrl: env.GITHUB_CALLBACK_URL ?? 'http://127.0.0.1:3000/auth/github/callback',
     devLogin: env.SESSION_SHARE_DEV_LOGIN === '1',
   }
 }
 
-const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost'])
-
-/** Dev login is a backdoor; it must never be reachable off the machine. */
-export function devLoginAllowed(config: AuthConfig, host: string | undefined): boolean {
+/**
+ * Dev login is a backdoor; it must never be reachable off the machine. The
+ * check is on the connecting socket, not on the Host header -- a header is
+ * attacker-controlled, so gating on one would gate on nothing.
+ */
+export function devLoginAllowed(config: AuthConfig, remoteAddress: string | undefined): boolean {
   if (!config.devLogin) return false
-  const hostname = (host ?? '').split(':')[0] ?? ''
-  return LOOPBACK.has(hostname)
+  if (!remoteAddress) return false
+  const normalised = remoteAddress.replace(/^::ffff:/, '')
+  return normalised === '::1' || normalised.startsWith('127.')
 }
