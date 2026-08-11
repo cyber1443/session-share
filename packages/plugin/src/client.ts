@@ -34,6 +34,28 @@ export interface PairResult {
 }
 
 /**
+ * Peer-mode join: the invite is the credential and the name comes from this
+ * machine. No login, no registered application, no one-time code to mint.
+ */
+export async function peerJoin(
+  serverUrl: string,
+  invite: string,
+  identity: { githubLogin: string; displayName: string },
+  repoPath: string | null,
+): Promise<PairResult> {
+  const response = await fetch(new URL('/api/peer/join', serverUrl), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ invite, repoPath, ...identity }),
+  })
+  const payload = (await response.json()) as PairResult & { error?: string; message?: string }
+  if (!response.ok) {
+    throw new CommandError(payload.error ?? 'internal', payload.message ?? 'join failed')
+  }
+  return payload
+}
+
+/**
  * Redeems a one-time join code for this checkout. The code is single-use and
  * expires in 15 minutes, so the copy left behind in shell history is inert.
  */

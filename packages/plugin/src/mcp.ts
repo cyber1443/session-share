@@ -2,11 +2,54 @@ import { basename } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
-import type { SessionSnapshot, TaskState } from '@session-share/protocol'
-import { CommandError, pair, runCommand } from './client.js'
+import {
+  packInvite,
+  unpackInvite,
+  type RepoRef,
+  type SessionSnapshot,
+  type TaskState,
+} from '@session-share/protocol'
+import { CommandError, pair, peerJoin, runCommand } from './client.js'
 import { readConfig, writeConfig, type SessionConfig } from './config.js'
+import { ensureDaemon, stopDaemon } from './daemon.js'
+import { currentBranch, localIdentity, repoRemote, repoRoot } from './identity.js'
 
 const DEFAULT_SERVER_URL = process.env.SESSION_SHARE_URL ?? 'http://127.0.0.1:4310'
+
+/** Session slugs appear in branch names and URLs, so they stay boring. */
+function slugify(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 40) || 'session'
+  )
+}
+
+async function createSession(
+  serverUrl: string,
+  input: { slug: string; title: string; repo: RepoRef; issueRef: string | null },
+): Promise<{ sessionId: string; slug: string; invite: string | null }> {
+  const response = await fetch(new URL('/api/sessions', serverUrl), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const payload = (await response.json()) as {
+    sessionId?: string
+    slug?: string
+    invite?: string | null
+    error?: string
+    message?: string
+  }
+  if (!response.ok) throw new Error(payload.message ?? payload.error ?? 'could not create session')
+  return {
+    sessionId: payload.sessionId!,
+    slug: payload.slug!,
+    invite: payload.invite ?? null,
+  }
+}
 
 /**
  * The agent's own handle on the session. These tools exist so Claude can take
@@ -42,35 +85,130 @@ export function createServer(): McpServer {
   const server = new McpServer({ name: 'session-share', version: '0.1.0' })
 
   server.registerTool(
+    'ss_host',
+    {
+      description:
+        'Start hosting a session from this machine. Brings up a local coordination server if one is not already running, creates the session for this repository, attaches this checkout, and returns the single string to send a teammate.',
+      inputSchema: {
+        title: z.string().describe('What the session is for, e.g. "Add a dark mode toggle"'),
+        issueRef: z.string().nullish().describe('Issue URL, if there is one'),
+        expose: z
+          .enum(['lan', 'loopback'])
+          .default('lan')
+          .describe('lan lets teammates on the same network connect; loopback is this machine only'),
+      },
+    },
+    async ({ title, issueRef, expose }) => {
+      const root = await repoRoot(REPO_ROOT)
+      const identity = await localIdentity()
+      const daemon = await ensureDaemon({ expose })
+      const loopback = `http://127.0.0.1:${daemon.port}`
+
+      const remote = await repoRemote(root)
+      const slug = slugify(title)
+      const created = await createSession(loopback, {
+        slug,
+        title,
+        repo: {
+          owner: remote?.owner ?? 'local',
+          name: remote?.name ?? basename(root),
+          baseBranch: await currentBranch(root),
+          remoteUrl: remote?.remoteUrl ?? root,
+        },
+        issueRef: issueRef ?? null,
+      })
+
+      if (!created.invite) {
+        throw new Error('This server verifies identity with GitHub; use the board to invite people.')
+      }
+
+      // Everything a guest needs in one string: where to dial and how to get in.
+      const packed = packInvite({ url: daemon.url, token: created.invite })
+      const joined = await peerJoin(loopback, created.invite, identity, root)
+
+      writeConfig(root, {
+        serverUrl: loopback,
+        sessionRef: joined.sessionRef,
+        participantId: joined.participantId,
+        participantToken: joined.participantToken,
+        githubLogin: joined.githubLogin,
+        displayName: joined.displayName,
+        repoPath: root,
+      })
+
+      const reachable = daemon.url.includes('127.0.0.1')
+      return text(
+        [
+          `Hosting "${title}" as ${identity.displayName}.`,
+          '',
+          'Send your teammate this line:',
+          `  /ss:join ${packed}`,
+          '',
+          `Board: ${daemon.url}/?join=${packed}`,
+          '',
+          reachable
+            ? 'Bound to loopback only, so nobody else can reach it. Re-run with expose="lan" to let a teammate on your network in.'
+            : `Reachable on your network at ${daemon.url}. Anyone who has the invite can join; anyone who does not, cannot.`,
+          '',
+          `Every edit in ${basename(root)} is now checked against this session's file leases.`,
+        ].join('\n'),
+      )
+    },
+  )
+
+  server.registerTool(
     'ss_join',
     {
       description:
-        'Attach this checkout to a session using the join code shown on the board. The code is single-use and expires in 15 minutes; it carries the identity of whoever generated it, so no login happens here.',
+        'Attach this checkout to a session. Accepts an ssx_ invite from a teammate (peer session, no login) or an ssj_ code from a hosted board.',
       inputSchema: {
-        code: z.string().describe('The ssj_... code copied from the board'),
+        code: z.string().describe('The ssx_ invite or ssj_ code you were sent'),
         serverUrl: z
           .string()
-          .default(DEFAULT_SERVER_URL)
-          .describe('Coordination server, only if it is not the default'),
+          .nullish()
+          .describe('Only for ssj_ codes on a server that is not the default'),
       },
     },
     async ({ code, serverUrl }) => {
-      const result = await pair(serverUrl, code.trim(), REPO_ROOT)
+      const root = await repoRoot(REPO_ROOT)
+      const trimmed = code.trim()
+      const packed = unpackInvite(trimmed)
 
-      const path = writeConfig(REPO_ROOT, {
-        serverUrl,
+      const result = packed
+        ? await peerJoin(packed.url, packed.token, await localIdentity(), root)
+        : await pair(serverUrl ?? DEFAULT_SERVER_URL, trimmed, root)
+
+      const path = writeConfig(root, {
+        serverUrl: packed?.url ?? serverUrl ?? DEFAULT_SERVER_URL,
         sessionRef: result.sessionRef,
         participantId: result.participantId,
         participantToken: result.participantToken,
         githubLogin: result.githubLogin,
         displayName: result.displayName,
-        repoPath: REPO_ROOT,
+        repoPath: root,
       })
 
       return text(
-        `Joined "${result.sessionTitle}" as ${result.displayName}.\nConfig at ${path}.\nEvery edit in ${basename(REPO_ROOT)} is now checked against the session's file leases.`,
+        [
+          `Joined "${result.sessionTitle}" as ${result.displayName}.`,
+          packed ? `Board: ${packed.url}/?join=${trimmed}` : '',
+          `Config at ${path}.`,
+          `Every edit in ${basename(root)} is now checked against the session's file leases.`,
+        ]
+          .filter(Boolean)
+          .join('\n'),
       )
     },
+  )
+
+  server.registerTool(
+    'ss_stop_host',
+    {
+      description:
+        'Stop the coordination server running on this machine. Everyone loses the session until it is started again; the event log survives.',
+      inputSchema: {},
+    },
+    async () => text(stopDaemon() ? 'Stopped.' : 'Nothing was running.'),
   )
 
   server.registerTool(
