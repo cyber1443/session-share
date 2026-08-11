@@ -8,6 +8,8 @@ Decompose this work so several developers and their agents can attack it in para
 
 Call `ss_status` first to see who is in the session — the split has to keep all of them busy.
 
+This may also arrive from the board rather than from the terminal: someone types the brief there and their Claude Code is handed it. Either way the job is the same.
+
 ## How to split
 
 Read the repo before proposing anything. The split is judged on whether each piece is genuinely standalone and genuinely provable, not on how evenly sized the pieces are.
@@ -33,4 +35,8 @@ If it comes back with errors, fix them and propose once more. Do not argue with 
 
 When it passes, tell the team what you split and why, and ask them to approve on the board.
 
-Once they have, run `/ss:land`. That creates the session branch, commits the contract onto it and pushes — and only then does anything become claimable, because every task was planned against those files.
+The server balances the split across everyone with a checkout as soon as it validates, and `ss_propose` reports who got what. That is a proposal like the rest of it — anyone can move a card on the board before approving. Do not hand-assign in the brief; say what you would change and let them drag it.
+
+Approval seeds the tasks and tells each person's agent what it owns, so nobody has to be chased.
+
+Once they have approved, run `/ss:land`. That creates the session branch, commits the contract onto it and pushes — and only then does anything become claimable, because every task was planned against those files.

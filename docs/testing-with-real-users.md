@@ -142,14 +142,24 @@ a meeting link. On laptop B, inside its own clone:
 /ss:join ssx_…
 ```
 
-The board opens on both, seated. Then `/ss:plan`, approve, `/ss:land`,
-`/ss:next` on both, `/ss:done` each, `/ss:ship`.
+The board opens on both, seated. Then plan it from the board: type the brief in
+the plan panel and press *plan it*. Laptop A's Claude Code picks it up when its
+current turn ends and answers with a split, which appears on both boards already
+balanced between you. Move a card if you disagree, both approve, then `/ss:land`
+on the laptop that leads, `/ss:next` on both, `/ss:done` each, `/ss:ship`.
+
+`/ss:plan <brief>` in the terminal does the same thing; the board route just
+means the person without the checkout can start it.
 
 **What to actually watch for**, since this is the test that matters:
 
 - Ask laptop B's Claude to edit a file laptop A holds. It should be denied by
   name. If it is allowed, the two laptops are not seeing the same session.
 - Watch the board on both while each of you works.
+- Move a task to the other person before approving, and check that the split
+  rebalances rather than leaving a hole.
+- After approving, check that each laptop's Claude Code was told what it owns
+  without either of you typing anything.
 - From laptop A's board, switch the composer to **run** and send
   `@<their-login> add a test for the empty case`. It should turn up inside laptop
   B's Claude Code and be acted on -- when B's current turn ends, which is the one

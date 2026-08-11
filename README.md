@@ -8,7 +8,7 @@ Each dev keeps their own Claude account, their own quota and their own GitHub id
 
 1. One dev runs `/ss:plan <issue>`. Their Claude reads the repo and proposes a **contract** — the shared types, schemas and stubs everything else will import — plus a set of tasks, each owning a disjoint set of file globs and each provable by one command.
 2. A **deterministic validator** rejects the split if two concurrently-runnable tasks own the same path, if the graph has a cycle, if a task has nothing to prove it, or if a task tries to own a contract file. An LLM never decides whether two agents are about to collide.
-3. The team approves. The contract lands on its own branch. Only then do tasks become claimable.
+3. The team approves **on the board**, where the split arrives already balanced between whoever has a checkout — drag a card to change it. Approval seeds the tasks, tells each person's agent what it owns, and lands the contract on its own branch. Only then do tasks become claimable.
 4. Each dev claims a task and gets a **lease** on its paths. A `PreToolUse` hook denies any Edit or Write outside that lease, with the fix in the message. This is what makes two autonomous agents in one repo safe.
 5. Everyone — humans and agents — shares one durable room, and the board shows the DAG live. The room is also a terminal: a message sent in **run** mode is delivered into the other participants' Claude Code and acted on there.
 
@@ -120,8 +120,8 @@ Both of you have the repo cloned and are sitting on `main`. Then:
 |---|---|
 | `/ss:host Add a dark mode toggle` | starts the server, creates the session, hands you one string to send |
 | `/ss:join ssx_…` | your teammate attaches their own clone |
-| `/ss:plan add dark mode` | Claude reads the repo and proposes a contract plus tasks; the validator rejects overlaps before anyone sees them |
-| approve on the board | both of you, or the lead if there are more than three |
+| `/ss:plan add dark mode`, or type the brief on the board | Claude reads the repo and proposes a contract plus tasks; the validator rejects overlaps before anyone sees them |
+| move cards, then approve, on the board | the split arrives balanced between you; both approve, or the lead if there are more than three. Each agent is then told what it owns |
 | `/ss:land` | creates `ss/<session>/contract` off `main`, commits the contract files, pushes, opens a draft PR. Only now is anything claimable |
 | `/ss:next` (each) | you each get a different task, a lease over its files, **and your own branch** off the contract |
 | — work — | simultaneously. The lease gate blocks either agent from editing the other's files. The board shows both live |
@@ -210,10 +210,18 @@ Only two tables are persisted: a `sessions` index and the append-only `events` l
 
 ```bash
 pnpm install
+pnpm e2e         # the whole product, through the real MCP tools, hook and HTTP
 pnpm peer-demo   # host + guest + a real daemon, no accounts anywhere
 pnpm demo        # the same flow through the hosted (OAuth) path
-pnpm test        # 118 tests
+pnpm test        # 136 tests
 ```
+
+`pnpm e2e` is the one that matters. It hosts, joins, plans from the board, moves
+a card, approves, lands the contract and claims — touching nothing that a user
+does not touch: the MCP tools their Claude Code calls, the HTTP the board calls,
+and the hook binary that runs between turns. It exists because every unit test
+passed while the board's approve button was dead, which is exactly the class of
+bug a unit test cannot see.
 
 `pnpm demo` runs a real server, two real participants and the real hook binary as
 a subprocess. It walks a sloppy split being rejected, the repaired split being
@@ -246,6 +254,37 @@ The board shows the same tasks two ways:
 Topics are derived from the paths a task owns rather than from labels anyone has
 to maintain: tasks are cut as vertical slices, so the folder structure already
 says what they are about.
+
+### Planning on the board
+
+The browser cannot read a repository or run a model, and this never proxies
+inference — so the board does not pretend to plan. It does the halves it is good
+at, and hands the middle to an agent:
+
+1. **The brief.** Type what you are building and press *plan it*. It is delivered
+   into a participant's Claude Code — theirs, not a server's — which reads the
+   repo and answers with a contract plus tasks. Their agent picks it up when its
+   current turn ends.
+2. **The arrangement.** The server balances the tasks across everyone with a
+   checkout the moment a split validates: no two simultaneously-runnable tasks on
+   one person, load balanced by the planner's own minute estimates, and each
+   person kept inside one area of the tree. Change any of it from the dropdown on
+   the card — your choice is pinned and the rest rebalances around it.
+3. **The agreement.** Approve, and the plan becomes work: tasks are seeded with
+   their assignee, and each person's agent is told what it owns in its own
+   session. Nobody has to be chased.
+
+Assignment is a plan; a claim is a fact. `/ss:next` hands you your own tasks
+first, falls back to unassigned ones, and takes someone else's only rather than
+leave you idle.
+
+### Several plans at once
+
+Sessions are already independent — the constraint is that one Claude Code lives
+in one directory. `/ss:worktree <title>` makes a second working tree of the same
+clone (shared history, shared remote, shared object store) and tells you where to
+open the second Claude Code. Both sessions run against the one coordination
+server on your machine.
 
 ### The room is a terminal
 
@@ -332,6 +371,7 @@ and once the split is approved and the contract has landed, on every machine:
 | `/ss:request` | ask the holder for a file outside your lease |
 | `/ss:say` | post to the session room, or send it to the other agents |
 | `/ss:board` | reopen the live board |
+| `/ss:worktree` | a second working tree, so this repo can be in two sessions at once |
 
 ### MCP tools
 
@@ -390,4 +430,5 @@ only, and never gains write access to a repository.
 - **Merging is first-come, not queued.** Two people finishing at once both merge into the contract branch; git handles it because their files are disjoint, but there is no serialisation and no automatic conflict resolution.
 - The WebRTC mesh (P4). Agent activity lines already stream over `ws-fanout`, and they are ephemeral by design — reload the board and they are gone until the next one arrives.
 - Authorization is coarse: any signed-in user can read and join any session. Authentication is real; per-session membership rules are not.
+- Assignment is not enforced. `/ss:next` prefers your own tasks, but someone can still claim a task assigned to another person rather than sit idle. That is deliberate; if it turns out to be wrong, the fix is a rule, not a lock.
 - Room directives are delivered on a hook, not pushed: they land when the recipient's agent finishes a turn. An agent sitting idle with nobody typing will not pick one up until something else wakes it.
