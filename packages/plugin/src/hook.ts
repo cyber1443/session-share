@@ -1,31 +1,53 @@
 import { relative, resolve } from 'node:path'
-import { readConfig } from './config.js'
+import type { SessionSnapshot } from '@session-share/protocol'
+import { readConfig, type SessionConfig } from './config.js'
 import { runCommand } from './client.js'
+import { describeDirectives, pendingDirectives } from './inbox.js'
+import { readPreferences } from './preferences.js'
 
 /**
- * PreToolUse gate. Runs as a fresh process before every Edit/Write, so it has
- * one job and a hard latency budget: ask whether this file belongs to someone
- * else's task, and get out of the way.
+ * Every hook the plugin installs, in one process.
  *
- * It fails OPEN. A coordination server that is down or slow must never stop a
- * developer from editing their own repository -- the cost of a missed check is
- * a merge conflict, the cost of a false block is a wedged session.
+ * PreToolUse is the lease gate: it runs before every Edit/Write, so it has one
+ * job and a hard latency budget. The rest deliver the session room into this
+ * Claude Code -- Claude Code cannot be pushed into, so the room is pulled at
+ * the three moments a hook gets to speak.
+ *
+ * All of it fails OPEN. A coordination server that is down or slow must never
+ * stop a developer from editing their own repository -- the cost of a missed
+ * check is a merge conflict, the cost of a false block is a wedged session.
  */
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const TIMEOUT_MS = 1500
+const ROOM_TIMEOUT_MS = 2500
 
 interface HookInput {
+  hook_event_name?: string
   tool_name?: string
   tool_input?: Record<string, unknown>
   cwd?: string
+  /** Set when a Stop hook already blocked this turn; blocking again would loop. */
+  stop_hook_active?: boolean
 }
 
-interface HookOutput {
+interface DenyOutput {
   hookSpecificOutput: {
     hookEventName: 'PreToolUse'
     permissionDecision: 'allow' | 'deny' | 'ask'
     permissionDecisionReason: string
   }
+}
+
+interface ContextOutput {
+  hookSpecificOutput: {
+    hookEventName: 'UserPromptSubmit' | 'SessionStart'
+    additionalContext: string
+  }
+}
+
+interface ContinueOutput {
+  decision: 'block'
+  reason: string
 }
 
 export function extractPaths(toolInput: Record<string, unknown> | undefined): string[] {
@@ -44,7 +66,7 @@ export function toRepoRelative(repoPath: string, cwd: string, filePath: string):
   return relative(repoPath, absolute).split('\\').join('/')
 }
 
-export async function decide(input: HookInput): Promise<HookOutput | null> {
+export async function decide(input: HookInput): Promise<DenyOutput | null> {
   if (!input.tool_name || !EDIT_TOOLS.has(input.tool_name)) return null
 
   const cwd = input.cwd ?? process.cwd()
@@ -78,6 +100,72 @@ export async function decide(input: HookInput): Promise<HookOutput | null> {
   }
 }
 
+/** Names for the authors, so a delivered directive reads as coming from a person. */
+async function participantNames(config: SessionConfig): Promise<Map<string, string>> {
+  try {
+    const response = await fetch(new URL(`/sessions/${config.sessionRef}/snapshot`, config.serverUrl), {
+      headers: config.participantToken ? { authorization: `Bearer ${config.participantToken}` } : {},
+      signal: AbortSignal.timeout(ROOM_TIMEOUT_MS),
+    })
+    if (!response.ok) return new Map()
+    const snapshot = (await response.json()) as SessionSnapshot
+    return new Map(snapshot.participants.map((p) => [p.id as string, p.displayName]))
+  } catch {
+    return new Map()
+  }
+}
+
+/** Anything the room has for this participant, already formatted for the agent. */
+export async function collectRoom(input: HookInput): Promise<string | null> {
+  const config = readConfig(input.cwd ?? process.cwd())
+  if (!config) return null
+  if (!readPreferences().acceptDirectives) return null
+
+  let pending
+  try {
+    pending = await pendingDirectives(config, ROOM_TIMEOUT_MS)
+  } catch {
+    return null // fail open, same as the lease gate
+  }
+  if (pending.length === 0) return null
+
+  return describeDirectives(pending, await participantNames(config))
+}
+
+export async function route(
+  input: HookInput,
+): Promise<DenyOutput | ContextOutput | ContinueOutput | null> {
+  const event = input.hook_event_name ?? (input.tool_name ? 'PreToolUse' : '')
+
+  switch (event) {
+    case 'PreToolUse':
+      return decide(input)
+
+    /**
+     * The turn is over and the agent is about to go idle -- the one moment it
+     * can be handed work without a human typing. Blocking here makes Claude
+     * continue with the directive as its instruction.
+     */
+    case 'Stop': {
+      if (input.stop_hook_active) return null // we already spoke this turn
+      const reason = await collectRoom(input)
+      return reason ? { decision: 'block', reason } : null
+    }
+
+    // The human is already talking to the agent; ride along rather than interrupt.
+    case 'UserPromptSubmit':
+    case 'SessionStart': {
+      const additionalContext = await collectRoom(input)
+      return additionalContext
+        ? { hookSpecificOutput: { hookEventName: event, additionalContext } }
+        : null
+    }
+
+    default:
+      return null
+  }
+}
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = []
   for await (const chunk of process.stdin) chunks.push(chunk as Buffer)
@@ -95,7 +183,7 @@ if (isEntrypoint) {
     process.exit(0) // unparseable input is not a reason to block an edit
   }
 
-  const output = await decide(input)
+  const output = await route(input)
   if (output) process.stdout.write(JSON.stringify(output))
   process.exit(0)
 }
