@@ -39,10 +39,17 @@ ships prebuilt: the coordination server, the MCP tools and the lease-gate hook
 are each bundled into a single dependency-free file, with the board vendored
 beside them. Claude Code clones the marketplace repo and runs nothing.
 
-Installing it means running prebuilt JavaScript, so the build is reproducible
-and CI rebuilds the bundle on every change and fails if it differs from the
-committed one by a byte. You do not have to take the bundle on trust: clone the
-repo, run `pnpm bundle`, and `git diff` should be empty.
+Installing it means running prebuilt JavaScript, so you should not have to take
+that on trust. CI rebuilds the bundle from source on every change and compares:
+
+- The three executables — the coordination server, the MCP server and the
+  lease-gate hook — must reproduce **byte for byte**. These are what actually
+  run on your machine, including on every file edit, so any drift fails the
+  build. You can check it yourself: `pnpm bundle`, then `git diff` those files.
+- The board is a Next.js static export whose chunk filenames embed content
+  hashes that differ between macOS and Linux. Byte-equality there would be a
+  permanently red check that everyone learns to ignore, so its route set is
+  compared instead.
 
 (This is only possible because the server keeps state in `node:sqlite`, which is
 built into Node. A native database driver would have meant a compile step on
