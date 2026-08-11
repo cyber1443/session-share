@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm typecheck
+
+  # The plugin ships as committed build output, so anyone installing it runs
+  # prebuilt JavaScript. This rebuilds it from source and fails if the result
+  # differs by a byte -- which is what turns "trust the bundle" into something
+  # a stranger can verify for themselves.
+  verify-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm bundle
+      - name: The committed bundle must match a fresh build
+        run: |
+          if ! git diff --quiet -- packages/plugin/bundle; then
+            echo "::error::The committed bundle does not match a build from this source."
+            echo "Run: pnpm bundle && git add packages/plugin/bundle && git commit"
+            git diff --stat -- packages/plugin/bundle
+            exit 1
+          fi
+          echo "Bundle reproduces exactly from source."

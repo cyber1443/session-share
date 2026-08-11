@@ -39,6 +39,11 @@ ships prebuilt: the coordination server, the MCP tools and the lease-gate hook
 are each bundled into a single dependency-free file, with the board vendored
 beside them. Claude Code clones the marketplace repo and runs nothing.
 
+Installing it means running prebuilt JavaScript, so the build is reproducible
+and CI rebuilds the bundle on every change and fails if it differs from the
+committed one by a byte. You do not have to take the bundle on trust: clone the
+repo, run `pnpm bundle`, and `git diff` should be empty.
+
 (This is only possible because the server keeps state in `node:sqlite`, which is
 built into Node. A native database driver would have meant a compile step on
 every machine.)
@@ -257,6 +262,38 @@ The agent is a participant, not a subject: `ss_claim`, `ss_get_my_task`, `ss_get
 twice — a reconnect backlog overlapping live delivery, two sockets in one page —
 and appending a chat message twice because of it is a real bug, so the reducer
 drops anything at or below the sequence it has already applied.
+
+## Security, plainly
+
+Read this before pointing it at a repository you care about.
+
+**Peer mode does not verify anyone.** Names come from each participant's own
+machine (`gh`, falling back to git config) and nothing checks them. The invite
+is the credential: whoever holds it is in the room and can call themselves
+anything. That is a deliberate trade for two people who can hand each other a
+link. Do not put a peer server on a public address.
+
+**Hosting exposes a port on your network.** `/ss:host` binds `0.0.0.0` by
+default so a teammate can reach you. Invites are signed, session creation is
+restricted to the hosting machine by socket address, and reading anything needs
+a token — but the port is open. Use `expose: "loopback"` plus a tunnel on an
+untrusted network.
+
+**The lease gate fails open.** If the coordination server is unreachable, edits
+proceed unchecked. A missed check costs a merge conflict; a false block wedges a
+developer, and that is the worse failure.
+
+**Hooks are bypassable.** A participant can disable the `PreToolUse` gate in
+their own settings. The gate prevents accidents between people who agreed to
+collaborate; it is not a control against someone who does not want it.
+
+**Authorisation is coarse.** In hosted mode any signed-in user can read or join
+any session on that server. Authentication is real; per-session membership rules
+are not built.
+
+**No secrets are collected.** Your Claude credentials are never involved —
+inference is never proxied. In hosted mode the OAuth App requests `read:user`
+only, and never gains write access to a repository.
 
 ## Not done yet
 

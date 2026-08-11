@@ -10,8 +10,9 @@ Both people install the plugin. One hosts, the other pastes one string.
 
 ### Installing, per person
 
-This repository is private, so give your teammate read access on GitHub first.
-Then each of them runs, once, in Claude Code:
+If this repository is private, give your teammate read access on GitHub first —
+their Claude Code clones it with their own credentials. Then each of them runs,
+once, in Claude Code:
 
 ```
 /plugin marketplace add cyber1443/session-share
