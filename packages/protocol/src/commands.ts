@@ -3,6 +3,7 @@ import {
   Assignment,
   ChatMessage,
   Contract,
+  Ticket,
   HandoffRequest,
   Lease,
   ParticipantActivity,
@@ -14,7 +15,7 @@ import {
   TestResult,
   ValidationReport,
 } from './domain.js'
-import { DecompositionId, ParticipantId, SessionId, Seq, TaskId } from './ids.js'
+import { DecompositionId, ParticipantId, SessionId, Seq, TaskId, TicketId } from './ids.js'
 
 /**
  * Client -> server. Every command is request/response (an `ack` carrying the
@@ -49,6 +50,23 @@ export const ClientCommand = z.discriminatedUnion('type', [
   z.object({ type: z.literal('session.sync'), fromSeq: Seq }),
 
   /**
+   * Anyone can open one, from the board or the terminal. The author joins it
+   * automatically; everyone else is told it exists and can opt in.
+   */
+  z.object({
+    type: z.literal('ticket.create'),
+    title: z.string().min(1).max(200),
+    body: z.string().max(4000).default(''),
+  }),
+  /** Opting in. This is the consent step -- there is no separate approval. */
+  z.object({ type: z.literal('ticket.join'), ticketId: TicketId }),
+  z.object({ type: z.literal('ticket.leave'), ticketId: TicketId }),
+  /** Begin splitting now rather than waiting for someone else to join. */
+  z.object({ type: z.literal('ticket.start'), ticketId: TicketId }),
+  /** Records the pull request that finished a ticket. */
+  z.object({ type: z.literal('ticket.shipped'), ticketId: TicketId, prNumber: z.number().int().nullable().default(null) }),
+
+  /**
    * Ask for a split from the board. Planning needs a repo and a model, neither
    * of which the browser has -- so this hands the brief to a participant's
    * Claude Code, which reads the repo and answers with `decomposition.propose`.
@@ -66,6 +84,8 @@ export const ClientCommand = z.discriminatedUnion('type', [
     tasks: z.array(TaskSpec).min(1),
     participantCount: z.number().int().min(1),
     issueRef: z.string().nullable().default(null),
+    /** The ticket being split. Omitted only by the older session-wide flow. */
+    ticketId: TicketId.nullable().default(null),
   }),
   /** Move a card to someone, or to nobody. Overrides the automatic split. */
   z.object({
@@ -191,6 +211,11 @@ export interface CommandResultMap {
   'session.create': { sessionId: SessionId; slug: string }
   'session.join': JoinResult
   'session.sync': { upToSeq: Seq }
+  'ticket.create': { ticket: Ticket }
+  'ticket.join': { ticket: Ticket }
+  'ticket.leave': { ticket: Ticket }
+  'ticket.start': { ticket: Ticket }
+  'ticket.shipped': { ticket: Ticket }
   'plan.request': { plannerId: ParticipantId; goal: string }
   'decomposition.propose': ProposeResult
   'task.assign': { assignments: Assignment[] }

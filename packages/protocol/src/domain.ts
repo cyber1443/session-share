@@ -5,6 +5,7 @@ import {
   ParticipantId,
   SessionId,
   TaskId,
+  TicketId,
   Timestamp,
 } from './ids.js'
 
@@ -85,6 +86,43 @@ export const Participant = z.object({
 export type Participant = z.infer<typeof Participant>
 
 // ---------------------------------------------------------------------------
+// Tickets: the unit of work people opt into
+// ---------------------------------------------------------------------------
+
+/**
+ * Where a ticket sits on the board. Only `plan` is ever set by a person -- the
+ * rest follow from what the agents have actually done, which is the point: a
+ * column that has to be dragged is a column that lies.
+ */
+export const TicketState = z.enum(['plan', 'splitting', 'building', 'review', 'done'])
+export type TicketState = z.infer<typeof TicketState>
+
+/**
+ * One piece of work, written by whoever wanted it and joined by whoever wants
+ * in. A ticket owns its own split, so several can run at once without a
+ * session-wide plan-and-approve ceremony between them.
+ */
+export const Ticket = z.object({
+  id: TicketId,
+  sessionId: SessionId,
+  title: z.string().min(1).max(200),
+  /** The brief the planner works from. Optional: a title is often enough. */
+  body: z.string().max(4000).default(''),
+  authorId: ParticipantId,
+  /**
+   * Who is working it. Joining is the whole consent step -- there is no
+   * separate approval, because opting in to a ticket *is* opting in to its
+   * split.
+   */
+  members: z.array(ParticipantId).default([]),
+  state: TicketState,
+  decompositionId: DecompositionId.nullable().default(null),
+  prNumber: z.number().int().nullable().default(null),
+  createdAt: Timestamp,
+})
+export type Ticket = z.infer<typeof Ticket>
+
+// ---------------------------------------------------------------------------
 // Decomposition: the contract-first split
 // ---------------------------------------------------------------------------
 
@@ -148,6 +186,8 @@ export type DecompositionStatus = z.infer<typeof DecompositionStatus>
 export const Decomposition = z.object({
   id: DecompositionId,
   sessionId: SessionId,
+  /** The ticket this split is for. */
+  ticketId: TicketId.nullable().default(null),
   issueRef: z.string().nullable(),
   contract: Contract,
   tasks: z.array(TaskSpec).min(1),
@@ -180,6 +220,7 @@ export const ValidationCode = z.enum([
   'missing_acceptance',
   'path_escapes_repo',
   'contract_path_owned_by_task',
+  'overlaps_other_ticket',
   'narrow_frontier',
   'oversized_task',
 ])
@@ -232,6 +273,8 @@ export type TestResult = z.infer<typeof TestResult>
 
 export const Task = TaskSpec.extend({
   sessionId: SessionId,
+  /** Which ticket this task came out of. */
+  ticketId: TicketId.nullable().default(null),
   state: TaskState,
   /**
    * Who it is meant for, carried over from the approved split. Distinct from
@@ -331,6 +374,7 @@ export type MergeQueueEntry = z.infer<typeof MergeQueueEntry>
 export const SessionSnapshot = z.object({
   session: Session,
   participants: z.array(Participant),
+  tickets: z.array(Ticket).default([]),
   decomposition: Decomposition.nullable(),
   validation: ValidationReport.nullable(),
   tasks: z.array(Task),

@@ -9,6 +9,7 @@ export const SessionId = z.string().min(1).brand<'SessionId'>()
 export const ParticipantId = z.string().min(1).brand<'ParticipantId'>()
 export const DecompositionId = z.string().min(1).brand<'DecompositionId'>()
 export const MessageId = z.string().min(1).brand<'MessageId'>()
+export const TicketId = z.string().min(1).brand<'TicketId'>()
 
 export const TaskId = z
   .string()
@@ -19,6 +20,7 @@ export type SessionId = z.infer<typeof SessionId>
 export type ParticipantId = z.infer<typeof ParticipantId>
 export type DecompositionId = z.infer<typeof DecompositionId>
 export type MessageId = z.infer<typeof MessageId>
+export type TicketId = z.infer<typeof TicketId>
 export type TaskId = z.infer<typeof TaskId>
 
 /** Monotonic per-session sequence number stamped on every persisted event. */

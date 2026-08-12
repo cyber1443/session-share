@@ -1,6 +1,8 @@
 import type {
   ChatMessage,
   Decomposition,
+  Ticket,
+  TicketState,
   HandoffRequest,
   Lease,
   MergeQueueEntry,
@@ -11,7 +13,7 @@ import type {
   ValidationReport,
 } from './domain.js'
 import type { EventEnvelope } from './events.js'
-import type { ParticipantId, TaskId } from './ids.js'
+import type { ParticipantId, TaskId, TicketId } from './ids.js'
 import { pathMatchesAny } from './glob.js'
 
 /**
@@ -33,6 +35,8 @@ export class SessionState {
   session: Session | null = null
   seq = -1
   readonly participants = new Map<ParticipantId, Participant>()
+  /** Insertion-ordered, which is the order the board's Plan column shows. */
+  readonly tickets = new Map<TicketId, Ticket>()
   decomposition: Decomposition | null = null
   validation: ValidationReport | null = null
   readonly tasks = new Map<TaskId, Task>()
@@ -95,13 +99,41 @@ export class SessionState {
         break
       }
 
+      case 'ticket.created':
+        this.tickets.set(body.ticket.id, body.ticket)
+        break
+      case 'ticket.members': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) this.tickets.set(body.ticketId, { ...ticket, members: body.members })
+        break
+      }
+      case 'ticket.state': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) this.tickets.set(body.ticketId, { ...ticket, state: body.state })
+        break
+      }
+      case 'ticket.shipped': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) {
+          this.tickets.set(body.ticketId, { ...ticket, prNumber: body.prNumber, state: 'done' })
+        }
+        break
+      }
+
       case 'plan.requested':
         if (this.session) this.session = { ...this.session, goal: body.goal, issueRef: body.issueRef }
         break
-      case 'decomposition.proposed':
+      case 'decomposition.proposed': {
         this.decomposition = body.decomposition
         this.validation = body.validation
+        const ticket = body.decomposition.ticketId
+          ? this.tickets.get(body.decomposition.ticketId)
+          : null
+        if (ticket) {
+          this.tickets.set(ticket.id, { ...ticket, decompositionId: body.decomposition.id })
+        }
         break
+      }
       case 'decomposition.assigned':
         if (this.decomposition) {
           this.decomposition = { ...this.decomposition, assignments: body.assignments }
@@ -261,6 +293,24 @@ export class SessionState {
     return scored[0]?.task ?? null
   }
 
+  tasksOfTicket(ticketId: TicketId): Task[] {
+    return [...this.tasks.values()].filter((task) => task.ticketId === ticketId)
+  }
+
+  /**
+   * Where a ticket belongs on the board, derived from what has actually
+   * happened to its tasks rather than from anyone dragging a card.
+   */
+  ticketStateFor(ticketId: TicketId): TicketState {
+    const ticket = this.tickets.get(ticketId)
+    if (!ticket) return 'plan'
+    if (ticket.prNumber !== null) return 'done'
+
+    const tasks = this.tasksOfTicket(ticketId)
+    if (tasks.length === 0) return ticket.state === 'splitting' ? 'splitting' : 'plan'
+    return tasks.every((task) => task.state === 'merged') ? 'review' : 'building'
+  }
+
   /** Tasks whose blocked/ready state no longer matches their dependencies. */
   staleStateTasks(): Task[] {
     return [...this.tasks.values()].filter((task) => {
@@ -280,6 +330,10 @@ export class SessionState {
     for (const participant of snapshot.participants) {
       this.participants.set(participant.id, participant)
     }
+    this.tickets.clear()
+    // Snapshots cross version boundaries -- an older server has no tickets at
+    // all -- and hydrating is the one place a client cannot afford to throw.
+    for (const ticket of snapshot.tickets ?? []) this.tickets.set(ticket.id, ticket)
     this.decomposition = snapshot.decomposition
     this.validation = snapshot.validation
     this.tasks.clear()
@@ -299,6 +353,7 @@ export class SessionState {
     return {
       session: this.session,
       participants: [...this.participants.values()],
+      tickets: [...this.tickets.values()],
       decomposition: this.decomposition,
       validation: this.validation,
       tasks: [...this.tasks.values()],

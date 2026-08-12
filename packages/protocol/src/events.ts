@@ -2,6 +2,8 @@ import { z } from 'zod'
 import {
   Assignment,
   ChatMessage,
+  Ticket,
+  TicketState,
   Decomposition,
   HandoffRequest,
   Lease,
@@ -15,7 +17,7 @@ import {
   TestResult,
   ValidationReport,
 } from './domain.js'
-import { ParticipantId, SessionId, Seq, TaskId, Timestamp } from './ids.js'
+import { ParticipantId, SessionId, Seq, TaskId, TicketId, Timestamp } from './ids.js'
 
 /**
  * Every mutation to durable session state is one of these events, appended to a
@@ -49,6 +51,20 @@ export const EventBody = z.discriminatedUnion('type', [
     type: z.literal('participant.attached'),
     participantId: ParticipantId,
     repoPath: z.string().min(1),
+  }),
+
+  // -- tickets --------------------------------------------------------------
+  z.object({ type: z.literal('ticket.created'), ticket: Ticket }),
+  z.object({
+    type: z.literal('ticket.members'),
+    ticketId: TicketId,
+    members: z.array(ParticipantId),
+  }),
+  z.object({ type: z.literal('ticket.state'), ticketId: TicketId, state: TicketState }),
+  z.object({
+    type: z.literal('ticket.shipped'),
+    ticketId: TicketId,
+    prNumber: z.number().int().nullable(),
   }),
 
   // -- decomposition --------------------------------------------------------
