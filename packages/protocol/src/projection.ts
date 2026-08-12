@@ -307,8 +307,12 @@ export class SessionState {
     if (ticket.prNumber !== null) return 'done'
 
     const tasks = this.tasksOfTicket(ticketId)
-    if (tasks.length === 0) return ticket.state === 'splitting' ? 'splitting' : 'plan'
-    return tasks.every((task) => task.state === 'merged') ? 'review' : 'building'
+    if (tasks.length > 0) {
+      return tasks.every((task) => task.state === 'merged') ? 'review' : 'building'
+    }
+    // A split exists but nothing has been seeded: it is waiting to be accepted.
+    if (ticket.decompositionId) return 'proposed'
+    return ticket.state === 'splitting' ? 'splitting' : 'plan'
   }
 
   /** Tasks whose blocked/ready state no longer matches their dependencies. */

@@ -63,6 +63,12 @@ export const ClientCommand = z.discriminatedUnion('type', [
   z.object({ type: z.literal('ticket.leave'), ticketId: TicketId }),
   /** Begin splitting now rather than waiting for someone else to join. */
   z.object({ type: z.literal('ticket.start'), ticketId: TicketId }),
+  /**
+   * Accept the proposed split and start the work. One click by any member --
+   * the point is that a person sees what is about to run before it runs, not
+   * that everyone votes.
+   */
+  z.object({ type: z.literal('ticket.approve'), ticketId: TicketId }),
   /** Records the pull request that finished a ticket. */
   z.object({ type: z.literal('ticket.shipped'), ticketId: TicketId, prNumber: z.number().int().nullable().default(null) }),
 
@@ -211,10 +217,12 @@ export interface CommandResultMap {
   'session.create': { sessionId: SessionId; slug: string }
   'session.join': JoinResult
   'session.sync': { upToSeq: Seq }
-  'ticket.create': { ticket: Ticket }
-  'ticket.join': { ticket: Ticket }
+  /** `plannerId` names whoever was asked to split it, when that just happened. */
+  'ticket.create': { ticket: Ticket; plannerId: ParticipantId | null }
+  'ticket.join': { ticket: Ticket; plannerId: ParticipantId | null }
   'ticket.leave': { ticket: Ticket }
-  'ticket.start': { ticket: Ticket }
+  'ticket.start': { ticket: Ticket; plannerId: ParticipantId | null }
+  'ticket.approve': { ticket: Ticket }
   'ticket.shipped': { ticket: Ticket }
   'plan.request': { plannerId: ParticipantId; goal: string }
   'decomposition.propose': ProposeResult

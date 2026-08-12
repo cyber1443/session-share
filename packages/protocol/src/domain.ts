@@ -90,11 +90,12 @@ export type Participant = z.infer<typeof Participant>
 // ---------------------------------------------------------------------------
 
 /**
- * Where a ticket sits on the board. Only `plan` is ever set by a person -- the
- * rest follow from what the agents have actually done, which is the point: a
- * column that has to be dragged is a column that lies.
+ * Where a ticket sits on the board. Two of these are set by people -- writing a
+ * ticket and accepting its split -- and the rest follow from what the agents
+ * have actually done. Nothing is dragged: a column you maintain by hand lies the
+ * moment anyone is busy.
  */
-export const TicketState = z.enum(['plan', 'splitting', 'building', 'review', 'done'])
+export const TicketState = z.enum(['plan', 'splitting', 'proposed', 'building', 'review', 'done'])
 export type TicketState = z.infer<typeof TicketState>
 
 /**
