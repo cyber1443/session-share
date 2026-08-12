@@ -195,6 +195,34 @@ const TASKS = [
   },
 ]
 
+/** A second ticket, scoped away from the first: two tickets may not share files. */
+const TAG_TASKS = [
+  {
+    id: 'tag-storage',
+    title: 'Store tags on a todo',
+    intent: 'A tag list per todo',
+    ownedPaths: ['src/lib/tags.js', 'src/lib/tags.test.js'],
+    dependsOn: [],
+    assumes: [],
+    acceptance: { testCommand: 'node --test src/lib', testFiles: ['src/lib/tags.test.js'], manualChecks: [] },
+    estimateMinutes: 40,
+  },
+  {
+    id: 'tag-filter',
+    title: 'Filter the list by tag',
+    intent: 'Pick a tag and show only those',
+    ownedPaths: ['src/components/tag-filter/**'],
+    dependsOn: [],
+    assumes: [],
+    acceptance: {
+      testCommand: 'node --test src/components',
+      testFiles: ['src/components/tag-filter/filter.test.js'],
+      manualChecks: [],
+    },
+    estimateMinutes: 35,
+  },
+]
+
 // ---------------------------------------------------------------------------
 
 const scratch = mkdtempSync(join(tmpdir(), 'ss-e2e-home-'))
@@ -230,6 +258,7 @@ try {
   const bob = await claudeCode(bobRepo, bobHome, 'bob')
   await bob.call('ss_join', { code: invite })
   const bobBoard = board(bobRepo)
+  const aliceBoardEarly = board(aliceRepo)
   const seen = await bobBoard.snapshot()
   check(seen.participants.length === 2, 'both are in the session')
 
@@ -243,6 +272,63 @@ try {
   )
 
   // -- 4 ---------------------------------------------------------------------
+  say('Bob writes a ticket in the Plan column')
+  const opened = await bobBoard.command({
+    type: 'ticket.create',
+    title: 'Add tags to todos',
+    body: 'A tag list on each todo and a way to filter by one.',
+  })
+  check(opened.ticket.state === 'plan', 'it lands in Plan, with Bob in it')
+
+  const invited = await turnEnds(aliceRepo, aliceHome)
+  check(
+    invited === null,
+    'and Alice is told without her agent being hijacked into joining',
+    'the invitation must not drive an agent',
+  )
+  const room = (await aliceBoardEarly.snapshot()).chat.at(-1)
+  check(/Join it on the board/.test(room?.body ?? ''), 'the invitation is in the room')
+
+  say('Alice joins it, which is the whole agreement')
+  const joinedTicket = await aliceBoardEarly.command({
+    type: 'ticket.join',
+    ticketId: opened.ticket.id,
+  })
+  check(joinedTicket.ticket.members.length === 2, 'both are in')
+  check(joinedTicket.ticket.state === 'splitting', 'and it starts splitting itself')
+
+  // The author's agent does the splitting: they wrote the ticket, so they know
+  // what it meant.
+  const toSplit = await turnEnds(bobRepo, bobHome)
+  check(/Split the ticket/.test(toSplit ?? ''), "the author's agent was handed the split")
+  check(/Nobody approves this/.test(toSplit ?? ''), 'and told that nothing gates it')
+
+  say("Bob's agent proposes it; the work starts with no approval")
+  const ticketSplit = JSON.parse(
+    await bob.call('ss_propose', {
+      contract: CONTRACT,
+      tasks: TAG_TASKS,
+      ticketId: opened.ticket.id,
+    }),
+  )
+  check(ticketSplit.accepted === true, 'the validator still runs')
+
+  const afterSplit = await bobBoard.snapshot()
+  const ticketTasks = afterSplit.tasks.filter((t) => t.ticketId === opened.ticket.id)
+  check(ticketTasks.length === TAG_TASKS.length, 'its tasks are live immediately')
+  check(
+    ticketTasks.every((t) => t.assigneeId),
+    'shared out between the two who joined, with nothing approved',
+  )
+  check(
+    afterSplit.tickets.find((t) => t.id === opened.ticket.id)?.state === 'building',
+    'and the card moved itself to Building',
+  )
+
+  const briefed = await turnEnds(aliceRepo, aliceHome)
+  check(/ss_claim -> do the work/.test(briefed ?? ''), "Alice's agent was told to run the whole loop")
+
+  // -- the older session-wide flow still works ------------------------------
   say('Bob types the brief on the board and presses plan')
   const requested = await bobBoard.command({
     type: 'plan.request',
@@ -303,8 +389,10 @@ try {
   check(two.satisfied === true, 'the second one settles it')
 
   const live = await bobBoard.snapshot()
+  // Only this decomposition's tasks; the ticket above has its own.
+  const sessionTasks = live.tasks.filter((task) => task.ticketId === null)
   check(
-    live.tasks.length === TASKS.length && live.tasks.every((t) => t.assigneeId),
+    sessionTasks.length === TASKS.length && sessionTasks.every((t) => t.assigneeId),
     'tasks are live and every one knows whose it is',
   )
 
