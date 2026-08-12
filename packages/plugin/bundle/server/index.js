@@ -65297,7 +65297,7 @@ var SessionService = class {
   startTicket(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const ticket = this.requireTicket(state, command.ticketId);
-    if (ticket.state !== "plan") return { ticket, plannerId: null };
+    if (ticket.decompositionId) return { ticket, plannerId: null };
     const plannerId = this.beginSplit(sessionId, participantId, state, ticket);
     return { ticket: this.requireTicket(state, command.ticketId), plannerId };
   }
