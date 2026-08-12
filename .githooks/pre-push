@@ -6,6 +6,16 @@
 # stops being local. The check is a hash comparison and costs milliseconds; only
 # a genuinely stale bundle triggers a rebuild.
 
+# A release nobody can install is not a release: Claude Code keys the install
+# directory on the manifest version and skips the download when it already has
+# it, so shipping new code under an old version silently reaches no one.
+if ! node scripts/check-version.mjs 2>/dev/null; then
+  echo ""
+  echo "Bump the version, commit it, and push again."
+  echo ""
+  exit 1
+fi
+
 if ! node scripts/check-bundle.mjs --quiet 2>/dev/null; then
   echo ""
   echo "The plugin bundle is out of date. Rebuilding it now..."

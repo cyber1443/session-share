@@ -21,7 +21,8 @@
     "check-bundle": "node scripts/check-bundle.mjs",
     "git-flow-demo": "pnpm bundle && node --disable-warning=ExperimentalWarning scripts/git-flow-demo.mjs",
     "sandbox": "pnpm bundle && node scripts/local-sandbox.mjs",
-    "e2e": "turbo run build && node --disable-warning=ExperimentalWarning scripts/e2e.mjs"
+    "e2e": "turbo run build && node --disable-warning=ExperimentalWarning scripts/e2e.mjs",
+    "check-version": "node scripts/check-version.mjs"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
