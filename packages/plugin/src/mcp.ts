@@ -15,7 +15,7 @@ import {
 import { CommandError, pair, peerJoin, runCommand } from './client.js'
 import { readConfig, writeConfig, type SessionConfig } from './config.js'
 import { ensureDaemon, probe, stopDaemon } from './daemon.js'
-import { markCaughtUp } from './inbox.js'
+import { describeDirectives, markCaughtUp, peekDirectives, pendingDirectives } from './inbox.js'
 import { boardUrl, openInBrowser } from './open.js'
 import {
   addWorktree,
@@ -471,6 +471,24 @@ export function createServer(): McpServer {
   )
 
   server.registerTool(
+    'ss_inbox',
+    {
+      description:
+        'Take whatever the session has queued for you and act on it. Use this when you have been told there is work waiting -- a split to propose, tasks to claim, a PR to open. Normally it arrives by itself at the end of a turn; this is for picking it up on demand.',
+      inputSchema: {},
+    },
+    async () => {
+      const cfg = config()
+      const pending = await pendingDirectives(cfg, 5000)
+      if (pending.length === 0) return text('Nothing waiting. The room has asked you for nothing.')
+
+      const state = await snapshot(cfg)
+      const names = new Map(state.participants.map((p) => [p.id as string, p.displayName]))
+      return text(describeDirectives(pending, names))
+    },
+  )
+
+  server.registerTool(
     'ss_tickets',
     {
       description:
@@ -481,8 +499,13 @@ export function createServer(): McpServer {
       const cfg = config()
       const state = await snapshot(cfg)
       const names = new Map(state.participants.map((p) => [p.id, p.displayName]))
-      return text(
-        state.tickets.map((ticket) => ({
+      const waiting = await peekDirectives(cfg).catch(() => [])
+      return text({
+        waiting:
+          waiting.length > 0
+            ? `${waiting.length} instruction(s) are queued for you -- run ss_inbox to take them.`
+            : undefined,
+        tickets: state.tickets.map((ticket) => ({
           id: ticket.id,
           title: ticket.title,
           column: ticket.state,
@@ -493,7 +516,7 @@ export function createServer(): McpServer {
             .map((task) => `${task.id}: ${task.state}${task.assigneeId ? ` (${names.get(task.assigneeId)})` : ''}`),
           prNumber: ticket.prNumber,
         })),
-      )
+      })
     },
   )
 

@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ChatMessage } from '@session-share/protocol'
 import { runCommand } from './client.js'
 import type { SessionConfig } from './config.js'
-import { STATE_DIR } from './daemon.js'
 
 /**
  * The room's outbound half: messages posted as directives are meant to land in
@@ -14,7 +14,16 @@ import { STATE_DIR } from './daemon.js'
  * The cursor is per checkout and per participant, and lives outside the repo so
  * it never turns up in a diff.
  */
-const INBOX_FILE = join(STATE_DIR, 'inbox.json')
+/**
+ * Resolved per call rather than captured at import. A constant here binds to
+ * whatever the environment was when this module happened to be loaded, which
+ * is a surprising thing to depend on and impossible to exercise in a test.
+ */
+function stateDir(): string {
+  return process.env.SESSION_SHARE_HOME ?? join(homedir(), '.session-share')
+}
+
+const inboxFile = () => join(stateDir(), 'inbox.json')
 
 type Cursors = Record<string, number>
 
@@ -23,17 +32,18 @@ function cursorKey(config: SessionConfig): string {
 }
 
 function readCursors(): Cursors {
-  if (!existsSync(INBOX_FILE)) return {}
+  const path = inboxFile()
+  if (!existsSync(path)) return {}
   try {
-    return JSON.parse(readFileSync(INBOX_FILE, 'utf8')) as Cursors
+    return JSON.parse(readFileSync(path, 'utf8')) as Cursors
   } catch {
     return {}
   }
 }
 
 function writeCursor(key: string, value: number): void {
-  mkdirSync(STATE_DIR, { recursive: true })
-  writeFileSync(INBOX_FILE, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}\n`)
+  mkdirSync(stateDir(), { recursive: true })
+  writeFileSync(inboxFile(), `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}\n`)
 }
 
 /**
@@ -53,6 +63,7 @@ export function markCaughtUp(config: SessionConfig, at = Date.now()): void {
 export async function pendingDirectives(
   config: SessionConfig,
   timeoutMs = 2500,
+  consume = true,
 ): Promise<ChatMessage[]> {
   const key = cursorKey(config)
   const cursor = readCursors()[key]
@@ -75,10 +86,21 @@ export async function pendingDirectives(
       (message.mentions.length === 0 || message.mentions.includes(config.participantId as never)),
   )
 
-  if (pending.length > 0) {
+  if (consume && pending.length > 0) {
     writeCursor(key, Math.max(...pending.map((message) => message.createdAt)))
   }
   return pending
+}
+
+/**
+ * What is waiting, without taking it.
+ *
+ * Used to tell someone their agent has work queued. Consuming here would be a
+ * quiet way to lose an instruction: a tool that merely mentions a directive has
+ * not caused anyone to act on it.
+ */
+export function peekDirectives(config: SessionConfig, timeoutMs = 2000): Promise<ChatMessage[]> {
+  return pendingDirectives(config, timeoutMs, false)
 }
 
 /**

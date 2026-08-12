@@ -390,6 +390,28 @@ describe('directives from the room', () => {
     assert.match(output.hookSpecificOutput.additionalContext, /update the README/)
   })
 
+  /**
+   * The gap this closes: delivery rides the end of a turn, and an idle Claude
+   * Code has no turn ending. A session that starts while someone is away sits
+   * still, looking broken, until something wakes it.
+   */
+  it('can be pulled on demand when no turn has ended', async () => {
+    const { pendingDirectives, peekDirectives } = await import('../dist/inbox.js')
+    const config = readConfig(bobRepo)
+    process.env.SESSION_SHARE_HOME = stateDir
+
+    await say(aliceRepo, 'propose the split', { directive: true })
+
+    const peeked = await peekDirectives(config)
+    assert.equal(peeked.length, 1, 'it is visible without being taken')
+    const again = await peekDirectives(config)
+    assert.equal(again.length, 1, 'peeking must not consume: mentioning is not acting')
+
+    const taken = await pendingDirectives(config)
+    assert.match(taken[0].body, /propose the split/)
+    assert.deepEqual(await pendingDirectives(config), [], 'and then it is handed over exactly once')
+  })
+
   it('fails open when the server cannot be reached', async () => {
     const orphan = mkdtempSync(join(tmpdir(), 'ss-orphan-room-'))
     writeConfig(orphan, {
