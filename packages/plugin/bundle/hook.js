@@ -14739,7 +14739,7 @@ var Participant = external_exports.object({
   activity: ParticipantActivity,
   joinedAt: Timestamp
 });
-var TicketState = external_exports.enum(["plan", "splitting", "building", "review", "done"]);
+var TicketState = external_exports.enum(["plan", "splitting", "proposed", "building", "review", "done"]);
 var Ticket = external_exports.object({
   id: TicketId,
   sessionId: SessionId,
@@ -15137,6 +15137,12 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("ticket.leave"), ticketId: TicketId }),
   /** Begin splitting now rather than waiting for someone else to join. */
   external_exports.object({ type: external_exports.literal("ticket.start"), ticketId: TicketId }),
+  /**
+   * Accept the proposed split and start the work. One click by any member --
+   * the point is that a person sees what is about to run before it runs, not
+   * that everyone votes.
+   */
+  external_exports.object({ type: external_exports.literal("ticket.approve"), ticketId: TicketId }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
   /**

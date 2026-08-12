@@ -31071,7 +31071,7 @@ var Participant = external_exports.object({
   activity: ParticipantActivity,
   joinedAt: Timestamp
 });
-var TicketState = external_exports.enum(["plan", "splitting", "building", "review", "done"]);
+var TicketState = external_exports.enum(["plan", "splitting", "proposed", "building", "review", "done"]);
 var Ticket = external_exports.object({
   id: TicketId,
   sessionId: SessionId,
@@ -31469,6 +31469,12 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("ticket.leave"), ticketId: TicketId }),
   /** Begin splitting now rather than waiting for someone else to join. */
   external_exports.object({ type: external_exports.literal("ticket.start"), ticketId: TicketId }),
+  /**
+   * Accept the proposed split and start the work. One click by any member --
+   * the point is that a person sees what is about to run before it runs, not
+   * that everyone votes.
+   */
+  external_exports.object({ type: external_exports.literal("ticket.approve"), ticketId: TicketId }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
   /**
@@ -32779,6 +32785,20 @@ async function mintInvite(serverUrl, slug) {
   }
   return payload.invite;
 }
+function splitHint(cfg, ticket, plannerId) {
+  if (plannerId && plannerId === cfg.participantId) {
+    return [
+      "",
+      "You are splitting it. Do it now, in this turn: read the repository and call",
+      `ss_propose with ticketId: ${ticket.id}. Then it goes on the board for someone to start.`
+    ].join("\n");
+  }
+  if (plannerId) return "Someone else was asked to split it; it appears on the board when they do.";
+  if (ticket.state === "plan") {
+    return "The others have been told. It starts splitting when one of them joins, or when you run ss_ticket_start.";
+  }
+  return "";
+}
 async function checkReachable(url2, expectedServerId2) {
   const health = await probe(url2, 4e3);
   if (!health) {
@@ -33132,17 +33152,12 @@ function createServer() {
     },
     async ({ title, body }) => {
       const cfg = config2();
-      const { ticket } = await runCommand(cfg, {
+      const { ticket, plannerId } = await runCommand(cfg, {
         type: "ticket.create",
         title,
         body: body ?? ""
       });
-      return text(
-        [
-          `Opened "${ticket.title}" (${ticket.id}).`,
-          ticket.state === "splitting" ? "Nobody else is here, so it is already being split." : "The others have been told; it starts splitting as soon as one of them joins, or when you run ss_ticket_start."
-        ].join("\n")
-      );
+      return text([`Opened "${ticket.title}" (${ticket.id}).`, splitHint(cfg, ticket, plannerId)].join("\n"));
     }
   );
   server.registerTool(
@@ -33153,11 +33168,16 @@ function createServer() {
     },
     async ({ ticketId }) => {
       const cfg = config2();
-      const { ticket } = await runCommand(cfg, {
+      const { ticket, plannerId } = await runCommand(cfg, {
         type: "ticket.join",
         ticketId
       });
-      return text(`In "${ticket.title}" with ${ticket.members.length} other(s). Column: ${ticket.state}.`);
+      return text(
+        [
+          `In "${ticket.title}" with ${ticket.members.length - 1} other(s). Column: ${ticket.state}.`,
+          splitHint(cfg, ticket, plannerId)
+        ].join("\n")
+      );
     }
   );
   server.registerTool(
@@ -33168,11 +33188,26 @@ function createServer() {
     },
     async ({ ticketId }) => {
       const cfg = config2();
-      const { ticket } = await runCommand(cfg, {
+      const { ticket, plannerId } = await runCommand(cfg, {
         type: "ticket.start",
         ticketId
       });
-      return text(`"${ticket.title}" is ${ticket.state}.`);
+      return text([`"${ticket.title}" is ${ticket.state}.`, splitHint(cfg, ticket, plannerId)].join("\n"));
+    }
+  );
+  server.registerTool(
+    "ss_ticket_approve",
+    {
+      description: "Accept a ticket's proposed split and start the work. Seeds the tasks and tells every member's agent what it owns.",
+      inputSchema: { ticketId: external_exports.string() }
+    },
+    async ({ ticketId }) => {
+      const cfg = config2();
+      const { ticket } = await runCommand(cfg, {
+        type: "ticket.approve",
+        ticketId
+      });
+      return text(`"${ticket.title}" is ${ticket.state}. Everyone in it has been told what they own.`);
     }
   );
   server.registerTool(
@@ -33249,7 +33284,7 @@ function createServer() {
             task: a.taskId,
             to: names.get(a.participantId) ?? a.participantId
           })),
-          next: ticketId ? "Live already -- a ticket split needs no approval. Everyone in the ticket has been told what they own; do your own tasks now." : "The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns."
+          next: ticketId ? "On the board now, with the proposed assignment. Anyone in the ticket can change who does what and press start; that is when the work begins." : "The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns."
         });
       }
       return text({
