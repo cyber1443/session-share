@@ -211,6 +211,34 @@ export function TicketPanel({
         </div>
       ) : null}
 
+      {/* -- was it actually run? --------------------------------------------- */}
+      {ticket.state === 'verify' || ticket.verification ? (
+        <div
+          className={`panel space-y-1 p-3 ${ticket.verification && !ticket.verification.passed ? 'border-red-500/30' : ''}`}
+        >
+          <p className="text-[10px] uppercase tracking-wider text-mute">
+            {ticket.verification
+              ? ticket.verification.passed
+                ? 'Verified'
+                : 'Ran it — broken'
+              : 'Being run'}
+          </p>
+          {ticket.verification ? (
+            <>
+              <p className="text-[10px] text-mute">{ticket.verification.how}</p>
+              <p className="leading-relaxed text-neutral-300">{ticket.verification.summary}</p>
+            </>
+          ) : (
+            <p className="leading-relaxed text-mute">
+              Every task landed. {workers[0]?.displayName ?? 'An agent'} is assembling it and
+              driving it end to end — the browser, the simulator, whatever this project runs in —
+              because passing each task&apos;s own tests says nothing about the pieces fitting
+              together.
+            </p>
+          )}
+        </div>
+      ) : null}
+
       {/* -- the work, once it is running ------------------------------------ */}
       {tasks.length > 0 ? (
         <div className="space-y-2">

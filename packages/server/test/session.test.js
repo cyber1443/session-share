@@ -1031,14 +1031,69 @@ describe('tickets', () => {
     }
     await settle()
 
+    /**
+     * Every task passing its own acceptance command proves each piece works
+     * alone. Going straight to a PR on that basis is the whole risk of
+     * splitting work up.
+     */
     const column = alice.eventsOfType('ticket.state').at(-1)
-    assert.equal(column.body.state, 'review')
+    assert.equal(column.body.state, 'verify')
+
+    const run = alice
+      .eventsOfType('chat.message')
+      .map((event) => event.body.message)
+      .findLast((m) => m.directive)
+    assert.deepEqual(run.mentions, [aliceId])
+    assert.match(run.body, /exercise the feature end to end/)
+    assert.match(run.body, /simulator or emulator/)
+    assert.match(run.body, /ss_ticket_verified/)
+    assert.doesNotMatch(run.body, /ss_ship/, 'nothing is shipped before it has been run')
+  })
+
+  it('sends a broken assembly back to everyone who built it', async () => {
+    const { alice, bob, aliceId, bobId } = await verifiableTicket('ticket-broken')
+
+    const failed = await alice.send({
+      type: 'ticket.verified',
+      ticketId: (await currentTicket(alice, 'ticket-broken')).id,
+      passed: false,
+      how: 'pnpm dev, then drove the todo list in the browser',
+      summary: 'The toggle renders but the stored theme never comes back after a reload.',
+    })
+    assert.equal(failed.ticket.state, 'verify', 'it stays put until it actually works')
+    await settle()
+
+    const back = alice
+      .eventsOfType('chat.message')
+      .map((event) => event.body.message)
+      .findLast((m) => m.directive)
+    assert.deepEqual(
+      back.mentions.sort(),
+      [aliceId, bobId].sort(),
+      'the person who ran it rarely owns the file that broke',
+    )
+    assert.match(back.body, /never comes back after a reload/)
+  })
+
+  it('sends it to review once it has actually been run', async () => {
+    const { alice, aliceId } = await verifiableTicket('ticket-verified')
+    const ticket = await currentTicket(alice, 'ticket-verified')
+
+    const passed = await alice.send({
+      type: 'ticket.verified',
+      ticketId: ticket.id,
+      passed: true,
+      how: 'pnpm dev, toggled the theme and reloaded',
+      summary: 'Persists across a reload and follows the system default.',
+    })
+    assert.equal(passed.ticket.state, 'review')
+    await settle()
 
     const ship = alice
       .eventsOfType('chat.message')
       .map((event) => event.body.message)
       .findLast((m) => m.directive)
-    assert.deepEqual(ship.mentions, [aliceId], 'the author is asked to ship it')
+    assert.deepEqual(ship.mentions, [aliceId])
     assert.match(ship.body, /ss_ship/)
   })
 
@@ -1155,6 +1210,49 @@ describe('tickets', () => {
     )
     assert.match(error.message, /Join the ticket/)
   })
+
+  /** A ticket with every task landed, sitting in verify. */
+  async function verifiableTicket(slug) {
+    const session = await twoDevSession(slug)
+    const { alice, bob } = session
+    const { ticket } = await open(alice, 'Add due dates')
+    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+    await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+      ticketId: ticket.id,
+    })
+    await alice.send({ type: 'ticket.approve', ticketId: ticket.id })
+    await alice.send({
+      type: 'contract.committed',
+      branch: `ss/${slug}/contract`,
+      commitSha: 'abc1234',
+      prNumber: null,
+    })
+    for (const spec of tasks) {
+      const claim = await alice.send({ type: 'task.claim', taskId: spec.id }).catch(() => null)
+      const client = claim?.task ? alice : bob
+      if (!claim?.task) await client.send({ type: 'task.claim', taskId: spec.id })
+      await client.send({ type: 'task.merged', taskId: spec.id })
+    }
+    await settle()
+    return session
+  }
+
+  const currentTicket = async (client, slug) => {
+    const joined = await client.send({
+      type: 'session.join',
+      sessionRef: slug,
+      githubLogin: 'alice',
+      displayName: 'Alice',
+      repoPath: '/tmp/alice/web',
+      fromSeq: null,
+    })
+    return joined.snapshot.tickets.at(-1)
+  }
 
   it('closes the card when the PR is recorded', async () => {
     const { alice, bob } = await twoDevSession('ticket-done')

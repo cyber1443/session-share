@@ -112,6 +112,11 @@ export class SessionState {
         if (ticket) this.tickets.set(body.ticketId, { ...ticket, state: body.state })
         break
       }
+      case 'ticket.verified': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) this.tickets.set(body.ticketId, { ...ticket, verification: body.verification })
+        break
+      }
       case 'ticket.shipped': {
         const ticket = this.tickets.get(body.ticketId)
         if (ticket) {
@@ -308,7 +313,13 @@ export class SessionState {
 
     const tasks = this.tasksOfTicket(ticketId)
     if (tasks.length > 0) {
-      return tasks.every((task) => task.state === 'merged') ? 'review' : 'building'
+      if (!tasks.every((task) => task.state === 'merged')) return 'building'
+      /**
+       * Every piece passing its own test is not the same as the pieces working
+       * together -- and a split makes that failure more likely, not less. So
+       * the assembled thing gets run before anyone calls it done.
+       */
+      return ticket.verification?.passed ? 'review' : 'verify'
     }
     // A split exists but nothing has been seeded: it is waiting to be accepted.
     if (ticket.decompositionId) return 'proposed'

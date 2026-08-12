@@ -27,6 +27,7 @@ const COLUMNS: Array<{ states: TicketState[]; label: string; hint: string }> = [
   { states: ['plan'], label: 'plan', hint: 'write one' },
   { states: ['splitting', 'proposed'], label: 'splitting', hint: 'being planned' },
   { states: ['building'], label: 'building', hint: 'tasks in flight' },
+  { states: ['verify'], label: 'verify', hint: 'run it for real' },
   { states: ['review'], label: 'review', hint: 'landed, PR pending' },
   { states: ['done'], label: 'done', hint: '' },
 ]
@@ -181,6 +182,15 @@ function Card({
       {/* A split that has been proposed is waiting on a person, so say so loudly. */}
       {ticket.state === 'proposed' ? (
         <p className="text-[10px] font-medium text-accent">split ready — open to start it</p>
+      ) : null}
+      {ticket.state === 'verify' ? (
+        <p
+          className={`text-[10px] ${ticket.verification ? 'text-red-400' : 'text-amber-400/80'}`}
+        >
+          {ticket.verification
+            ? 'ran it — broken, being fixed'
+            : 'everything landed; someone is running it end to end'}
+        </p>
       ) : null}
       {ticket.state === 'splitting' ? (
         <p className="text-[10px] text-amber-400/80">

@@ -234,6 +234,10 @@ function describe(envelope: EventEnvelope): string {
       return `ticket now has ${body.members.length} member(s)`
     case 'ticket.state':
       return `ticket → ${body.state}`
+    case 'ticket.verified':
+      return body.verification.passed
+        ? `verified: ${body.verification.how}`
+        : `ran it and it is broken: ${body.verification.summary.slice(0, 60)}`
     case 'ticket.shipped':
       return body.prNumber ? `ticket shipped as #${body.prNumber}` : 'ticket closed'
     case 'plan.requested':

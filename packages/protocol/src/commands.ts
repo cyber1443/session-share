@@ -69,6 +69,14 @@ export const ClientCommand = z.discriminatedUnion('type', [
    * that everyone votes.
    */
   z.object({ type: z.literal('ticket.approve'), ticketId: TicketId }),
+  /** What running the assembled feature showed. Passing sends it to review. */
+  z.object({
+    type: z.literal('ticket.verified'),
+    ticketId: TicketId,
+    passed: z.boolean(),
+    how: z.string().max(500),
+    summary: z.string().max(2000),
+  }),
   /** Records the pull request that finished a ticket. */
   z.object({ type: z.literal('ticket.shipped'), ticketId: TicketId, prNumber: z.number().int().nullable().default(null) }),
 
@@ -223,6 +231,7 @@ export interface CommandResultMap {
   'ticket.leave': { ticket: Ticket }
   'ticket.start': { ticket: Ticket; plannerId: ParticipantId | null }
   'ticket.approve': { ticket: Ticket }
+  'ticket.verified': { ticket: Ticket }
   'ticket.shipped': { ticket: Ticket }
   'plan.request': { plannerId: ParticipantId; goal: string }
   'decomposition.propose': ProposeResult

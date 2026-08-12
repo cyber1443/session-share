@@ -625,6 +625,41 @@ export function createServer(): McpServer {
   )
 
   server.registerTool(
+    'ss_ticket_verified',
+    {
+      description:
+        'Report what happened when you ran the assembled feature -- in the browser, the simulator, the emulator, or whatever this project actually runs in. Passing sends the ticket to review; failing sends it back to whoever built the broken part.',
+      inputSchema: {
+        ticketId: z.string(),
+        passed: z.boolean(),
+        how: z
+          .string()
+          .max(500)
+          .describe('How you exercised it: the command you ran, the URL you drove, the simulator'),
+        summary: z
+          .string()
+          .max(2000)
+          .describe('What you saw. On a failure, be specific enough that someone can fix it'),
+      },
+    },
+    async ({ ticketId, passed, how, summary }) => {
+      const cfg = config()
+      const { ticket } = await runCommand(cfg, {
+        type: 'ticket.verified',
+        ticketId: ticketId as never,
+        passed,
+        how,
+        summary,
+      })
+      return text(
+        passed
+          ? `"${ticket.title}" verified. It is in review; open the PR with ss_ship.`
+          : `Recorded as broken. Everyone who built "${ticket.title}" has been told what you saw.`,
+      )
+    },
+  )
+
+  server.registerTool(
     'ss_ticket_shipped',
     {
       description:

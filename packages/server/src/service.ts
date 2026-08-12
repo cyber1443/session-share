@@ -135,6 +135,8 @@ export class SessionService {
         return this.startTicket(command, ctx)
       case 'ticket.approve':
         return this.approveTicket(command, ctx)
+      case 'ticket.verified':
+        return this.recordVerification(command, ctx)
       case 'ticket.shipped':
         return this.shipTicket(command, ctx)
       case 'plan.request':
@@ -324,6 +326,7 @@ export class SessionService {
       authorId: participantId,
       members: [participantId],
       state: 'plan',
+      verification: null,
       decompositionId: null,
       prNumber: null,
       createdAt: Date.now(),
@@ -449,6 +452,113 @@ export class SessionService {
     })
     this.seedTasks(sessionId, participantId, state)
     this.refreshTicketStates(sessionId, participantId)
+    return { ticket: this.requireTicket(state, command.ticketId) }
+  }
+
+  /** Who runs the assembled thing: the author if they can, else any member with a checkout. */
+  private verifier(state: SessionState, ticket: Ticket): ParticipantId | null {
+    if (state.participants.get(ticket.authorId)?.repoPath) return ticket.authorId
+    return ticket.members.find((id) => state.participants.get(id)?.repoPath) ?? null
+  }
+
+  /**
+   * The step between "all the tests pass" and "it works".
+   *
+   * Each task proved itself in isolation, which is exactly the guarantee a
+   * contract-first split is designed to give -- and exactly the one that says
+   * nothing about the parts fitting together. So somebody assembles it and
+   * drives it the way a person would, in whatever this project actually runs
+   * in.
+   */
+  private askForVerification(
+    sessionId: SessionId,
+    actorId: ParticipantId,
+    state: SessionState,
+    ticket: Ticket,
+  ): void {
+    const who = this.verifier(state, ticket)
+    if (!who) return
+
+    this.systemDirective(
+      sessionId,
+      actorId,
+      [who],
+      [
+        `Every task on "${ticket.title}" has landed on ${state.session?.contractBranch ?? 'the contract branch'}.`,
+        'Nobody has run the whole thing yet. Do that now, before it goes anywhere near a PR:',
+        '',
+        '1. ss_sync, so you have everyone\'s work together.',
+        '2. Work out how this project actually runs -- package.json scripts, a dev server, a',
+        '   Playwright or Cypress config, docker compose, an Xcode or Android target, a CLI.',
+        '   Read the repo rather than assuming; the answer is in there.',
+        '3. Start it and exercise the feature end to end, the way a person would. If it is a',
+        '   web app, drive the browser. If it is an app, use the simulator or emulator. If it',
+        '   is a library or CLI, run the real commands against real input.',
+        '4. Look at the seams specifically: each task passed its own tests in isolation, so the',
+        '   interesting failures are where the pieces meet.',
+        '',
+        'Then report with ss_ticket_verified: passed true or false, `how` you exercised it, and',
+        'what you saw. Passing sends it to review. Failing sends it back to the people who own',
+        'the broken part, so be specific about what actually happened.',
+      ].join('\n'),
+    )
+  }
+
+  private recordVerification(
+    command: Extract<ClientCommand, { type: 'ticket.verified' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+
+    this.emit(sessionId, participantId, {
+      type: 'ticket.verified',
+      ticketId: ticket.id,
+      verification: {
+        passed: command.passed,
+        how: command.how,
+        summary: command.summary,
+        by: participantId,
+        at: Date.now(),
+      },
+    })
+    this.refreshTicketStates(sessionId, participantId)
+
+    const by = state.participants.get(participantId)?.displayName ?? 'Someone'
+    if (command.passed) {
+      const shipper = this.verifier(state, ticket)
+      if (shipper) {
+        this.systemDirective(
+          sessionId,
+          participantId,
+          [shipper],
+          `"${ticket.title}" was verified by ${by} (${command.how}). Open the pull request with ss_ship, then record it with ss_ticket_shipped so the card closes.`,
+        )
+      }
+    } else {
+      /**
+       * A failure goes to everyone who built it, not just whoever found it --
+       * the person who ran it rarely owns the file that broke.
+       */
+      const others = ticket.members.filter((id) => state.participants.get(id)?.repoPath)
+      if (others.length > 0) {
+        this.systemDirective(
+          sessionId,
+          participantId,
+          others,
+          [
+            `"${ticket.title}" does not work assembled. ${by} ran it (${command.how}) and saw:`,
+            '',
+            command.summary,
+            '',
+            'Fix it on your own task branches -- the lease gate still applies, so if the broken',
+            'part is not yours, say so in the room rather than reaching into it. Land the fix',
+            'with ss_done as usual and it will be run again.',
+          ].join('\n'),
+        )
+      }
+    }
+
     return { ticket: this.requireTicket(state, command.ticketId) }
   }
 
@@ -1329,18 +1439,8 @@ export class SessionService {
 
     const ticketId = task.ticketId
     const ticket = ticketId ? state.tickets.get(ticketId) : null
-    if (ticket && state.ticketStateFor(ticket.id) === 'review' && ticket.prNumber === null) {
-      const shipper = state.participants.get(ticket.authorId)?.repoPath
-        ? ticket.authorId
-        : ticket.members.find((id) => state.participants.get(id)?.repoPath)
-      if (shipper) {
-        this.systemDirective(
-          sessionId,
-          participantId,
-          [shipper],
-          `Every task on "${ticket.title}" has landed on the contract branch. Open the pull request for it with ss_ship, then record it with ss_ticket_shipped so the card closes.`,
-        )
-      }
+    if (ticket && state.ticketStateFor(ticket.id) === 'verify' && !ticket.verification) {
+      this.askForVerification(sessionId, participantId, state, ticket)
     }
 
     // Everything merged means the build phase is over.

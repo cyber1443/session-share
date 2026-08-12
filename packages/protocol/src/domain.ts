@@ -95,7 +95,26 @@ export type Participant = z.infer<typeof Participant>
  * have actually done. Nothing is dragged: a column you maintain by hand lies the
  * moment anyone is busy.
  */
-export const TicketState = z.enum(['plan', 'splitting', 'proposed', 'building', 'review', 'done'])
+/** What running the finished thing, in its real environment, showed. */
+export const Verification = z.object({
+  passed: z.boolean(),
+  /** How it was exercised: the command, the URL, the simulator. */
+  how: z.string().max(500),
+  summary: z.string().max(2000),
+  by: ParticipantId,
+  at: Timestamp,
+})
+export type Verification = z.infer<typeof Verification>
+
+export const TicketState = z.enum([
+  'plan',
+  'splitting',
+  'proposed',
+  'building',
+  'verify',
+  'review',
+  'done',
+])
 export type TicketState = z.infer<typeof TicketState>
 
 /**
@@ -117,6 +136,14 @@ export const Ticket = z.object({
    */
   members: z.array(ParticipantId).default([]),
   state: TicketState,
+  /**
+   * Whether the assembled thing was actually exercised, and what happened.
+   *
+   * Every task passing its own acceptance command says each piece works alone.
+   * It says nothing about the pieces working together, which is the failure the
+   * split makes more likely rather than less.
+   */
+  verification: Verification.nullable().default(null),
   decompositionId: DecompositionId.nullable().default(null),
   prNumber: z.number().int().nullable().default(null),
   createdAt: Timestamp,

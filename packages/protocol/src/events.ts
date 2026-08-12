@@ -4,6 +4,7 @@ import {
   ChatMessage,
   Ticket,
   TicketState,
+  Verification,
   Decomposition,
   HandoffRequest,
   Lease,
@@ -61,6 +62,7 @@ export const EventBody = z.discriminatedUnion('type', [
     members: z.array(ParticipantId),
   }),
   z.object({ type: z.literal('ticket.state'), ticketId: TicketId, state: TicketState }),
+  z.object({ type: z.literal('ticket.verified'), ticketId: TicketId, verification: Verification }),
   z.object({
     type: z.literal('ticket.shipped'),
     ticketId: TicketId,
