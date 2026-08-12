@@ -4435,11 +4435,11 @@ var require_core = __commonJS({
     Ajv2.ValidationError = validation_error_1.default;
     Ajv2.MissingRefError = ref_error_1.default;
     exports.default = Ajv2;
-    function checkOptions(checkOpts, options, msg, log = "error") {
+    function checkOptions(checkOpts, options, msg, log2 = "error") {
       for (const key in checkOpts) {
         const opt = key;
         if (opt in options)
-          this.logger[log](`${msg}: option ${key}. ${checkOpts[opt]}`);
+          this.logger[log2](`${msg}: option ${key}. ${checkOpts[opt]}`);
       }
     }
     function getSchEnv(keyRef) {
@@ -32184,7 +32184,7 @@ function describeDirectives(messages, names) {
 
 // packages/plugin/src/autopilot.ts
 import { spawn as spawn2 } from "node:child_process";
-import { mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync5 } from "node:fs";
+import { appendFileSync, mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join5 } from "node:path";
 
@@ -32298,67 +32298,108 @@ var PLANNING_TOOLS = [
 ];
 var isPlanning = (messages) => messages.every((message) => /ss_propose|Split the ticket/.test(message.body));
 var running = false;
-function runHeadless(config3, prompt, planningOnly) {
+var failedUntil = 0;
+var FAILURE_BACKOFF_MS = 5 * 60 * 1e3;
+var logFile = () => join5(stateDir2(), "autopilot.log");
+function log(line) {
+  try {
+    mkdirSync5(stateDir2(), { recursive: true });
+    appendFileSync(logFile(), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
+`);
+  } catch {
+  }
+}
+function runHeadless(config3, prompt, planningOnly, command = "claude") {
   return new Promise((resolve4) => {
     const args = ["-p", prompt, "--add-dir", config3.repoPath];
     if (planningOnly) args.push("--allowedTools", ...PLANNING_TOOLS);
-    const child = spawn2("claude", args, {
+    const child = spawn2(command, args, {
       cwd: config3.repoPath,
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
         // Its own hooks must not recurse into another headless run.
         SESSION_SHARE_AUTOPILOT: "child"
       }
     });
-    child.on("error", () => resolve4());
-    child.on("close", () => resolve4());
+    let tail = "";
+    const keep = (chunk) => {
+      tail = `${tail}${chunk}`.slice(-2e3);
+    };
+    child.stdout.on("data", keep);
+    child.stderr.on("data", keep);
+    child.on("error", (error51) => {
+      log(`spawn failed: ${error51.message}`);
+      resolve4({ ok: false, code: null, detail: error51.message });
+    });
+    child.on("close", (code) => {
+      log(`exit ${code}
+${tail}`);
+      resolve4({
+        ok: code === 0,
+        code,
+        detail: tail.trim().split("\n").slice(-3).join(" ").slice(0, 300)
+      });
+    });
   });
 }
-async function tick() {
+async function tickOnce(options = {}) {
   const config3 = readConfig(process.env.SESSION_SHARE_REPO ?? process.cwd());
-  if (!config3) return;
+  if (!config3) return { ran: false, ok: false, reason: "this checkout is not in a session" };
   const preferences = readPreferences();
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   let waiting;
   try {
     waiting = await peekDirectives(config3);
   } catch {
-    return;
+    return { ran: false, ok: false, reason: "the server did not answer" };
   }
   const planningOnly = waiting.length > 0 && isPlanning(waiting);
   const verdict = decide({
     preferences,
     pending: waiting.length,
     planningOnly,
-    inFlight: running,
+    inFlight: running || Date.now() < failedUntil,
     spentToday: readSpend(today).tokens
   });
-  if (!verdict.run) return;
+  if (!verdict.run) return { ran: false, ok: false, reason: verdict.reason };
   const oldest = Math.min(...waiting.map((message) => message.createdAt));
-  if (Date.now() - oldest < IDLE_GRACE_MS) return;
+  if (Date.now() - oldest < (options.graceMs ?? IDLE_GRACE_MS)) {
+    return { ran: false, ok: false, reason: "the interactive session may still take it" };
+  }
   running = true;
   try {
-    const taken = await pendingDirectives(config3);
-    if (taken.length === 0) return;
-    const prompt = describeDirectives(taken, /* @__PURE__ */ new Map());
-    await runHeadless(config3, prompt, planningOnly);
+    const result = await runHeadless(
+      config3,
+      describeDirectives(waiting, /* @__PURE__ */ new Map()),
+      planningOnly,
+      options.command ?? "claude"
+    );
+    if (!result.ok) {
+      failedUntil = Date.now() + FAILURE_BACKOFF_MS;
+      await say(
+        config3,
+        `Tried to run that headlessly and could not (${result.detail || `exit ${result.code}`}). It is still waiting for someone -- see ${logFile()}.`
+      );
+      return { ran: true, ok: false, reason: result.detail || `exit ${result.code}` };
+    }
+    markCaughtUp(config3, Math.max(...waiting.map((message) => message.createdAt)));
     addSpend(today, 2e4);
-    await runCommand(config3, {
-      type: "chat.post",
-      body: `Ran that headlessly \u2014 nobody was at the keyboard. ${taken.length} instruction(s).`,
-      taskRef: null,
-      asAgent: true,
-      directive: false
-    }).catch(() => void 0);
-  } catch {
+    await say(config3, `Ran that headlessly -- nobody was at the keyboard. ${waiting.length} instruction(s).`);
+    return { ran: true, ok: true, reason: "done" };
+  } catch (error51) {
+    log(`tick failed: ${error51 instanceof Error ? error51.message : error51}`);
+    return { ran: true, ok: false, reason: String(error51) };
   } finally {
     running = false;
   }
 }
+var say = (config3, body) => runCommand(config3, { type: "chat.post", body, taskRef: null, asAgent: true, directive: false }).catch(
+  () => void 0
+);
 function startAutopilot() {
   if (process.env.SESSION_SHARE_AUTOPILOT === "child") return () => void 0;
-  const timer = setInterval(() => void tick(), POLL_MS);
+  const timer = setInterval(() => void tickOnce(), POLL_MS);
   timer.unref?.();
   return () => clearInterval(timer);
 }

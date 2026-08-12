@@ -1,11 +1,11 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ChatMessage } from '@session-share/protocol'
 import { runCommand } from './client.js'
 import { readConfig, type SessionConfig } from './config.js'
-import { describeDirectives, peekDirectives, pendingDirectives } from './inbox.js'
+import { describeDirectives, markCaughtUp, peekDirectives } from './inbox.js'
 import { readPreferences, type Preferences } from './preferences.js'
 
 /**
@@ -100,30 +100,85 @@ const isPlanning = (messages: ChatMessage[]) =>
   messages.every((message) => /ss_propose|Split the ticket/.test(message.body))
 
 let running = false
+/** After a failed run, stop hammering: the next one will fail the same way. */
+let failedUntil = 0
+const FAILURE_BACKOFF_MS = 5 * 60 * 1000
+
+const logFile = () => join(stateDir(), 'autopilot.log')
+
+function log(line: string): void {
+  try {
+    mkdirSync(stateDir(), { recursive: true })
+    appendFileSync(logFile(), `${new Date().toISOString()} ${line}\n`)
+  } catch {
+    // Logging is never worth failing over.
+  }
+}
+
+export interface RunResult {
+  ok: boolean
+  code: number | null
+  detail: string
+}
 
 /** Runs one instruction in a headless Claude on this machine, in this repo. */
-function runHeadless(config: SessionConfig, prompt: string, planningOnly: boolean): Promise<void> {
+function runHeadless(
+  config: SessionConfig,
+  prompt: string,
+  planningOnly: boolean,
+  command = 'claude',
+): Promise<RunResult> {
   return new Promise((resolve) => {
     const args = ['-p', prompt, '--add-dir', config.repoPath]
     if (planningOnly) args.push('--allowedTools', ...PLANNING_TOOLS)
 
-    const child = spawn('claude', args, {
+    const child = spawn(command, args, {
       cwd: config.repoPath,
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
         // Its own hooks must not recurse into another headless run.
         SESSION_SHARE_AUTOPILOT: 'child',
       },
     })
-    child.on('error', () => resolve())
-    child.on('close', () => resolve())
+
+    let tail = ''
+    const keep = (chunk: Buffer) => {
+      tail = `${tail}${chunk}`.slice(-2000)
+    }
+    child.stdout.on('data', keep)
+    child.stderr.on('data', keep)
+
+    child.on('error', (error) => {
+      log(`spawn failed: ${error.message}`)
+      resolve({ ok: false, code: null, detail: error.message })
+    })
+    child.on('close', (code) => {
+      log(`exit ${code}\n${tail}`)
+      resolve({
+        ok: code === 0,
+        code,
+        detail: tail.trim().split('\n').slice(-3).join(' ').slice(0, 300),
+      })
+    })
   })
 }
 
-async function tick(): Promise<void> {
+export interface TickOptions {
+  /** The binary to run. Injectable so a test can watch a spawn fail. */
+  command?: string
+  graceMs?: number
+}
+
+export interface TickResult {
+  ran: boolean
+  ok: boolean
+  reason: string
+}
+
+export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
   const config = readConfig(process.env.SESSION_SHARE_REPO ?? process.cwd())
-  if (!config) return
+  if (!config) return { ran: false, ok: false, reason: 'this checkout is not in a session' }
 
   const preferences = readPreferences()
   const today = new Date().toISOString().slice(0, 10)
@@ -132,7 +187,7 @@ async function tick(): Promise<void> {
   try {
     waiting = await peekDirectives(config)
   } catch {
-    return
+    return { ran: false, ok: false, reason: 'the server did not answer' }
   }
 
   const planningOnly = waiting.length > 0 && isPlanning(waiting)
@@ -140,10 +195,10 @@ async function tick(): Promise<void> {
     preferences,
     pending: waiting.length,
     planningOnly,
-    inFlight: running,
+    inFlight: running || Date.now() < failedUntil,
     spentToday: readSpend(today).tokens,
   })
-  if (!verdict.run) return
+  if (!verdict.run) return { ran: false, ok: false, reason: verdict.reason }
 
   /**
    * Anything waiting this long has already been offered to the interactive
@@ -151,41 +206,65 @@ async function tick(): Promise<void> {
    * the person who is right there typing.
    */
   const oldest = Math.min(...waiting.map((message) => message.createdAt))
-  if (Date.now() - oldest < IDLE_GRACE_MS) return
+  if (Date.now() - oldest < (options.graceMs ?? IDLE_GRACE_MS)) {
+    return { ran: false, ok: false, reason: 'the interactive session may still take it' }
+  }
 
   running = true
   try {
-    // Take them, so the interactive session does not do the same work twice.
-    const taken = await pendingDirectives(config)
-    if (taken.length === 0) return
+    /**
+     * Run first, take second.
+     *
+     * Taking the work up front loses it whenever the run fails: the cursor
+     * moves, the instruction is gone, and the card sits there claiming an agent
+     * is on it. The interactive session doing the same work twice is a far
+     * cheaper failure than work disappearing, so the cursor only moves once
+     * something has actually run.
+     */
+    const result = await runHeadless(
+      config,
+      describeDirectives(waiting, new Map()),
+      planningOnly,
+      options.command ?? 'claude',
+    )
 
-    const prompt = describeDirectives(taken, new Map())
-    await runHeadless(config, prompt, planningOnly)
+    if (!result.ok) {
+      failedUntil = Date.now() + FAILURE_BACKOFF_MS
+      await say(
+        config,
+        `Tried to run that headlessly and could not (${result.detail || `exit ${result.code}`}). It is still waiting for someone -- see ${logFile()}.`,
+      )
+      return { ran: true, ok: false, reason: result.detail || `exit ${result.code}` }
+    }
+
+    // Only now is it safe to say this has been handed over.
+    markCaughtUp(config, Math.max(...waiting.map((message) => message.createdAt)))
 
     /**
      * The headless run reports its own tokens through the same hook as any
      * other turn; this only tracks the ceiling, so a rough charge is enough.
      */
     addSpend(today, 20_000)
-    await runCommand(config, {
-      type: 'chat.post',
-      body: `Ran that headlessly — nobody was at the keyboard. ${taken.length} instruction(s).`,
-      taskRef: null,
-      asAgent: true,
-      directive: false,
-    }).catch(() => undefined)
-  } catch {
-    // Never let unattended work interfere with the session it is helping.
+    await say(config, `Ran that headlessly -- nobody was at the keyboard. ${waiting.length} instruction(s).`)
+    return { ran: true, ok: true, reason: 'done' }
+  } catch (error) {
+    log(`tick failed: ${error instanceof Error ? error.message : error}`)
+    return { ran: true, ok: false, reason: String(error) }
   } finally {
     running = false
   }
 }
 
+const say = (config: SessionConfig, body: string) =>
+  runCommand(config, { type: 'chat.post', body, taskRef: null, asAgent: true, directive: false }).catch(
+    () => undefined,
+  )
+
 /** Starts polling. Returns a stop function, and does nothing in a child run. */
 export function startAutopilot(): () => void {
   if (process.env.SESSION_SHARE_AUTOPILOT === 'child') return () => undefined
 
-  const timer = setInterval(() => void tick(), POLL_MS)
+  const timer = setInterval(() => void tickOnce(), POLL_MS)
   timer.unref?.()
   return () => clearInterval(timer)
 }

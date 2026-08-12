@@ -536,4 +536,39 @@ describe('autopilot', () => {
     assert.equal(readSpend('2026-08-12').tokens, 50_000)
     assert.equal(readSpend('2026-08-13').tokens, 0, 'a new day starts at nothing')
   })
+
+  /**
+   * The bug this exists to prevent: taking the work up front and then failing
+   * to run it. The cursor moved, the instruction was gone forever, and the
+   * board sat there claiming an agent was on it.
+   */
+  it('leaves the work alone when the headless run fails', async () => {
+    const { peekDirectives, pendingDirectives } = await import('../dist/inbox.js')
+    const { tickOnce } = await import('../dist/autopilot.js')
+    process.env.SESSION_SHARE_HOME = stateDir
+    process.env.SESSION_SHARE_REPO = bobRepo
+
+    await command(aliceRepo, {
+      type: 'chat.post',
+      body: 'do the thing headlessly',
+      taskRef: null,
+      asAgent: false,
+      directive: true,
+    })
+    // Make sure it is visible to bob before the run is attempted.
+    assert.equal((await peekDirectives(readConfig(bobRepo))).length >= 1, true)
+
+    // No `claude` on PATH for this run, so the spawn fails the way it would
+    // on a machine where it is missing.
+    const result = await tickOnce({ command: 'definitely-not-claude', graceMs: 0 })
+    assert.equal(result.ran, true, 'it should have tried')
+    assert.equal(result.ok, false)
+
+    assert.equal(
+      (await pendingDirectives(readConfig(bobRepo))).length >= 1,
+      true,
+      'a failed run must leave the instruction for someone else',
+    )
+    delete process.env.SESSION_SHARE_REPO
+  })
 })
