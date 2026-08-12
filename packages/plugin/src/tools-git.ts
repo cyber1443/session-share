@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { isLoopbackUrl, type SessionSnapshot } from '@session-share/protocol'
 import { runCommand } from './client.js'
 import type { SessionConfig } from './config.js'
-import { readDaemon, lanAddress, probe } from './daemon.js'
+import { readDaemon, expectedBuild, lanAddress, probe } from './daemon.js'
 import { localIdentity } from './identity.js'
 import {
   canPush,
@@ -112,6 +112,19 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
             daemon.expose === 'lan' ? '0.0.0.0' : '127.0.0.1'
           }${health?.serverId ? ` (id ${health.serverId})` : ''}`,
         )
+
+        /**
+         * A daemon started before a plugin update keeps serving the old code
+         * and the old board, which looks exactly like "the update did nothing".
+         */
+        const expected = expectedBuild()
+        if (health && health.build !== expected) {
+          lines.push(
+            `build      running ${health.build ?? 'an unknown build'}, installed is ${expected} — this server predates your plugin. Hosting again replaces it; /ss:stop then /ss:host if you want it now`,
+          )
+        } else if (health?.build) {
+          lines.push(`build      ${health.build}, matching the installed plugin`)
+        }
         const lan = lanAddress()
         lines.push(
           isLoopbackUrl(daemon.url)

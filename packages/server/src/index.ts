@@ -4,6 +4,7 @@ export { createApp, isLoopbackAddress } from './app.js'
 export { SessionService, ServiceError } from './service.js'
 export { SessionState, CLAIM_CAP } from './projection.js'
 export { Store } from './db.js'
+export { buildId, computeBuildId } from './build.js'
 
 const isEntrypoint = process.argv[1]?.endsWith('index.js') ?? false
 

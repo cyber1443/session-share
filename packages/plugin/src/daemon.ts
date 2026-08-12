@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
-import { createHmac, randomBytes } from 'node:crypto'
+import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -81,6 +81,40 @@ export interface Health {
   mode?: string
   /** Identifies the signing key, so a client can tell two servers apart. */
   serverId?: string
+  /** Identifies the code, so a client can tell a stale daemon from a fresh one. */
+  build?: string
+}
+
+/**
+ * The build the server *would* be if started now.
+ *
+ * Deliberately the same computation the server does on itself (server/build.ts)
+ * rather than a shared import: the two are bundled separately and must agree
+ * across a version boundary, so each hashes the files on disk the same way.
+ */
+export function expectedBuild(): string {
+  let entry: string
+  try {
+    entry = serverEntrypoint()
+  } catch {
+    return 'unknown'
+  }
+
+  const hash = createHash('sha256')
+  try {
+    const dir = dirname(entry)
+    for (const name of readdirSync(dir)
+      .filter((file) => file.endsWith('.js'))
+      .sort()) {
+      const path = join(dir, name)
+      if (!statSync(path).isFile()) continue
+      hash.update(name)
+      hash.update(readFileSync(path))
+    }
+  } catch {
+    return 'unknown'
+  }
+  return hash.digest('hex').slice(0, 12)
 }
 
 /** Health plus identity, or null when nothing answered. */
@@ -170,12 +204,20 @@ export async function ensureDaemon(options: StartOptions = {}): Promise<DaemonIn
     // No serverId at all means a server from before fingerprints: ours, but old.
     if (health && (!health.serverId || health.serverId === mine)) {
       /**
-       * A running server bound to loopback cannot serve a guest, and no amount
-       * of re-hosting changes that from the outside -- so a mismatch restarts
-       * it. Reusing it regardless is how a host ends up handing out
-       * `127.0.0.1` invites that fail on every machine but their own.
+       * Two reasons to replace a server that is running perfectly well:
+       *
+       * - It is bound to loopback and a guest is expected. No amount of
+       *   re-hosting changes that from the outside, and reusing it is how a
+       *   host hands out `127.0.0.1` invites that work on no machine but
+       *   their own.
+       * - It is running code the plugin no longer ships. The daemon outlives
+       *   the Claude Code that started it, so it also outlives an update --
+       *   and then new tools talk to an old server, and the board it serves
+       *   is the old board. Updating the plugin and seeing nothing change is
+       *   the worst kind of bug, because it looks like the fix did not work.
        */
-      if (health.serverId && existing.expose === expose) return refreshAddress(existing)
+      const current = health.build === expectedBuild()
+      if (current && health.serverId && existing.expose === expose) return refreshAddress(existing)
 
       stopDaemon()
       await waitUntilDown(`http://127.0.0.1:${existing.port}`)

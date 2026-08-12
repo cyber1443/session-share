@@ -35,6 +35,7 @@ import {
   type AuthConfig,
   type User,
 } from './auth.js'
+import { buildId } from './build.js'
 import { Store } from './db.js'
 import { ServiceError, SessionService, type AuthenticatedUser } from './service.js'
 import { Gateway } from './ws.js'
@@ -158,6 +159,8 @@ export function createApp(options: AppOptions = {}): App {
     ok: true,
     mode: auth.mode,
     serverId: serverFingerprint(auth),
+    // Which code is running, so a client can tell a stale daemon from a fresh one.
+    build: buildId(),
   }))
 
   // -- sign in -------------------------------------------------------------
