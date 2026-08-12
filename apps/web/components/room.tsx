@@ -228,6 +228,14 @@ function describe(envelope: EventEnvelope): string {
       return `attached a checkout at ${body.repoPath}`
     case 'participant.activity':
       return body.activity.detail
+    case 'ticket.created':
+      return `opened "${body.ticket.title}"`
+    case 'ticket.members':
+      return `ticket now has ${body.members.length} member(s)`
+    case 'ticket.state':
+      return `ticket → ${body.state}`
+    case 'ticket.shipped':
+      return body.prNumber ? `ticket shipped as #${body.prNumber}` : 'ticket closed'
     case 'plan.requested':
       return `asked for a split: ${body.goal.slice(0, 80)}`
     case 'decomposition.assigned':

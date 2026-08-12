@@ -10,6 +10,7 @@ import { useQueryParam } from '@/lib/query'
 import { Dag } from '@/components/dag'
 import { Graph } from '@/components/graph'
 import { JoinCode } from '@/components/join-code'
+import { Kanban } from '@/components/kanban'
 import { Plan } from '@/components/plan'
 import { Room } from '@/components/room'
 import { useLiveSession } from '@/lib/live'
@@ -36,7 +37,7 @@ function Board({ slug }: { slug: string }) {
    * order answers "what unblocks what". Planning opens on the plan view because
    * during that phase the graph has nothing in it yet.
    */
-  const [viewOverride, setView] = useState<'plan' | 'graph' | 'dag' | null>(null)
+  const [viewOverride, setView] = useState<'board' | 'plan' | 'graph' | 'dag' | null>(null)
   const [chatFilter, setChatFilter] = useState<string | null>(null)
   const [pairing, setPairing] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -57,7 +58,11 @@ function Board({ slug }: { slug: string }) {
   )
   const decomposition = snapshot.decomposition
   const planning = snapshot.session.phase === 'plan'
-  const view = viewOverride ?? (planning ? 'plan' : 'graph')
+  /**
+   * The kanban is the session. Tickets are how work is proposed, joined and
+   * tracked, so it opens there unless someone asks for another lens.
+   */
+  const view = viewOverride ?? 'board'
   const awaitingApproval = decomposition?.status === 'proposed' && snapshot.validation?.ok
 
   const act = async (fn: () => Promise<unknown>) => {
@@ -200,6 +205,12 @@ function Board({ slug }: { slug: string }) {
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="relative min-h-0 flex-1 border-b border-edge">
             <div className="absolute right-3 top-3 z-10 flex gap-3 text-[10px] uppercase tracking-wider">
+              <button
+                className={view === 'board' ? 'text-neutral-200' : 'text-mute hover:text-neutral-400'}
+                onClick={() => setView('board')}
+              >
+                board
+              </button>
               {planning ? (
                 <button
                   className={view === 'plan' ? 'text-neutral-200' : 'text-mute hover:text-neutral-400'}
@@ -222,7 +233,19 @@ function Board({ slug }: { slug: string }) {
               </button>
             </div>
 
-            {view === 'plan' ? (
+            {view === 'board' ? (
+              <Kanban
+                snapshot={snapshot}
+                meId={mine?.id ?? null}
+                onCreate={(title, body) =>
+                  act(() => send({ type: 'ticket.create', title, body }))
+                }
+                onJoin={(ticketId) => act(() => send({ type: 'ticket.join', ticketId: ticketId as never }))}
+                onLeave={(ticketId) => act(() => send({ type: 'ticket.leave', ticketId: ticketId as never }))}
+                onStart={(ticketId) => act(() => send({ type: 'ticket.start', ticketId: ticketId as never }))}
+                onSelectTask={setSelected}
+              />
+            ) : view === 'plan' ? (
               <Plan
                 snapshot={snapshot}
                 meId={mine?.id ?? null}
