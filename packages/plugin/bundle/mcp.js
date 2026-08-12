@@ -31013,6 +31013,7 @@ var SessionId = external_exports.string().min(1).brand();
 var ParticipantId = external_exports.string().min(1).brand();
 var DecompositionId = external_exports.string().min(1).brand();
 var MessageId = external_exports.string().min(1).brand();
+var TicketId = external_exports.string().min(1).brand();
 var TaskId = external_exports.string().regex(/^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/, "task id must be kebab-case, 3-40 chars").brand();
 var Seq = external_exports.number().int().nonnegative();
 var Timestamp = external_exports.number().int().nonnegative();
@@ -31070,6 +31071,25 @@ var Participant = external_exports.object({
   activity: ParticipantActivity,
   joinedAt: Timestamp
 });
+var TicketState = external_exports.enum(["plan", "splitting", "building", "review", "done"]);
+var Ticket = external_exports.object({
+  id: TicketId,
+  sessionId: SessionId,
+  title: external_exports.string().min(1).max(200),
+  /** The brief the planner works from. Optional: a title is often enough. */
+  body: external_exports.string().max(4e3).default(""),
+  authorId: ParticipantId,
+  /**
+   * Who is working it. Joining is the whole consent step -- there is no
+   * separate approval, because opting in to a ticket *is* opting in to its
+   * split.
+   */
+  members: external_exports.array(ParticipantId).default([]),
+  state: TicketState,
+  decompositionId: DecompositionId.nullable().default(null),
+  prNumber: external_exports.number().int().nullable().default(null),
+  createdAt: Timestamp
+});
 var ContractFile = external_exports.object({
   path: external_exports.string().min(1),
   purpose: external_exports.string().min(1),
@@ -31108,6 +31128,8 @@ var DecompositionStatus = external_exports.enum(["proposed", "approved", "reject
 var Decomposition = external_exports.object({
   id: DecompositionId,
   sessionId: SessionId,
+  /** The ticket this split is for. */
+  ticketId: TicketId.nullable().default(null),
   issueRef: external_exports.string().nullable(),
   contract: Contract,
   tasks: external_exports.array(TaskSpec).min(1),
@@ -31134,6 +31156,7 @@ var ValidationCode = external_exports.enum([
   "missing_acceptance",
   "path_escapes_repo",
   "contract_path_owned_by_task",
+  "overlaps_other_ticket",
   "narrow_frontier",
   "oversized_task"
 ]);
@@ -31180,6 +31203,8 @@ var TestResult = external_exports.object({
 });
 var Task = TaskSpec.extend({
   sessionId: SessionId,
+  /** Which ticket this task came out of. */
+  ticketId: TicketId.nullable().default(null),
   state: TaskState,
   /**
    * Who it is meant for, carried over from the approved split. Distinct from
@@ -31245,6 +31270,7 @@ var MergeQueueEntry = external_exports.object({
 var SessionSnapshot = external_exports.object({
   session: Session,
   participants: external_exports.array(Participant),
+  tickets: external_exports.array(Ticket).default([]),
   decomposition: Decomposition.nullable(),
   validation: ValidationReport.nullable(),
   tasks: external_exports.array(Task),
@@ -31279,6 +31305,19 @@ var EventBody = external_exports.discriminatedUnion("type", [
     type: external_exports.literal("participant.attached"),
     participantId: ParticipantId,
     repoPath: external_exports.string().min(1)
+  }),
+  // -- tickets --------------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("ticket.created"), ticket: Ticket }),
+  external_exports.object({
+    type: external_exports.literal("ticket.members"),
+    ticketId: TicketId,
+    members: external_exports.array(ParticipantId)
+  }),
+  external_exports.object({ type: external_exports.literal("ticket.state"), ticketId: TicketId, state: TicketState }),
+  external_exports.object({
+    type: external_exports.literal("ticket.shipped"),
+    ticketId: TicketId,
+    prNumber: external_exports.number().int().nullable()
   }),
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
@@ -31417,6 +31456,22 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   }),
   external_exports.object({ type: external_exports.literal("session.sync"), fromSeq: Seq }),
   /**
+   * Anyone can open one, from the board or the terminal. The author joins it
+   * automatically; everyone else is told it exists and can opt in.
+   */
+  external_exports.object({
+    type: external_exports.literal("ticket.create"),
+    title: external_exports.string().min(1).max(200),
+    body: external_exports.string().max(4e3).default("")
+  }),
+  /** Opting in. This is the consent step -- there is no separate approval. */
+  external_exports.object({ type: external_exports.literal("ticket.join"), ticketId: TicketId }),
+  external_exports.object({ type: external_exports.literal("ticket.leave"), ticketId: TicketId }),
+  /** Begin splitting now rather than waiting for someone else to join. */
+  external_exports.object({ type: external_exports.literal("ticket.start"), ticketId: TicketId }),
+  /** Records the pull request that finished a ticket. */
+  external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
+  /**
    * Ask for a split from the board. Planning needs a repo and a model, neither
    * of which the browser has -- so this hands the brief to a participant's
    * Claude Code, which reads the repo and answers with `decomposition.propose`.
@@ -31433,7 +31488,9 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     contract: Contract,
     tasks: external_exports.array(TaskSpec).min(1),
     participantCount: external_exports.number().int().min(1),
-    issueRef: external_exports.string().nullable().default(null)
+    issueRef: external_exports.string().nullable().default(null),
+    /** The ticket being split. Omitted only by the older session-wide flow. */
+    ticketId: TicketId.nullable().default(null)
   }),
   /** Move a card to someone, or to nobody. Overrides the automatic split. */
   external_exports.object({
@@ -32982,6 +33039,99 @@ function createServer() {
     }
   );
   server.registerTool(
+    "ss_tickets",
+    {
+      description: "The board: every ticket in this session, which column it is in, who is in it, and how its tasks are going. Read this before asking what to do next.",
+      inputSchema: {}
+    },
+    async () => {
+      const cfg = config2();
+      const state = await snapshot(cfg);
+      const names = new Map(state.participants.map((p) => [p.id, p.displayName]));
+      return text(
+        state.tickets.map((ticket) => ({
+          id: ticket.id,
+          title: ticket.title,
+          column: ticket.state,
+          members: ticket.members.map((id) => names.get(id) ?? id),
+          mine: ticket.members.includes(cfg.participantId),
+          tasks: state.tasks.filter((task) => task.ticketId === ticket.id).map((task) => `${task.id}: ${task.state}${task.assigneeId ? ` (${names.get(task.assigneeId)})` : ""}`),
+          prNumber: ticket.prNumber
+        }))
+      );
+    }
+  );
+  server.registerTool(
+    "ss_ticket_create",
+    {
+      description: "Open a ticket for a piece of work. Everyone else is told it exists and can join it; joining is all the agreement there is, so no approval follows.",
+      inputSchema: {
+        title: external_exports.string().min(1).max(200),
+        body: external_exports.string().max(4e3).nullish().describe("The brief the planner works from")
+      }
+    },
+    async ({ title, body }) => {
+      const cfg = config2();
+      const { ticket } = await runCommand(cfg, {
+        type: "ticket.create",
+        title,
+        body: body ?? ""
+      });
+      return text(
+        [
+          `Opened "${ticket.title}" (${ticket.id}).`,
+          ticket.state === "splitting" ? "Nobody else is here, so it is already being split." : "The others have been told; it starts splitting as soon as one of them joins, or when you run ss_ticket_start."
+        ].join("\n")
+      );
+    }
+  );
+  server.registerTool(
+    "ss_ticket_join",
+    {
+      description: "Join a ticket. This is the consent step: the split starts immediately and the work is assigned to whoever is in, with nothing further to approve.",
+      inputSchema: { ticketId: external_exports.string() }
+    },
+    async ({ ticketId }) => {
+      const cfg = config2();
+      const { ticket } = await runCommand(cfg, {
+        type: "ticket.join",
+        ticketId
+      });
+      return text(`In "${ticket.title}" with ${ticket.members.length} other(s). Column: ${ticket.state}.`);
+    }
+  );
+  server.registerTool(
+    "ss_ticket_start",
+    {
+      description: "Start splitting a ticket now instead of waiting for someone else to join it.",
+      inputSchema: { ticketId: external_exports.string() }
+    },
+    async ({ ticketId }) => {
+      const cfg = config2();
+      const { ticket } = await runCommand(cfg, {
+        type: "ticket.start",
+        ticketId
+      });
+      return text(`"${ticket.title}" is ${ticket.state}.`);
+    }
+  );
+  server.registerTool(
+    "ss_ticket_shipped",
+    {
+      description: "Record the pull request that finished a ticket, which closes its card. Call it after ss_ship.",
+      inputSchema: { ticketId: external_exports.string(), prNumber: external_exports.number().int().nullish() }
+    },
+    async ({ ticketId, prNumber }) => {
+      const cfg = config2();
+      const { ticket } = await runCommand(cfg, {
+        type: "ticket.shipped",
+        ticketId,
+        prNumber: prNumber ?? null
+      });
+      return text(`"${ticket.title}" is done${ticket.prNumber ? ` (PR #${ticket.prNumber})` : ""}.`);
+    }
+  );
+  server.registerTool(
     "ss_propose",
     {
       description: "Propose a decomposition: the contract to commit first, then the tasks. The server validates it deterministically and returns every problem with a repair hint. Fix and call again.",
@@ -33011,18 +33161,21 @@ function createServer() {
             }),
             estimateMinutes: external_exports.number().int().min(5).max(240)
           })
-        ).min(1)
+        ).min(1),
+        ticketId: external_exports.string().nullish().describe("The ticket being split. Given to you in the request; a ticket split needs no approval and starts at once.")
       }
     },
-    async ({ contract, tasks }) => {
+    async ({ contract, tasks, ticketId }) => {
       const cfg = config2();
       const state = await snapshot(cfg);
+      const ticket = ticketId ? state.tickets.find((t) => t.id === ticketId) : null;
       const result = await runCommand(cfg, {
         type: "decomposition.propose",
         contract,
         tasks,
-        participantCount: Math.max(state.participants.length, 1),
-        issueRef: state.session.issueRef
+        participantCount: Math.max(ticket ? ticket.members.length : state.participants.length, 1),
+        issueRef: state.session.issueRef,
+        ticketId: ticketId ?? null
       });
       if (result.validation.ok) {
         const after = await snapshot(cfg);
@@ -33036,7 +33189,7 @@ function createServer() {
             task: a.taskId,
             to: names.get(a.participantId) ?? a.participantId
           })),
-          next: "The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns."
+          next: ticketId ? "Live already -- a ticket split needs no approval. Everyone in the ticket has been told what they own; do your own tasks now." : "The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns."
         });
       }
       return text({
