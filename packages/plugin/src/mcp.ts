@@ -471,6 +471,113 @@ export function createServer(): McpServer {
   )
 
   server.registerTool(
+    'ss_tickets',
+    {
+      description:
+        'The board: every ticket in this session, which column it is in, who is in it, and how its tasks are going. Read this before asking what to do next.',
+      inputSchema: {},
+    },
+    async () => {
+      const cfg = config()
+      const state = await snapshot(cfg)
+      const names = new Map(state.participants.map((p) => [p.id, p.displayName]))
+      return text(
+        state.tickets.map((ticket) => ({
+          id: ticket.id,
+          title: ticket.title,
+          column: ticket.state,
+          members: ticket.members.map((id) => names.get(id) ?? id),
+          mine: ticket.members.includes(cfg.participantId as never),
+          tasks: state.tasks
+            .filter((task) => task.ticketId === ticket.id)
+            .map((task) => `${task.id}: ${task.state}${task.assigneeId ? ` (${names.get(task.assigneeId)})` : ''}`),
+          prNumber: ticket.prNumber,
+        })),
+      )
+    },
+  )
+
+  server.registerTool(
+    'ss_ticket_create',
+    {
+      description:
+        'Open a ticket for a piece of work. Everyone else is told it exists and can join it; joining is all the agreement there is, so no approval follows.',
+      inputSchema: {
+        title: z.string().min(1).max(200),
+        body: z.string().max(4000).nullish().describe('The brief the planner works from'),
+      },
+    },
+    async ({ title, body }) => {
+      const cfg = config()
+      const { ticket } = await runCommand(cfg, {
+        type: 'ticket.create',
+        title,
+        body: body ?? '',
+      })
+      return text(
+        [
+          `Opened "${ticket.title}" (${ticket.id}).`,
+          ticket.state === 'splitting'
+            ? 'Nobody else is here, so it is already being split.'
+            : 'The others have been told; it starts splitting as soon as one of them joins, or when you run ss_ticket_start.',
+        ].join('\n'),
+      )
+    },
+  )
+
+  server.registerTool(
+    'ss_ticket_join',
+    {
+      description:
+        'Join a ticket. This is the consent step: the split starts immediately and the work is assigned to whoever is in, with nothing further to approve.',
+      inputSchema: { ticketId: z.string() },
+    },
+    async ({ ticketId }) => {
+      const cfg = config()
+      const { ticket } = await runCommand(cfg, {
+        type: 'ticket.join',
+        ticketId: ticketId as never,
+      })
+      return text(`In "${ticket.title}" with ${ticket.members.length} other(s). Column: ${ticket.state}.`)
+    },
+  )
+
+  server.registerTool(
+    'ss_ticket_start',
+    {
+      description:
+        'Start splitting a ticket now instead of waiting for someone else to join it.',
+      inputSchema: { ticketId: z.string() },
+    },
+    async ({ ticketId }) => {
+      const cfg = config()
+      const { ticket } = await runCommand(cfg, {
+        type: 'ticket.start',
+        ticketId: ticketId as never,
+      })
+      return text(`"${ticket.title}" is ${ticket.state}.`)
+    },
+  )
+
+  server.registerTool(
+    'ss_ticket_shipped',
+    {
+      description:
+        'Record the pull request that finished a ticket, which closes its card. Call it after ss_ship.',
+      inputSchema: { ticketId: z.string(), prNumber: z.number().int().nullish() },
+    },
+    async ({ ticketId, prNumber }) => {
+      const cfg = config()
+      const { ticket } = await runCommand(cfg, {
+        type: 'ticket.shipped',
+        ticketId: ticketId as never,
+        prNumber: prNumber ?? null,
+      })
+      return text(`"${ticket.title}" is done${ticket.prNumber ? ` (PR #${ticket.prNumber})` : ''}.`)
+    },
+  )
+
+  server.registerTool(
     'ss_propose',
     {
       description:
@@ -506,17 +613,23 @@ export function createServer(): McpServer {
             }),
           )
           .min(1),
+        ticketId: z
+          .string()
+          .nullish()
+          .describe('The ticket being split. Given to you in the request; a ticket split needs no approval and starts at once.'),
       },
     },
-    async ({ contract, tasks }) => {
+    async ({ contract, tasks, ticketId }) => {
       const cfg = config()
       const state = await snapshot(cfg)
+      const ticket = ticketId ? state.tickets.find((t) => t.id === ticketId) : null
       const result = await runCommand(cfg, {
         type: 'decomposition.propose',
         contract,
         tasks: tasks as never,
-        participantCount: Math.max(state.participants.length, 1),
+        participantCount: Math.max(ticket ? ticket.members.length : state.participants.length, 1),
         issueRef: state.session.issueRef,
+        ticketId: (ticketId ?? null) as never,
       })
 
       if (result.validation.ok) {
@@ -534,7 +647,9 @@ export function createServer(): McpServer {
             task: a.taskId,
             to: names.get(a.participantId) ?? a.participantId,
           })),
-          next: 'The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns.',
+          next: ticketId
+            ? 'Live already -- a ticket split needs no approval. Everyone in the ticket has been told what they own; do your own tasks now.'
+            : 'The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns.',
         })
       }
       return text({
