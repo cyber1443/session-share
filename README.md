@@ -213,7 +213,7 @@ pnpm install
 pnpm e2e         # the whole product, through the real MCP tools, hook and HTTP
 pnpm peer-demo   # host + guest + a real daemon, no accounts anywhere
 pnpm demo        # the same flow through the hosted (OAuth) path
-pnpm test        # 139 tests
+pnpm test        # 144 tests
 ```
 
 `pnpm e2e` is the one that matters. It hosts, joins, plans from the board, moves
@@ -277,6 +277,14 @@ at, and hands the middle to an agent:
 Assignment is a plan; a claim is a fact. `/ss:next` hands you your own tasks
 first, falls back to unassigned ones, and takes someone else's only rather than
 leave you idle.
+
+### Two credentials, one board
+
+A peer board can hold two things that name different sessions: an invite in the
+URL, and a participant token in local storage from whatever it opened last. The
+invite wins — it is the more recent and more deliberate of the two. Preferring
+the stored token is how a board ends up showing a *previous* session, with its
+chat and its participants, while ignoring the link you just followed.
 
 ### After a plugin update
 
