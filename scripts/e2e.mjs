@@ -29,6 +29,8 @@ const bold = (s) => `\x1b[1m${s}\x1b[0m`
 
 let failures = 0
 let step = 0
+/** The board URL, once there is one, for SESSION_SHARE_E2E_HOLD. */
+let held = null
 const say = (t) => console.log(`\n${bold(`${++step}. ${t}`)}`)
 const ok = (s) => console.log(`   \x1b[32m✓\x1b[0m ${s}`)
 const note = (s) => console.log(`   ${dim(s)}`)
@@ -251,6 +253,7 @@ try {
   const invite = hosted.match(/ssx_[A-Za-z0-9_-]+/)?.[0]
   check(Boolean(invite), 'session created and this checkout attached')
   check(!/127\.0\.0\.1/.test(invite ?? ''), 'the invite carries a reachable address')
+  held = `${JSON.parse(readFileSync(join(aliceRepo, '.session-share/session.json'), 'utf8')).serverUrl}/board/?join=${invite}`
 
   // -- 2 ---------------------------------------------------------------------
   say('Bob joins from his own clone')
@@ -538,6 +541,15 @@ try {
   bad(`threw: ${error.message}`)
   if (process.env.SESSION_SHARE_E2E_STACK) console.error(error)
 } finally {
+  /**
+   * SESSION_SHARE_E2E_HOLD keeps everything standing so the board this run
+   * built can be opened in a real browser. Twice now a control has been dead in
+   * Chrome while every test passed, and the only way to catch that is to look.
+   */
+  if (process.env.SESSION_SHARE_E2E_HOLD && held) {
+    console.log(`\n${bold('board')} ${held}\n${dim('holding for 10 minutes; ctrl-c when done')}`)
+    await new Promise((resolve) => setTimeout(resolve, 10 * 60_000))
+  }
   for (const client of clients) await client.close().catch(() => {})
   for (const home of homeDirs) {
     try {
