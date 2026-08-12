@@ -193,13 +193,15 @@ function Card({
         <p className="text-[10px] text-mute">verified — opening the pull request</p>
       ) : null}
       {ticket.state === 'verify' ? (
-        <p
-          className={`text-[10px] ${ticket.verification ? 'text-red-400' : 'text-amber-400/80'}`}
-        >
+        <p className="text-[10px] text-amber-400/80">
           {ticket.verification
-            ? 'ran it — broken, being fixed'
+            ? 'fixes landed — running it again'
             : 'everything landed; someone is running it end to end'}
         </p>
+      ) : null}
+      {/* A failed run puts the ticket back with the people who built it. */}
+      {ticket.state === 'building' && ticket.verification && !ticket.verification.passed ? (
+        <p className="text-[10px] text-red-400">ran it — broken, being fixed</p>
       ) : null}
       {ticket.state === 'splitting' ? (
         <p className="text-[10px] text-amber-400/80">

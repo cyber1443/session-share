@@ -651,9 +651,15 @@ export function createServer(): McpServer {
           .string()
           .max(2000)
           .describe('What you saw. On a failure, be specific enough that someone can fix it'),
+        broke: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Failing only: the ids of the tasks the failure is on. Those tasks reopen and become claimable again. Omit only if you genuinely cannot tell -- every task reopens then',
+          ),
       },
     },
-    async ({ ticketId, passed, how, summary }) => {
+    async ({ ticketId, passed, how, summary, broke }) => {
       const cfg = config()
       const { ticket } = await runCommand(cfg, {
         type: 'ticket.verified',
@@ -661,11 +667,17 @@ export function createServer(): McpServer {
         passed,
         how,
         summary,
+        broke: (broke ?? []) as never,
       })
+      const reopened = ticket.verification?.broke ?? []
       return text(
         passed
           ? `"${ticket.title}" verified. It is in review; open the PR with ss_ship.`
-          : `Recorded as broken. Everyone who built "${ticket.title}" has been told what you saw.`,
+          : [
+              `Recorded as broken, and the work is open again: ${reopened.join(', ') || 'nothing to reopen'}.`,
+              `Everyone who built "${ticket.title}" has been told what you saw and asked to fix it.`,
+              'When the last fix lands you will be asked to run it again.',
+            ].join('\n'),
       )
     },
   )

@@ -76,6 +76,8 @@ export const ClientCommand = z.discriminatedUnion('type', [
     passed: z.boolean(),
     how: z.string().max(500),
     summary: z.string().max(2000),
+    /** Failing: whose tasks to reopen. Empty reopens the lot. */
+    broke: z.array(TaskId).default([]),
   }),
   /** Records the pull request that finished a ticket. */
   z.object({ type: z.literal('ticket.shipped'), ticketId: TicketId, prNumber: z.number().int().nullable().default(null) }),

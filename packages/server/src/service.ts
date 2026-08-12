@@ -522,13 +522,19 @@ export class SessionService {
     const who = this.verifier(state, ticket)
     if (!who) return
 
+    const again = ticket.verification && !ticket.verification.passed
+
     this.systemDirective(
       sessionId,
       actorId,
       [who],
       [
-        `Every task on "${ticket.title}" has landed on ${state.session?.contractBranch ?? 'the contract branch'}.`,
-        'Nobody has run the whole thing yet. Do that now, before it goes anywhere near a PR:',
+        again
+          ? `The fixes for "${ticket.title}" have landed. Last time it was run it failed: ${ticket.verification?.summary}`
+          : `Every task on "${ticket.title}" has landed on ${state.session?.contractBranch ?? 'the contract branch'}.`,
+        again
+          ? 'Run it again, the same way, and check that specific failure is gone:'
+          : 'Nobody has run the whole thing yet. Do that now, before it goes anywhere near a PR:',
         '',
         '1. ss_sync, so you have everyone\'s work together.',
         '2. Work out how this project actually runs -- package.json scripts, a dev server, a',
@@ -541,8 +547,9 @@ export class SessionService {
         '   interesting failures are where the pieces meet.',
         '',
         'Then report with ss_ticket_verified: passed true or false, `how` you exercised it, and',
-        'what you saw. Passing sends it to review. Failing sends it back to the people who own',
-        'the broken part, so be specific about what actually happened.',
+        'what you saw. Passing sends it to review. Failing reopens work, so it needs `broke`:',
+        'the ids of the tasks the failure is on. Leave `broke` out only if you truly cannot tell',
+        '-- every task reopens then, and everyone re-does work that was probably fine.',
       ].join('\n'),
     )
   }
@@ -553,6 +560,19 @@ export class SessionService {
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
     const ticket = this.requireTicket(state, command.ticketId)
+    const ticketTasks = state.tasksOfTicket(ticket.id)
+
+    /**
+     * A failure names tasks or it means all of them. Either way something has
+     * to reopen: every task of a ticket in verify is already merged, so with
+     * nothing put back the report lands on a board where there is nothing left
+     * to claim and nothing to fix -- which is how a broken ticket used to sit
+     * in verify forever with a good description of the bug attached to it.
+     */
+    const named = new Set(command.broke)
+    const reopened = command.passed
+      ? []
+      : ticketTasks.filter((task) => named.size === 0 || named.has(task.id))
 
     this.emit(sessionId, participantId, {
       type: 'ticket.verified',
@@ -561,10 +581,22 @@ export class SessionService {
         passed: command.passed,
         how: command.how,
         summary: command.summary,
+        broke: reopened.map((task) => task.id),
         by: participantId,
         at: Date.now(),
       },
     })
+
+    for (const task of reopened) {
+      this.emit(sessionId, participantId, {
+        type: 'task.state',
+        taskId: task.id,
+        // Unowned rather than handed back to whoever had it: the person who
+        // wrote the broken part may not be the one at the keyboard now.
+        state: 'ready',
+        ownerId: null,
+      })
+    }
     this.refreshTicketStates(sessionId, participantId)
 
     const by = state.participants.get(participantId)?.displayName ?? 'Someone'
@@ -594,10 +626,20 @@ export class SessionService {
             '',
             command.summary,
             '',
-            'Fix it on your own task branches -- the lease gate still applies, so if the broken',
-            'part is not yours, say so in the room rather than reaching into it. Land the fix',
-            'with ss_done as usual and it will be run again.',
-          ].join('\n'),
+            `Reopened, and claimable again: ${reopened.map((task) => task.id).join(', ')}.`,
+            named.size === 0
+              ? 'The run did not say which task broke it, so all of them are back -- claim yours,'
+              : 'Claim yours and fix it:',
+            named.size === 0
+              ? 'and if it turns out yours is fine, land it straight back with ss_done.'
+              : '',
+            '  ss_claim -> fix it -> run the acceptance command -> ss_done',
+            'Do it now, without waiting to be asked again. When the last one lands, whoever ran',
+            'it is asked to run the whole thing again -- that is the loop, and it repeats until',
+            'it actually works.',
+          ]
+            .filter((line) => line !== '')
+            .join('\n'),
         )
       }
     }
@@ -1499,7 +1541,17 @@ export class SessionService {
 
     const ticketId = task.ticketId
     const ticket = ticketId ? state.tickets.get(ticketId) : null
-    if (ticket && state.ticketStateFor(ticket.id) === 'verify' && !ticket.verification) {
+    /**
+     * Asked again every time the ticket comes back to verify, not only the
+     * first time. A ticket that failed and was fixed has a verification on it
+     * already -- guarding on its mere existence is what made the second lap
+     * silent, so a fixed ticket sat there with nobody running it.
+     */
+    if (
+      ticket &&
+      state.ticketStateFor(ticket.id) === 'verify' &&
+      !ticket.verification?.passed
+    ) {
       this.askForVerification(sessionId, participantId, state, ticket)
     }
 

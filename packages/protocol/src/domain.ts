@@ -101,6 +101,13 @@ export const Verification = z.object({
   /** How it was exercised: the command, the URL, the simulator. */
   how: z.string().max(500),
   summary: z.string().max(2000),
+  /**
+   * Which tasks the failure is on. A run that fails has to say what to reopen,
+   * or the report is a complaint rather than work -- and an empty list is read
+   * as "all of them", because a ticket nobody can act on is worse than a few
+   * people being asked to look at something that turns out to be fine.
+   */
+  broke: z.array(TaskId).default([]),
   by: ParticipantId,
   at: Timestamp,
 })

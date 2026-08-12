@@ -292,6 +292,11 @@ export function TicketPanel({
             <>
               <p className="text-[10px] text-mute">{ticket.verification.how}</p>
               <p className="leading-relaxed text-neutral-300">{ticket.verification.summary}</p>
+              {!ticket.verification.passed && ticket.verification.broke.length > 0 ? (
+                <p className="pt-1 text-[10px] text-mute">
+                  reopened, claimable again — {ticket.verification.broke.join(', ')}
+                </p>
+              ) : null}
             </>
           ) : (
             <p className="leading-relaxed text-mute">

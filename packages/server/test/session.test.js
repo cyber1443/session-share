@@ -1152,14 +1152,14 @@ describe('tickets', () => {
   it('sends a broken assembly back to everyone who built it', async () => {
     const { alice, bob, aliceId, bobId } = await verifiableTicket('ticket-broken')
 
-    const failed = await alice.send({
+    await alice.send({
       type: 'ticket.verified',
       ticketId: (await currentTicket(alice, 'ticket-broken')).id,
       passed: false,
       how: 'pnpm dev, then drove the todo list in the browser',
       summary: 'The toggle renders but the stored theme never comes back after a reload.',
+      broke: ['theme-persist'],
     })
-    assert.equal(failed.ticket.state, 'verify', 'it stays put until it actually works')
     await settle()
 
     const back = alice
@@ -1172,6 +1172,81 @@ describe('tickets', () => {
       'the person who ran it rarely owns the file that broke',
     )
     assert.match(back.body, /never comes back after a reload/)
+    assert.match(back.body, /theme-persist/, 'and told which task is open again')
+  })
+
+  /**
+   * A failed run used to be terminal: every task was merged, so nothing was
+   * claimable, the card sat in verify forever with a good bug report attached,
+   * and nobody was ever asked to run it a second time.
+   */
+  it('reopens the broken task and asks for the run again once it is fixed', async () => {
+    const { alice, bob } = await verifiableTicket('ticket-reverify')
+    const ticket = await currentTicket(alice, 'ticket-reverify')
+
+    const failed = await alice.send({
+      type: 'ticket.verified',
+      ticketId: ticket.id,
+      passed: false,
+      how: 'pnpm dev, then drove it in the browser',
+      summary: 'Two scripts declare the same global, so the page never loads.',
+      broke: ['theme-persist'],
+    })
+    assert.equal(failed.ticket.state, 'building', 'the card goes back to the people who built it')
+    await settle()
+
+    const snapshot = await snapshotOf(alice, 'ticket-reverify')
+    assert.equal(
+      snapshot.tasks.find((t) => t.id === 'theme-persist').state,
+      'ready',
+      'the named task is claimable again',
+    )
+    assert.equal(
+      snapshot.tasks.find((t) => t.id === 'theme-persist').ownerId,
+      null,
+      'and unowned, because whoever wrote it may not be here',
+    )
+    assert.equal(
+      snapshot.tasks.find((t) => t.id === 'theme-toggle').state,
+      'merged',
+      'work the run did not implicate is left alone',
+    )
+
+    await bob.send({ type: 'task.claim', taskId: 'theme-persist' })
+    await bob.send({ type: 'task.merged', taskId: 'theme-persist' })
+    await settle()
+
+    const fixed = await snapshotOf(alice, 'ticket-reverify')
+    assert.equal(
+      fixed.tickets.find((t) => t.id === ticket.id).state,
+      'verify',
+      'landing the fix sends it back to be run',
+    )
+
+    const asked = alice
+      .eventsOfType('chat.message')
+      .map((event) => event.body.message)
+      .findLast((m) => m.directive)
+    assert.match(asked.body, /Run it again/, 'and somebody is actually asked to run it')
+    assert.match(asked.body, /same global/, 'with the failure it has to disprove')
+  })
+
+  it('reopens everything when the run cannot say what broke', async () => {
+    const { alice } = await verifiableTicket('ticket-blame')
+    await alice.send({
+      type: 'ticket.verified',
+      ticketId: (await currentTicket(alice, 'ticket-blame')).id,
+      passed: false,
+      how: 'pnpm dev',
+      summary: 'It just does not come up, and I cannot tell which part.',
+    })
+    await settle()
+
+    const snapshot = await snapshotOf(alice, 'ticket-blame')
+    assert.ok(
+      snapshot.tasks.every((task) => task.state !== 'merged'),
+      'a ticket nobody can act on is worse than re-doing work that was fine',
+    )
   })
 
   it('sends it to review once it has actually been run', async () => {
@@ -1341,7 +1416,7 @@ describe('tickets', () => {
     return session
   }
 
-  const currentTicket = async (client, slug) => {
+  const snapshotOf = async (client, slug) => {
     const joined = await client.send({
       type: 'session.join',
       sessionRef: slug,
@@ -1350,8 +1425,10 @@ describe('tickets', () => {
       repoPath: '/tmp/alice/web',
       fromSeq: null,
     })
-    return joined.snapshot.tickets.at(-1)
+    return joined.snapshot
   }
+
+  const currentTicket = async (client, slug) => (await snapshotOf(client, slug)).tickets.at(-1)
 
   /**
    * Review is the last column. Nothing here merges anything, so a card that

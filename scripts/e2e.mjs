@@ -378,18 +378,45 @@ try {
   check(/exercise the feature end to end/.test(toRun ?? ''), 'and someone is asked to run it')
   check(!/ss_ship/.test(toRun ?? ''), 'with no mention of a PR yet')
 
-  say('It is broken, so it goes back to the people who built it')
-  await bobBoard.command({
+  say('It is broken, so the work it names opens back up')
+  const failed = await bobBoard.command({
     type: 'ticket.verified',
     ticketId: opened.ticket.id,
     passed: false,
     how: 'node --test plus a run of the CLI',
     summary: 'Filtering by a tag returns nothing once more than one tag is set.',
+    broke: ['tag-filter'],
   })
+  check(failed.ticket.state === 'building', 'the card goes back to the people who built it')
+
+  const reopened = await bobBoard.snapshot()
+  check(
+    reopened.tasks.find((t) => t.id === 'tag-filter')?.state === 'ready',
+    'the named task is claimable again, not merged and untouchable',
+  )
+  check(
+    reopened.tasks.find((t) => t.id === 'tag-storage')?.state === 'merged',
+    'and the task the run did not blame is left alone',
+  )
+
   const broken = await turnEnds(aliceRepo, aliceHome)
   check(/returns nothing once more than one tag/.test(broken ?? ''), 'with what was actually seen')
+  check(/tag-filter/.test(broken ?? ''), 'and which task to pick up')
 
-  say('Fixed and re-run, it reaches review')
+  say('The fix lands and the run is asked for again, on its own')
+  await bobBoard.command({ type: 'task.claim', taskId: 'tag-filter' })
+  await bobBoard.command({ type: 'task.merged', taskId: 'tag-filter' })
+
+  const backToVerify = await bobBoard.snapshot()
+  check(
+    backToVerify.tickets.find((t) => t.id === opened.ticket.id)?.state === 'verify',
+    'landing the fix sends the ticket back to be run',
+  )
+  const rerun = await turnEnds(bobRepo, bobHome)
+  check(/Run it again/.test(rerun ?? ''), 'and nobody had to ask for the second run')
+  check(/more than one tag/.test(rerun ?? ''), 'with the failure it has to disprove')
+
+  say('Re-run and working, it reaches review')
   const verified = await bobBoard.command({
     type: 'ticket.verified',
     ticketId: opened.ticket.id,
