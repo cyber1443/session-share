@@ -105,7 +105,7 @@ invite is the credential, which is the right trade for two people who can hand
 each other a link and the wrong one for a public URL.
 
 ```
-host   /ss:host Add a dark mode toggle
+host   /ss:host
        → send: /ss:join ssx_eyJ1Ijoi…
        → board opens in the browser, already seated as you
 
@@ -131,7 +131,7 @@ Both of you have the repo cloned and are sitting on `main`. Then:
 
 | | |
 |---|---|
-| `/ss:host Add a dark mode toggle` | starts the server, creates the session, hands you one string to send |
+| `/ss:host` | starts the server, opens a session for this repo, hands you one string to send. Work is tickets on the board, so the session needs no name |
 | `/ss:join ssx_…` | your teammate attaches their own clone |
 | `/ss:plan add dark mode`, or type the brief on the board | Claude reads the repo and proposes a contract plus tasks; the validator rejects overlaps before anyone sees them |
 | move cards, then approve, on the board | the split arrives balanced between you; both approve, or the lead if there are more than three. Each agent is then told what it owns |
@@ -226,7 +226,7 @@ pnpm install
 pnpm e2e         # the whole product, through the real MCP tools, hook and HTTP
 pnpm peer-demo   # host + guest + a real daemon, no accounts anywhere
 pnpm demo        # the same flow through the hosted (OAuth) path
-pnpm test        # 158 tests
+pnpm test        # 165 tests
 ```
 
 `pnpm e2e` is the one that matters. It hosts, joins, plans from the board, moves
@@ -330,7 +330,7 @@ and once the split is approved and the contract has landed, on every machine:
 
 | | |
 |---|---|
-| `/ss:host` | start hosting from this machine, get one string to send |
+| `/ss:host` | start hosting for this repository, get one string to send |
 | `/ss:join` | attach this checkout to a session |
 | `/ss:setup` | choose what may be committed, pushed and opened on your behalf |
 | `/ss:doctor` | check this machine is ready before blaming the session |
