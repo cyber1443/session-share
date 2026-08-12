@@ -76,6 +76,33 @@ async function mintInvite(serverUrl: string, slug: string): Promise<string> {
 }
 
 /**
+ * If splitting just landed on *this* agent, say so here rather than leaving it
+ * to arrive at the end of the turn.
+ *
+ * The queue is delivered when a turn ends, and the agent asking this question is
+ * mid-turn -- so waiting would mean stopping, and the person would have to poke
+ * it to start something they just asked for.
+ */
+function splitHint(
+  cfg: SessionConfig,
+  ticket: { title: string; state: string; id: string },
+  plannerId: string | null,
+): string {
+  if (plannerId && plannerId === cfg.participantId) {
+    return [
+      '',
+      'You are splitting it. Do it now, in this turn: read the repository and call',
+      `ss_propose with ticketId: ${ticket.id}. Then it goes on the board for someone to start.`,
+    ].join('\n')
+  }
+  if (plannerId) return 'Someone else was asked to split it; it appears on the board when they do.'
+  if (ticket.state === 'plan') {
+    return 'The others have been told. It starts splitting when one of them joins, or when you run ss_ticket_start.'
+  }
+  return ''
+}
+
+/**
  * Fails a join before it starts, with the reason rather than the symptom.
  *
  * "That invite is not valid for this server" is what the *server* can say, and
@@ -532,19 +559,12 @@ export function createServer(): McpServer {
     },
     async ({ title, body }) => {
       const cfg = config()
-      const { ticket } = await runCommand(cfg, {
+      const { ticket, plannerId } = await runCommand(cfg, {
         type: 'ticket.create',
         title,
         body: body ?? '',
       })
-      return text(
-        [
-          `Opened "${ticket.title}" (${ticket.id}).`,
-          ticket.state === 'splitting'
-            ? 'Nobody else is here, so it is already being split.'
-            : 'The others have been told; it starts splitting as soon as one of them joins, or when you run ss_ticket_start.',
-        ].join('\n'),
-      )
+      return text([`Opened "${ticket.title}" (${ticket.id}).`, splitHint(cfg, ticket, plannerId)].join('\n'))
     },
   )
 
@@ -557,11 +577,16 @@ export function createServer(): McpServer {
     },
     async ({ ticketId }) => {
       const cfg = config()
-      const { ticket } = await runCommand(cfg, {
+      const { ticket, plannerId } = await runCommand(cfg, {
         type: 'ticket.join',
         ticketId: ticketId as never,
       })
-      return text(`In "${ticket.title}" with ${ticket.members.length} other(s). Column: ${ticket.state}.`)
+      return text(
+        [
+          `In "${ticket.title}" with ${ticket.members.length - 1} other(s). Column: ${ticket.state}.`,
+          splitHint(cfg, ticket, plannerId),
+        ].join('\n'),
+      )
     },
   )
 
@@ -574,11 +599,28 @@ export function createServer(): McpServer {
     },
     async ({ ticketId }) => {
       const cfg = config()
-      const { ticket } = await runCommand(cfg, {
+      const { ticket, plannerId } = await runCommand(cfg, {
         type: 'ticket.start',
         ticketId: ticketId as never,
       })
-      return text(`"${ticket.title}" is ${ticket.state}.`)
+      return text([`"${ticket.title}" is ${ticket.state}.`, splitHint(cfg, ticket, plannerId)].join('\n'))
+    },
+  )
+
+  server.registerTool(
+    'ss_ticket_approve',
+    {
+      description:
+        'Accept a ticket\'s proposed split and start the work. Seeds the tasks and tells every member\'s agent what it owns.',
+      inputSchema: { ticketId: z.string() },
+    },
+    async ({ ticketId }) => {
+      const cfg = config()
+      const { ticket } = await runCommand(cfg, {
+        type: 'ticket.approve',
+        ticketId: ticketId as never,
+      })
+      return text(`"${ticket.title}" is ${ticket.state}. Everyone in it has been told what they own.`)
     },
   )
 
@@ -671,7 +713,7 @@ export function createServer(): McpServer {
             to: names.get(a.participantId) ?? a.participantId,
           })),
           next: ticketId
-            ? 'Live already -- a ticket split needs no approval. Everyone in the ticket has been told what they own; do your own tasks now.'
+            ? 'On the board now, with the proposed assignment. Anyone in the ticket can change who does what and press start; that is when the work begins.'
             : 'The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns.',
         })
       }
