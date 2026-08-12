@@ -410,6 +410,7 @@ Be prepared for these, so they read as known gaps rather than bugs:
 | Everyone signed out after a restart | `SESSION_SHARE_SECRET` was not set, so a random one was generated at boot. |
 | Board says "reconnecting" | It retries with backoff and replays what it missed; if it persists, the server is unreachable from the browser. |
 | The board shows an old session, with people you did not invite | Fixed in the current build: an invite in the URL now beats a stale token in local storage. On an older build, clear the site's local storage and reopen the `/ss:host` link. |
+| `/plugin update` says it worked but nothing changed | Check the version in `.claude-plugin/marketplace.json` against the installed one in `~/.claude*/plugins/installed_plugins.json`. Same version means the install was skipped. Uninstall and reinstall to force it. |
 | Updated the plugin and nothing changed | The daemon from before the update is still running, serving the old board. Host again (it restarts automatically now), or `/ss:stop`. `/ss:doctor` prints the running build against the installed one. |
 | The lease gate never blocks anything | That checkout is not attached — no `.session-share/session.json`. Re-run `/ss:join`. |
 | "It is not the server that minted this invite" | You reached a different session-share — usually your own, because the invite carried a loopback address. The host must re-host so the invite names their network address. Not a bad token; re-minting will not help. |

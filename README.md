@@ -65,6 +65,18 @@ To try it against something disposable, use
 For local development of session-share itself, `pnpm bundle && pnpm attach
 /path/to/repo` wires a checkout straight to your working copy instead.
 
+### Releasing
+
+Claude Code installs a plugin into a directory keyed by the version in its
+manifest, and skips the download when that version is already installed. So
+shipping new code under an old version reaches nobody: `/plugin update` reports
+success, the cached copy never changes, and the only symptom is that the fixes
+appear not to work — from the far end, indistinguishable from a broken fix.
+
+Both manifests carry the version, and `pnpm check-version` refuses a push that
+changes anything under `packages/plugin/` without bumping it. The pre-push hook
+runs it before the bundle check.
+
 ### Keeping the bundle honest
 
 `packages/plugin/bundle` is committed build output, which means it can fall
