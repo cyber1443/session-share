@@ -301,9 +301,12 @@ try {
   // what it meant.
   const toSplit = await turnEnds(bobRepo, bobHome)
   check(/Split the ticket/.test(toSplit ?? ''), "the author's agent was handed the split")
-  check(/Nobody approves this/.test(toSplit ?? ''), 'and told that nothing gates it')
+  check(
+    /goes on the board for one of them to start/.test(toSplit ?? ''),
+    'and told where the split goes',
+  )
 
-  say("Bob's agent proposes it; the work starts with no approval")
+  say("Bob's agent proposes it; the split is shown before it runs")
   const ticketSplit = JSON.parse(
     await bob.call('ss_propose', {
       contract: CONTRACT,
@@ -312,6 +315,28 @@ try {
     }),
   )
   check(ticketSplit.accepted === true, 'the validator still runs')
+
+  const ready = await bobBoard.snapshot()
+  check(
+    ready.tickets.find((t) => t.id === opened.ticket.id)?.state === 'proposed',
+    'the split is put in front of a person before it runs',
+  )
+  check(
+    ready.tasks.filter((t) => t.ticketId === opened.ticket.id).length === 0,
+    'and nothing is running yet',
+  )
+
+  say('Bob changes who does what, then presses start')
+  const reassigned = await bobBoard.command({
+    type: 'task.assign',
+    taskId: TAG_TASKS[0].id,
+    participantId: seen.participants.find((p) => p.githubLogin === 'bob').id,
+  })
+  check(
+    reassigned.assignments.find((a) => a.taskId === TAG_TASKS[0].id).manual === true,
+    'the change sticks',
+  )
+  await bobBoard.command({ type: 'ticket.approve', ticketId: opened.ticket.id })
 
   const afterSplit = await bobBoard.snapshot()
   const ticketTasks = afterSplit.tasks.filter((t) => t.ticketId === opened.ticket.id)
@@ -323,6 +348,11 @@ try {
   check(
     afterSplit.tickets.find((t) => t.id === opened.ticket.id)?.state === 'building',
     'and the card moved itself to Building',
+  )
+  check(
+    ticketTasks.find((t) => t.id === TAG_TASKS[0].id)?.assigneeId ===
+      seen.participants.find((p) => p.githubLogin === 'bob').id,
+    'with the change he made, not the original arrangement',
   )
 
   const briefed = await turnEnds(aliceRepo, aliceHome)
