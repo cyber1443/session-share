@@ -213,7 +213,7 @@ pnpm install
 pnpm e2e         # the whole product, through the real MCP tools, hook and HTTP
 pnpm peer-demo   # host + guest + a real daemon, no accounts anywhere
 pnpm demo        # the same flow through the hosted (OAuth) path
-pnpm test        # 136 tests
+pnpm test        # 139 tests
 ```
 
 `pnpm e2e` is the one that matters. It hosts, joins, plans from the board, moves
@@ -277,6 +277,18 @@ at, and hands the middle to an agent:
 Assignment is a plan; a claim is a fact. `/ss:next` hands you your own tasks
 first, falls back to unassigned ones, and takes someone else's only rather than
 leave you idle.
+
+### After a plugin update
+
+The coordination server outlives the Claude Code that started it — that is what
+lets a session survive closing a terminal — so it also outlives an update. A
+daemon started before you updated keeps running the old code *and serving the old
+board*, which looks exactly like the update having done nothing.
+
+So it is replaced rather than remembered: the server publishes the build it is
+running, hosting again notices a mismatch and restarts it, and `/ss:doctor` says
+so outright. `/ss:stop` if you want it gone now. The event log survives a
+restart; hosting the same title brings the session back with its history.
 
 ### Several plans at once
 
@@ -372,6 +384,7 @@ and once the split is approved and the contract has landed, on every machine:
 | `/ss:say` | post to the session room, or send it to the other agents |
 | `/ss:board` | reopen the live board |
 | `/ss:worktree` | a second working tree, so this repo can be in two sessions at once |
+| `/ss:stop` | stop the coordination server on this machine |
 
 ### MCP tools
 
