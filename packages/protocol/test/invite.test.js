@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
 import { isLoopbackUrl, packInvite, unpackInvite } from '../dist/invite.js'
+import { chooseSeat } from '../dist/seat.js'
 
 describe('invites', () => {
   it('round-trips the address and the token', () => {
@@ -72,5 +73,32 @@ describe('invites', () => {
     assert.equal(isLoopbackUrl('http://[::1]:4310'), true)
     assert.equal(isLoopbackUrl('http://192.168.1.24:4310'), false)
     assert.equal(isLoopbackUrl('not a url'), false)
+  })
+})
+
+describe('choosing which session a board shows', () => {
+  const invite = packInvite({ url: 'http://192.168.1.24:4310', token: 'abc.def' })
+
+  it('redeems an invite from the URL even when a token is already stored', () => {
+    // The bug this exists to stop: a board showing the session you opened last
+    // week instead of the one you were just sent.
+    assert.deepEqual(chooseSeat({ invite, hasToken: true }), { kind: 'redeem', invite })
+  })
+
+  it('redeems an invite when there is no token at all', () => {
+    assert.deepEqual(chooseSeat({ invite, hasToken: false }), { kind: 'redeem', invite })
+  })
+
+  it('falls back to the stored token when the URL carries no invite', () => {
+    assert.deepEqual(chooseSeat({ invite: null, hasToken: true }), { kind: 'stored' })
+  })
+
+  it('asks when there is neither', () => {
+    assert.deepEqual(chooseSeat({ invite: null, hasToken: false }), { kind: 'ask' })
+  })
+
+  it('ignores junk in the join parameter rather than trying to redeem it', () => {
+    assert.deepEqual(chooseSeat({ invite: 'not-an-invite', hasToken: true }), { kind: 'stored' })
+    assert.deepEqual(chooseSeat({ invite: '', hasToken: false }), { kind: 'ask' })
   })
 })

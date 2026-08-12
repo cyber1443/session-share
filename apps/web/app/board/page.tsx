@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import type { Participant, Task } from '@session-share/protocol'
+import { chooseSeat, type Participant, type Task } from '@session-share/protocol'
 import { AuthProvider, SignIn, useAuth } from '@/components/auth'
 import { PeerGate } from '@/components/peer-gate'
 import { api, peerToken } from '@/lib/api'
@@ -426,16 +426,22 @@ function Row({ label, value }: { label: string; value: string }) {
 function Gate() {
   const { me, mode, loading, refresh } = useAuth()
   const { value: slug, ready } = useQueryParam('s')
+  const { value: invite, ready: inviteReady } = useQueryParam('join')
   const [peerSlug, setPeerSlug] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
 
   /**
-   * A returning peer visitor has a token but no session in the URL. Their token
-   * is scoped to exactly one session, so the server can say which.
+   * An invite in the URL beats a token in local storage. Both are credentials
+   * and they can name different sessions -- and preferring the stored one shows
+   * the session this browser opened last, complete with its chat and its
+   * participants, while ignoring the link someone just followed.
    */
+  const seated = ready && inviteReady && !peerSlug
+  const seat = seated ? chooseSeat({ invite, hasToken: Boolean(peerToken.get()) }) : null
+
+  /** A returning visitor's token is scoped to one session; the server says which. */
   useEffect(() => {
-    if (loading || !ready || mode !== 'peer' || peerSlug || slug) return
-    if (!peerToken.get()) return
+    if (loading || mode !== 'peer' || seat?.kind !== 'stored' || slug) return
 
     setResolving(true)
     api
@@ -443,13 +449,15 @@ function Gate() {
       .then((result) => setPeerSlug(result.sessions[0]?.slug ?? null))
       .catch(() => peerToken.clear())
       .finally(() => setResolving(false))
-  }, [loading, ready, mode, peerSlug, slug])
+  }, [loading, mode, seat?.kind, slug])
 
-  if (loading || !ready || resolving) return <div className="p-6 text-xs text-mute">…</div>
+  if (loading || !ready || !inviteReady || resolving) {
+    return <div className="p-6 text-xs text-mute">…</div>
+  }
 
   // A peer board is authorised by the token it holds, not by an account.
   if (mode === 'peer') {
-    const seated = peerSlug ?? (peerToken.get() ? slug : null)
+    const seated = peerSlug ?? (seat?.kind === 'stored' ? slug : null)
     /**
      * Redeeming the invite is what gives this browser an identity, and the
      * identity was fetched before that happened -- so ask again. Without this
