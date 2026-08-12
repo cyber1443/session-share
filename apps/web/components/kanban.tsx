@@ -182,6 +182,19 @@ function Card({
         <p className="line-clamp-3 text-[10px] leading-relaxed text-mute">{ticket.body}</p>
       ) : null}
 
+      {/*
+        Splitting with nothing to show means an agent was asked and has not
+        answered yet. Saying whose, and how to wake it, is the difference
+        between "working" and "broken" -- an idle Claude Code has no turn
+        ending, so it picks the request up only when something nudges it.
+      */}
+      {ticket.state === 'splitting' && tasks.length === 0 ? (
+        <p className="text-[10px] leading-relaxed text-amber-400/80">
+          waiting on {members[0]?.displayName ?? 'an agent'} — it picks this up when their Claude
+          Code next finishes a turn. Nudge it there with <code>/ss:go</code>.
+        </p>
+      ) : null}
+
       {tasks.length > 0 ? (
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-[10px] text-mute">
