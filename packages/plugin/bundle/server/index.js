@@ -64340,9 +64340,8 @@ var SessionState = class {
       }
       case "ticket.shipped": {
         const ticket = this.tickets.get(body.ticketId);
-        if (ticket) {
-          this.tickets.set(body.ticketId, { ...ticket, prNumber: body.prNumber, state: "done" });
-        }
+        if (ticket)
+          this.tickets.set(body.ticketId, { ...ticket, prNumber: body.prNumber });
         break;
       }
       case "plan.requested":
@@ -64531,7 +64530,7 @@ var SessionState = class {
     if (!ticket)
       return "plan";
     if (ticket.prNumber !== null)
-      return "done";
+      return "review";
     const tasks = this.tasksOfTicket(ticketId);
     if (tasks.length > 0) {
       if (!tasks.every((task) => task.state === "merged"))
@@ -65393,7 +65392,7 @@ var SessionService = class {
           sessionId,
           participantId,
           [shipper],
-          `"${ticket.title}" was verified by ${by} (${command.how}). Open the pull request with ss_ship, then record it with ss_ticket_shipped so the card closes.`
+          `"${ticket.title}" was verified by ${by} (${command.how}). Open the pull request with ss_ship, then record its number with ss_ticket_shipped. Leave it open -- merging is not yours to decide.`
         );
       }
     } else {
