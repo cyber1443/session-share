@@ -67,6 +67,8 @@ export function TicketPanel({
     .filter((p): p is Participant => Boolean(p))
   const workers = members.filter((p) => p.repoPath)
   const mine = Boolean(meId && ticket.members.includes(meId as never))
+  /** Whether the agent everyone is waiting for is the one at this keyboard. */
+  const waitingOnMe = Boolean(meId && workers[0]?.id === meId)
   const merged = tasks.filter((task) => task.state === 'merged').length
   const spend = snapshot.usage
     .filter((entry) => entry.ticketId === ticket.id)
@@ -156,13 +158,36 @@ export function TicketPanel({
       ) : null}
 
       {ticket.state === 'splitting' ? (
-        <div className="panel space-y-1 p-3">
-          <p className="text-[10px] uppercase tracking-wider text-amber-400">Being split</p>
-          <p className="leading-relaxed text-mute">
-            {workers[0]?.displayName ?? 'An agent'} is reading the repository. It picks this up when
-            their Claude Code next finishes a turn — if their terminal is idle, it starts as soon as
-            they touch it.
+        <div className="panel space-y-2 p-3">
+          <p className="text-[10px] uppercase tracking-wider text-amber-400">
+            {waitingOnMe ? 'Waiting on you' : 'Being split'}
           </p>
+          {/*
+            Claiming an agent "is reading the repository" when its terminal is
+            idle is a lie the board used to tell, and it is the reason this looks
+            broken: nothing is happening, and the card says something is.
+          */}
+          <p className="leading-relaxed text-mute">
+            {waitingOnMe ? (
+              <>
+                This was handed to <strong className="text-neutral-300">your</strong> Claude Code.
+                It runs the moment that session next does anything — say anything at all in that
+                terminal, or run <code>/ss:go</code>. Nothing can start it from here: a browser
+                cannot make an idle agent take a turn.
+              </>
+            ) : (
+              <>
+                Handed to {workers[0]?.displayName ?? 'an agent'}. It runs when their Claude Code
+                next takes a turn; if their terminal is idle it waits for them, and nothing on this
+                board can hurry it.
+              </>
+            )}
+          </p>
+          {mine ? (
+            <button className="btn w-full" onClick={() => void onStart()}>
+              ask again
+            </button>
+          ) : null}
         </div>
       ) : null}
 

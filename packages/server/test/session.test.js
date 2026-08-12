@@ -915,6 +915,41 @@ describe('tickets', () => {
     assert.match(directive.body, /goes on the board for one of them to start/)
   })
 
+  it('re-sends the request when asked again, instead of doing nothing', async () => {
+    const { alice, bob, aliceId } = await twoDevSession('ticket-again')
+    const { ticket } = await open(alice, 'Add due dates')
+    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+    await settle()
+    const first = alice.eventsOfType('chat.message').filter((e) => e.body.message.directive).length
+
+    /**
+     * Pressing "ask again" while it is already splitting used to return early,
+     * so the button did nothing while the card claimed an agent was working.
+     */
+    const again = await bob.send({ type: 'ticket.start', ticketId: ticket.id })
+    assert.equal(again.plannerId, aliceId)
+    await settle()
+
+    const now = alice.eventsOfType('chat.message').filter((e) => e.body.message.directive).length
+    assert.equal(now, first + 1, 'asking again has to actually ask again')
+  })
+
+  it('does not re-ask once a split exists', async () => {
+    const { alice, bob } = await twoDevSession('ticket-nore-ask')
+    const { ticket } = await open(alice, 'Add due dates')
+    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+    await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+      ticketId: ticket.id,
+    })
+    const again = await alice.send({ type: 'ticket.start', ticketId: ticket.id })
+    assert.equal(again.plannerId, null, 'there is nothing to ask for; the split is on the board')
+  })
+
   it('splits alone when there is nobody else to wait for', async () => {
     const solo = await new TestClient(url).connect()
     await solo.send({

@@ -8,7 +8,7 @@
       "name": "ss",
       "source": "./packages/plugin",
       "description": "Split one issue across several devs and their Claude Codes: contract-first task DAG, file leases that stop two agents editing the same file, a shared room, and a live board.",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "category": "collaboration"
     }
   ]

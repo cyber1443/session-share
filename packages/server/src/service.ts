@@ -453,7 +453,13 @@ export class SessionService {
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
     const ticket = this.requireTicket(state, command.ticketId)
-    if (ticket.state !== 'plan') return { ticket, plannerId: null }
+    /**
+     * Pressing this while it is already "splitting" used to do nothing at all,
+     * which is the worst possible answer: the card says an agent is reading the
+     * repository, the button appears to work, and no work exists. Asking again
+     * re-sends the request, which is what someone pressing it means.
+     */
+    if (ticket.decompositionId) return { ticket, plannerId: null }
     const plannerId = this.beginSplit(sessionId, participantId, state, ticket)
     return { ticket: this.requireTicket(state, command.ticketId), plannerId }
   }

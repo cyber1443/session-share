@@ -194,7 +194,9 @@ function Card({
       ) : null}
       {ticket.state === 'splitting' ? (
         <p className="text-[10px] text-amber-400/80">
-          {members.find((m) => m.repoPath)?.displayName ?? 'an agent'} is planning it
+          {members.find((m) => m.repoPath)?.id === meId
+            ? 'waiting on your Claude Code'
+            : `handed to ${members.find((m) => m.repoPath)?.displayName ?? 'an agent'}`}
         </p>
       ) : null}
 
