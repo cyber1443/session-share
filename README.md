@@ -6,11 +6,12 @@ Each dev keeps their own Claude account, their own quota and their own GitHub id
 
 ## The idea in one screen
 
-1. One dev runs `/ss:plan <issue>`. Their Claude reads the repo and proposes a **contract** — the shared types, schemas and stubs everything else will import — plus a set of tasks, each owning a disjoint set of file globs and each provable by one command.
-2. A **deterministic validator** rejects the split if two concurrently-runnable tasks own the same path, if the graph has a cycle, if a task has nothing to prove it, or if a task tries to own a contract file. An LLM never decides whether two agents are about to collide.
-3. The team approves **on the board**, where the split arrives already balanced between whoever has a checkout — drag a card to change it. Approval seeds the tasks, tells each person's agent what it owns, and lands the contract on its own branch. Only then do tasks become claimable.
+1. Anyone writes a **ticket** in the board's Plan column. Everyone else is told it exists and can **join** it. Joining is the only agreement there is — no approval follows.
+2. As soon as someone joins, a member's Claude reads the repo and proposes a **contract** — the shared types, schemas and stubs everything else will import — plus tasks that own disjoint file globs and are each provable by one command.
+3. A **deterministic validator** rejects the split if two concurrently-runnable tasks own the same path, if it collides with another live ticket, if the graph has a cycle, or if a task has nothing to prove it. An LLM never decides whether two agents are about to collide. A valid split goes live immediately, shared out between whoever joined.
 4. Each dev claims a task and gets a **lease** on its paths. A `PreToolUse` hook denies any Edit or Write outside that lease, with the fix in the message. This is what makes two autonomous agents in one repo safe.
-5. Everyone — humans and agents — shares one durable room, and the board shows the DAG live. The room is also a terminal: a message sent in **run** mode is delivered into the other participants' Claude Code and acted on there.
+5. The cards move themselves. `plan → splitting → building → review → done` follows what the agents have actually done; nothing is draggable, because a column you maintain by hand drifts from the truth the moment anyone is busy.
+6. Everyone — humans and agents — shares one durable room, and the board shows the work live. The room is also a terminal: a message sent in **run** mode is delivered into the other participants' Claude Code and acted on there.
 
 ## Status
 
@@ -225,7 +226,7 @@ pnpm install
 pnpm e2e         # the whole product, through the real MCP tools, hook and HTTP
 pnpm peer-demo   # host + guest + a real daemon, no accounts anywhere
 pnpm demo        # the same flow through the hosted (OAuth) path
-pnpm test        # 144 tests
+pnpm test        # 153 tests
 ```
 
 `pnpm e2e` is the one that matters. It hosts, joins, plans from the board, moves
@@ -266,6 +267,31 @@ The board shows the same tasks two ways:
 Topics are derived from the paths a task owns rather than from labels anyone has
 to maintain: tasks are cut as vertical slices, so the folder structure already
 says what they are about.
+
+### The board
+
+Five columns. Only the first is writable:
+
+| | |
+|---|---|
+| **plan** | you write a ticket here — a title, optionally a line or two of brief |
+| **splitting** | a member's agent is reading the repo and proposing the split |
+| **building** | tasks are live, assigned, and being worked |
+| **review** | everything landed on the contract branch; the PR is next |
+| **done** | shipped, with its number on the card |
+
+Writing a ticket notifies everyone else *as a message, not a directive* — joining
+is a person's decision, and hijacking someone's agent to make it is not an offer.
+Joining starts the split, and from there it runs itself: the split is validated,
+assigned across whoever joined, and each agent is told to claim, work, test and
+land its own tasks without waiting to be asked. When the last one lands, the
+author is asked to open the pull request.
+
+**What is still gated.** The validator. Skipping approval is not the same as
+skipping the check that stops two agents editing one file — and now that several
+tickets run at once, a split is also rejected when it collides with another live
+ticket's files. Leases still apply inside a ticket, so an agent that wanders
+outside its own task is still refused.
 
 ### Planning on the board
 
@@ -404,6 +430,7 @@ and once the split is approved and the contract has landed, on every machine:
 | `/ss:say` | post to the session room, or send it to the other agents |
 | `/ss:board` | reopen the live board |
 | `/ss:worktree` | a second working tree, so this repo can be in two sessions at once |
+| `/ss:tickets` | what is on the board and what is yours |
 | `/ss:stop` | stop the coordination server on this machine |
 
 ### MCP tools
