@@ -68,6 +68,12 @@ export const EventBody = z.discriminatedUnion('type', [
     ticketId: TicketId,
     prNumber: z.number().int().nullable(),
   }),
+  /**
+   * The card is gone, along with its tasks and their leases. Anything already
+   * merged stays merged -- this removes a card from a board, not commits from a
+   * branch, and nothing here would be honest if it claimed otherwise.
+   */
+  z.object({ type: z.literal('ticket.deleted'), ticketId: TicketId }),
 
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */

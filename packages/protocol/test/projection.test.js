@@ -158,3 +158,64 @@ describe('SessionState.phaseNow', () => {
     assert.equal(state.phaseNow(), 'plan')
   })
 })
+
+describe('SessionState on a deleted ticket', () => {
+  const TASK = {
+    id: 'theme-toggle',
+    sessionId: 's1',
+    ticketId: 't1',
+    title: 'Theme toggle',
+    intent: 'flip it',
+    ownedPaths: ['src/components/theme-toggle/**'],
+    dependsOn: [],
+    assumes: [],
+    acceptance: { testCommand: 'npm test', testFiles: [], manualChecks: [] },
+    estimateMinutes: 30,
+    state: 'claimed',
+    assigneeId: 'p1',
+    ownerId: 'p1',
+    branch: null,
+    prNumber: null,
+    lastTest: null,
+    activityLine: null,
+    depth: 0,
+  }
+
+  /** Replaying the log has to reach the same place the server did. */
+  it('takes the tasks and leases with it', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: SESSION }))
+    state.apply(envelope(1, { type: 'ticket.created', ticket: TICKET }))
+    state.apply(envelope(2, { type: 'tasks.seeded', tasks: [TASK] }))
+    state.apply(
+      envelope(3, {
+        type: 'lease.granted',
+        lease: {
+          taskId: 'theme-toggle',
+          holderId: 'p1',
+          paths: ['src/components/theme-toggle/**'],
+          grantedAt: 3,
+        },
+      }),
+    )
+    assert.equal(state.tasks.size, 1)
+
+    state.apply(envelope(4, { type: 'ticket.deleted', ticketId: 't1' }))
+    assert.equal(state.tickets.size, 0)
+    assert.equal(state.tasks.size, 0, 'an orphan task stays claimable forever')
+    assert.equal(state.leases.size, 0, 'and its lease goes on denying edits')
+  })
+
+  it('leaves another ticket alone', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: SESSION }))
+    state.apply(envelope(1, { type: 'ticket.created', ticket: TICKET }))
+    state.apply(envelope(2, { type: 'ticket.created', ticket: { ...TICKET, id: 't2' } }))
+    state.apply(
+      envelope(3, { type: 'tasks.seeded', tasks: [TASK, { ...TASK, id: 'other', ticketId: 't2' }] }),
+    )
+
+    state.apply(envelope(4, { type: 'ticket.deleted', ticketId: 't1' }))
+    assert.deepEqual([...state.tasks.keys()], ['other'])
+  })
+})

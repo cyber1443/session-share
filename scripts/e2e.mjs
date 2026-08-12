@@ -489,6 +489,28 @@ try {
    * not what anyone does any more.
    */
 
+  say('A ticket nobody wants any more is thrown away, mid-flight')
+  const doomed = await aliceBoardEarly.command({
+    type: 'ticket.create',
+    title: 'Rewrite the CLI in Rust',
+    body: 'On reflection, no.',
+  })
+  await bobBoard.command({ type: 'ticket.join', ticketId: doomed.ticket.id })
+
+  // Deleted by the one who did not open it, to prove there is no owner check.
+  const gone = await bobBoard.command({ type: 'ticket.delete', ticketId: doomed.ticket.id })
+  check(gone.ticketId === doomed.ticket.id, 'anyone in the room can delete, at any stage')
+
+  const afterDelete = await aliceBoardEarly.snapshot()
+  check(
+    !afterDelete.tickets.some((t) => t.id === doomed.ticket.id),
+    'the card is gone from everyone else\'s board too',
+  )
+  check(
+    afterDelete.tickets.some((t) => t.id === opened.ticket.id),
+    'and the tickets around it are untouched',
+  )
+
   say('A second plan runs at the same time, in a worktree')
   const worktree = await alice.call('ss_worktree', { title: 'Add tags' })
   const path = worktree.match(/at (\/\S+) on/)?.[1] ?? worktree.match(/^(\/\S+) already/m)?.[1]

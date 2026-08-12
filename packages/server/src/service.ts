@@ -166,6 +166,8 @@ export class SessionService {
         return this.joinTicket(command, ctx)
       case 'ticket.leave':
         return this.leaveTicket(command, ctx)
+      case 'ticket.delete':
+        return this.deleteTicket(command, ctx)
       case 'ticket.start':
         return this.startTicket(command, ctx)
       case 'ticket.approve':
@@ -445,6 +447,78 @@ export class SessionService {
     const left = this.requireTicket(state, command.ticketId)
     if (left.decompositionId) this.rebalanceTicket(sessionId, participantId, state, left)
     return { ticket: left }
+  }
+
+  /**
+   * Throwing a card away, at any stage.
+   *
+   * Unguarded on purpose: no owner check, no members-only rule, nothing that
+   * has to be finished first. A board you cannot delete from silts up with
+   * tickets nobody will admit are dead, and asking permission to abandon an
+   * idea is exactly the ceremony this is meant to remove.
+   *
+   * What it does not do is touch git. Branches, commits and anything already
+   * merged are untouched -- this removes a card, and saying so plainly is
+   * better than a delete that quietly means something narrower than it looks.
+   */
+  private deleteTicket(
+    command: Extract<ClientCommand, { type: 'ticket.delete' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    const tasks = state.tasksOfTicket(ticket.id)
+
+    /**
+     * Released before the ticket goes, so the log shows the files coming free
+     * rather than a lease that simply stops existing. A lease outliving its
+     * task would keep denying edits for work nobody can see any more.
+     */
+    for (const task of tasks) {
+      const lease = state.leases.get(task.id)
+      if (lease) {
+        this.emit(sessionId, participantId, {
+          type: 'lease.released',
+          taskId: task.id,
+          holderId: lease.holderId,
+        })
+      }
+    }
+
+    this.emit(sessionId, participantId, { type: 'ticket.deleted', ticketId: ticket.id })
+
+    const by = state.participants.get(participantId)?.displayName ?? 'Someone'
+    const landed = tasks.filter((task) => task.state === 'merged').length
+    this.systemMessage(
+      sessionId,
+      participantId,
+      [],
+      [
+        `${by} deleted "${ticket.title}".`,
+        tasks.length > 0
+          ? ` ${tasks.length} task(s) went with it${landed > 0 ? `, ${landed} of which had already landed -- that work is still on the branch, it just has no card any more` : ''}.`
+          : '',
+      ].join(''),
+    )
+
+    /**
+     * Whoever was working on it finds out from their own agent rather than by
+     * noticing the card is gone. Stopping is the whole message; there is no
+     * task left to release.
+     */
+    const working = ticket.members.filter(
+      (id) => id !== participantId && state.participants.get(id)?.repoPath,
+    )
+    if (working.length > 0 && tasks.length > 0) {
+      this.systemDirective(
+        sessionId,
+        participantId,
+        working,
+        `${by} deleted "${ticket.title}" and its tasks are gone. Stop working on it. Anything you already landed is still on the branch; anything half-done is yours to keep or throw away.`,
+      )
+    }
+
+    return { ticketId: ticket.id, tasksRemoved: tasks.length }
   }
 
   private startTicket(

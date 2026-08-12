@@ -61,6 +61,13 @@ export const ClientCommand = z.discriminatedUnion('type', [
   /** Opting in. This is the consent step -- there is no separate approval. */
   z.object({ type: z.literal('ticket.join'), ticketId: TicketId }),
   z.object({ type: z.literal('ticket.leave'), ticketId: TicketId }),
+  /**
+   * Throw the card away, whatever stage it is at. Deliberately unguarded: a
+   * board you cannot delete from fills up with things nobody will admit are
+   * dead, and needing permission to abandon your own idea is the ceremony this
+   * is supposed to remove.
+   */
+  z.object({ type: z.literal('ticket.delete'), ticketId: TicketId }),
   /** Begin splitting now rather than waiting for someone else to join. */
   z.object({ type: z.literal('ticket.start'), ticketId: TicketId }),
   /**
@@ -243,6 +250,7 @@ export interface CommandResultMap {
   'ticket.create': { ticket: Ticket; plannerId: ParticipantId | null }
   'ticket.join': { ticket: Ticket; plannerId: ParticipantId | null }
   'ticket.leave': { ticket: Ticket }
+  'ticket.delete': { ticketId: TicketId; tasksRemoved: number }
   'ticket.start': { ticket: Ticket; plannerId: ParticipantId | null }
   'ticket.approve': { ticket: Ticket }
   'ticket.verified': { ticket: Ticket }

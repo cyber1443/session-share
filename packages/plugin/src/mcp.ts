@@ -602,6 +602,26 @@ export function createServer(): McpServer {
   )
 
   server.registerTool(
+    'ss_ticket_delete',
+    {
+      description:
+        'Delete a ticket, at any stage. Its tasks and their file leases go with it. Nothing in git is touched: branches, commits and anything already merged stay exactly where they are -- this removes a card from the board, not work from the repository.',
+      inputSchema: { ticketId: z.string() },
+    },
+    async ({ ticketId }) => {
+      const { tasksRemoved } = await runCommand(config(), {
+        type: 'ticket.delete',
+        ticketId: ticketId as never,
+      })
+      return text(
+        tasksRemoved > 0
+          ? `Deleted, along with ${tasksRemoved} task(s). Any branches and merged work are untouched.`
+          : 'Deleted. It had no tasks yet.',
+      )
+    },
+  )
+
+  server.registerTool(
     'ss_ticket_start',
     {
       description:

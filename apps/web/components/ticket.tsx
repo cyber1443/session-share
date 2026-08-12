@@ -1,5 +1,6 @@
 'use client'
 
+import { useState } from 'react'
 import type { Participant, SessionSnapshot, Ticket } from '@session-share/protocol'
 import { tokens } from '@/lib/tokens'
 
@@ -44,6 +45,7 @@ export function TicketPanel({
   onStart,
   onApprove,
   onAssign,
+  onDelete,
 }: {
   ticket: Ticket
   snapshot: SessionSnapshot
@@ -55,8 +57,16 @@ export function TicketPanel({
   onStart: () => Promise<void>
   onApprove: () => Promise<void>
   onAssign: (taskId: string, participantId: string | null) => Promise<void>
+  onDelete: () => Promise<void>
 }) {
+  /**
+   * Deleting is one click and a confirmation rather than a permission: any
+   * stage, anyone in the room. What it cannot be is a single stray click, since
+   * there is no undo on this side of it.
+   */
+  const [confirming, setConfirming] = useState(false)
   const tasks = snapshot.tasks.filter((task) => task.ticketId === ticket.id)
+  const landed = tasks.filter((task) => task.state === 'merged').length
   const decomposition =
     snapshot.decomposition?.id === ticket.decompositionId ? snapshot.decomposition : null
   const proposed = tasks.length === 0 ? (decomposition?.tasks ?? []) : []
@@ -384,6 +394,40 @@ export function TicketPanel({
           </ul>
         </div>
       ) : null}
+
+      {/* -- throwing it away ------------------------------------------------ */}
+      <div className="border-t border-line pt-3">
+        {confirming ? (
+          <div className="space-y-2">
+            <p className="leading-relaxed text-neutral-300">
+              Delete &ldquo;{ticket.title}&rdquo;
+              {tasks.length > 0 ? ` and its ${tasks.length} task${tasks.length === 1 ? '' : 's'}` : ''}?
+              {landed > 0
+                ? ` ${landed} of them already landed — that work stays on the branch, it just stops having a card.`
+                : ''}{' '}
+              Nothing in git is touched, and this cannot be undone here.
+            </p>
+            <div className="flex gap-2">
+              <button
+                className="btn border-red-500/40 text-red-400"
+                onClick={() => {
+                  setConfirming(false)
+                  void onDelete()
+                }}
+              >
+                delete it
+              </button>
+              <button className="btn" onClick={() => setConfirming(false)}>
+                keep it
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button className="btn text-mute" onClick={() => setConfirming(true)}>
+            delete ticket
+          </button>
+        )}
+      </div>
     </aside>
   )
 }

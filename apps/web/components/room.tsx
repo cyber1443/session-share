@@ -240,6 +240,8 @@ function describe(envelope: EventEnvelope): string {
         : `ran it and it is broken: ${body.verification.summary.slice(0, 60)}`
     case 'ticket.shipped':
       return body.prNumber ? `ticket shipped as #${body.prNumber}` : 'ticket closed'
+    case 'ticket.deleted':
+      return 'deleted a ticket'
     case 'plan.requested':
       return `asked for a split: ${body.goal.slice(0, 80)}`
     case 'decomposition.assigned':

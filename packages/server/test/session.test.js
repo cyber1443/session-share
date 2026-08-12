@@ -1249,6 +1249,67 @@ describe('tickets', () => {
     )
   })
 
+  /**
+   * A board you cannot delete from silts up with tickets nobody will admit are
+   * dead, so this is deliberately unguarded: any stage, anyone in the room.
+   */
+  it('deletes a ticket mid-flight, taking its tasks and their leases with it', async () => {
+    const { alice, bob } = await verifiableTicket('ticket-delete')
+    const ticket = await currentTicket(alice, 'ticket-delete')
+
+    const result = await bob.send({ type: 'ticket.delete', ticketId: ticket.id })
+    assert.equal(result.tasksRemoved, tasks.length)
+    await settle()
+
+    const snapshot = await snapshotOf(alice, 'ticket-delete')
+    assert.equal(snapshot.tickets.find((t) => t.id === ticket.id), undefined, 'the card is gone')
+    assert.equal(snapshot.tasks.length, 0, 'and takes its tasks with it')
+    assert.equal(snapshot.leases.length, 0, 'a lease outliving its task would deny edits forever')
+  })
+
+  it('deletes a ticket that has a held lease, and frees the paths', async () => {
+    const { alice, bob } = await twoDevSession('ticket-delete-held')
+    const { ticket } = await open(alice, 'Add due dates')
+    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+    await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+      ticketId: ticket.id,
+    })
+    await alice.send({ type: 'ticket.approve', ticketId: ticket.id })
+    await alice.send({
+      type: 'contract.committed',
+      branch: 'ss/ticket-delete-held/contract',
+      commitSha: 'abc1234',
+      prNumber: null,
+    })
+    await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
+
+    await alice.send({ type: 'ticket.delete', ticketId: ticket.id })
+    await settle()
+
+    const free = await bob.send({
+      type: 'lease.check',
+      paths: ['src/components/theme-toggle/index.tsx'],
+    })
+    assert.equal(free.allowed, true, 'the files come back')
+    assert.ok(
+      alice.eventsOfType('lease.released').length > 0,
+      'and the log shows them coming free rather than a lease that just stops existing',
+    )
+  })
+
+  it('lets anyone delete, whether or not they joined', async () => {
+    const { alice, bob } = await twoDevSession('ticket-delete-anyone')
+    const { ticket } = await open(alice, 'Add due dates')
+    await bob.send({ type: 'ticket.delete', ticketId: ticket.id })
+    await settle()
+    assert.equal((await snapshotOf(alice, 'ticket-delete-anyone')).tickets.length, 0)
+  })
+
   it('sends it to review once it has actually been run', async () => {
     const { alice, aliceId } = await verifiableTicket('ticket-verified')
     const ticket = await currentTicket(alice, 'ticket-verified')

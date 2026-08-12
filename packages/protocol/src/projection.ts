@@ -128,6 +128,25 @@ export class SessionState {
         if (ticket) this.tickets.set(body.ticketId, { ...ticket, prNumber: body.prNumber })
         break
       }
+      case 'ticket.deleted': {
+        /**
+         * The cascade lives here rather than only in the server, so a client
+         * replaying the log lands on the same state. A task left behind by its
+         * ticket is worse than no task at all: it stays claimable, and its
+         * lease goes on denying edits for work that no longer exists.
+         */
+        this.tickets.delete(body.ticketId)
+        for (const task of [...this.tasks.values()]) {
+          if (task.ticketId !== body.ticketId) continue
+          this.tasks.delete(task.id)
+          this.leases.delete(task.id)
+        }
+        if (this.decomposition?.ticketId === body.ticketId) {
+          this.decomposition = null
+          this.validation = null
+        }
+        break
+      }
 
       case 'plan.requested':
         if (this.session) this.session = { ...this.session, goal: body.goal, issueRef: body.issueRef }

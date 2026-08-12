@@ -235,6 +235,14 @@ function Board({ slug }: { slug: string }) {
                 }),
               )
             }
+            // Closing first: the panel is about to be describing a card that
+            // no longer exists.
+            onDelete={() =>
+              act(async () => {
+                setOpenTicket(null)
+                await send({ type: 'ticket.delete', ticketId: ticket.id })
+              })
+            }
           />
         ) : null}
       </div>
