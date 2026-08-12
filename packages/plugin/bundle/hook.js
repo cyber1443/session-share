@@ -14748,6 +14748,13 @@ var Verification = external_exports.object({
   /** How it was exercised: the command, the URL, the simulator. */
   how: external_exports.string().max(500),
   summary: external_exports.string().max(2e3),
+  /**
+   * Which tasks the failure is on. A run that fails has to say what to reopen,
+   * or the report is a complaint rather than work -- and an empty list is read
+   * as "all of them", because a ticket nobody can act on is worse than a few
+   * people being asked to look at something that turns out to be fine.
+   */
+  broke: external_exports.array(TaskId).default([]),
   by: ParticipantId,
   at: Timestamp
 });
@@ -15028,6 +15035,12 @@ var EventBody = external_exports.discriminatedUnion("type", [
     ticketId: TicketId,
     prNumber: external_exports.number().int().nullable()
   }),
+  /**
+   * The card is gone, along with its tasks and their leases. Anything already
+   * merged stays merged -- this removes a card from a board, not commits from a
+   * branch, and nothing here would be honest if it claimed otherwise.
+   */
+  external_exports.object({ type: external_exports.literal("ticket.deleted"), ticketId: TicketId }),
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
   external_exports.object({
@@ -15186,6 +15199,13 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   /** Opting in. This is the consent step -- there is no separate approval. */
   external_exports.object({ type: external_exports.literal("ticket.join"), ticketId: TicketId }),
   external_exports.object({ type: external_exports.literal("ticket.leave"), ticketId: TicketId }),
+  /**
+   * Throw the card away, whatever stage it is at. Deliberately unguarded: a
+   * board you cannot delete from fills up with things nobody will admit are
+   * dead, and needing permission to abandon your own idea is the ceremony this
+   * is supposed to remove.
+   */
+  external_exports.object({ type: external_exports.literal("ticket.delete"), ticketId: TicketId }),
   /** Begin splitting now rather than waiting for someone else to join. */
   external_exports.object({ type: external_exports.literal("ticket.start"), ticketId: TicketId }),
   /**
@@ -15200,7 +15220,9 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     ticketId: TicketId,
     passed: external_exports.boolean(),
     how: external_exports.string().max(500),
-    summary: external_exports.string().max(2e3)
+    summary: external_exports.string().max(2e3),
+    /** Failing: whose tasks to reopen. Empty reopens the lot. */
+    broke: external_exports.array(TaskId).default([])
   }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),

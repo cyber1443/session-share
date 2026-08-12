@@ -63177,6 +63177,13 @@ var Verification = external_exports.object({
   /** How it was exercised: the command, the URL, the simulator. */
   how: external_exports.string().max(500),
   summary: external_exports.string().max(2e3),
+  /**
+   * Which tasks the failure is on. A run that fails has to say what to reopen,
+   * or the report is a complaint rather than work -- and an empty list is read
+   * as "all of them", because a ticket nobody can act on is worse than a few
+   * people being asked to look at something that turns out to be fine.
+   */
+  broke: external_exports.array(TaskId).default([]),
   by: ParticipantId,
   at: Timestamp
 });
@@ -63457,6 +63464,12 @@ var EventBody = external_exports.discriminatedUnion("type", [
     ticketId: TicketId,
     prNumber: external_exports.number().int().nullable()
   }),
+  /**
+   * The card is gone, along with its tasks and their leases. Anything already
+   * merged stays merged -- this removes a card from a board, not commits from a
+   * branch, and nothing here would be honest if it claimed otherwise.
+   */
+  external_exports.object({ type: external_exports.literal("ticket.deleted"), ticketId: TicketId }),
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
   external_exports.object({
@@ -63615,6 +63628,13 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   /** Opting in. This is the consent step -- there is no separate approval. */
   external_exports.object({ type: external_exports.literal("ticket.join"), ticketId: TicketId }),
   external_exports.object({ type: external_exports.literal("ticket.leave"), ticketId: TicketId }),
+  /**
+   * Throw the card away, whatever stage it is at. Deliberately unguarded: a
+   * board you cannot delete from fills up with things nobody will admit are
+   * dead, and needing permission to abandon your own idea is the ceremony this
+   * is supposed to remove.
+   */
+  external_exports.object({ type: external_exports.literal("ticket.delete"), ticketId: TicketId }),
   /** Begin splitting now rather than waiting for someone else to join. */
   external_exports.object({ type: external_exports.literal("ticket.start"), ticketId: TicketId }),
   /**
@@ -63629,7 +63649,9 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     ticketId: TicketId,
     passed: external_exports.boolean(),
     how: external_exports.string().max(500),
-    summary: external_exports.string().max(2e3)
+    summary: external_exports.string().max(2e3),
+    /** Failing: whose tasks to reopen. Empty reopens the lot. */
+    broke: external_exports.array(TaskId).default([])
   }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
@@ -64344,6 +64366,20 @@ var SessionState = class {
           this.tickets.set(body.ticketId, { ...ticket, prNumber: body.prNumber });
         break;
       }
+      case "ticket.deleted": {
+        this.tickets.delete(body.ticketId);
+        for (const task of [...this.tasks.values()]) {
+          if (task.ticketId !== body.ticketId)
+            continue;
+          this.tasks.delete(task.id);
+          this.leases.delete(task.id);
+        }
+        if (this.decomposition?.ticketId === body.ticketId) {
+          this.decomposition = null;
+          this.validation = null;
+        }
+        break;
+      }
       case "plan.requested":
         if (this.session)
           this.session = { ...this.session, goal: body.goal, issueRef: body.issueRef };
@@ -64541,6 +64577,31 @@ var SessionState = class {
       return "proposed";
     return ticket.state === "splitting" ? "splitting" : "plan";
   }
+  /**
+   * The session's phase, worked out from the tickets rather than latched.
+   *
+   * This used to be a stored field moved by events, from `plan` to `build` when
+   * the contract landed and to `integrate` when the last task merged -- one
+   * decomposition per session, one way, no way back. Tickets made that wrong:
+   * several run at once, each with its own lifecycle, and a session that
+   * finished one ticket would sit in `integrate` forever, refusing to plan
+   * anything ever again. Derived, it cannot latch, and it cannot be stale.
+   */
+  phaseNow() {
+    const tickets = [...this.tickets.values()];
+    if (tickets.length > 0) {
+      const states = tickets.map((ticket) => this.ticketStateFor(ticket.id));
+      if (states.every((state) => state === "review"))
+        return "integrate";
+      if (states.some((state) => state === "building" || state === "verify"))
+        return "build";
+      return "plan";
+    }
+    const tasks = [...this.tasks.values()];
+    if (tasks.length === 0)
+      return "plan";
+    return tasks.every((task) => task.state === "merged") ? "integrate" : "build";
+  }
   /** Tasks whose blocked/ready state no longer matches their dependencies. */
   staleStateTasks() {
     return [...this.tasks.values()].filter((task) => {
@@ -64587,7 +64648,7 @@ var SessionState = class {
     if (!this.session)
       throw new Error("snapshot before session.created");
     return {
-      session: this.session,
+      session: { ...this.session, phase: this.phaseNow() },
       participants: [...this.participants.values()],
       tickets: [...this.tickets.values()],
       decomposition: this.decomposition,
@@ -65068,6 +65129,8 @@ var SessionService = class {
         return this.joinTicket(command, ctx);
       case "ticket.leave":
         return this.leaveTicket(command, ctx);
+      case "ticket.delete":
+        return this.deleteTicket(command, ctx);
       case "ticket.start":
         return this.startTicket(command, ctx);
       case "ticket.approve":
@@ -65293,6 +65356,57 @@ var SessionService = class {
     if (left.decompositionId) this.rebalanceTicket(sessionId, participantId, state, left);
     return { ticket: left };
   }
+  /**
+   * Throwing a card away, at any stage.
+   *
+   * Unguarded on purpose: no owner check, no members-only rule, nothing that
+   * has to be finished first. A board you cannot delete from silts up with
+   * tickets nobody will admit are dead, and asking permission to abandon an
+   * idea is exactly the ceremony this is meant to remove.
+   *
+   * What it does not do is touch git. Branches, commits and anything already
+   * merged are untouched -- this removes a card, and saying so plainly is
+   * better than a delete that quietly means something narrower than it looks.
+   */
+  deleteTicket(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    const tasks = state.tasksOfTicket(ticket.id);
+    for (const task of tasks) {
+      const lease = state.leases.get(task.id);
+      if (lease) {
+        this.emit(sessionId, participantId, {
+          type: "lease.released",
+          taskId: task.id,
+          holderId: lease.holderId
+        });
+      }
+    }
+    this.emit(sessionId, participantId, { type: "ticket.deleted", ticketId: ticket.id });
+    const by = state.participants.get(participantId)?.displayName ?? "Someone";
+    const landed = tasks.filter((task) => task.state === "merged").length;
+    this.systemMessage(
+      sessionId,
+      participantId,
+      [],
+      [
+        `${by} deleted "${ticket.title}".`,
+        tasks.length > 0 ? ` ${tasks.length} task(s) went with it${landed > 0 ? `, ${landed} of which had already landed -- that work is still on the branch, it just has no card any more` : ""}.` : ""
+      ].join("")
+    );
+    const working = ticket.members.filter(
+      (id) => id !== participantId && state.participants.get(id)?.repoPath
+    );
+    if (working.length > 0 && tasks.length > 0) {
+      this.systemDirective(
+        sessionId,
+        participantId,
+        working,
+        `${by} deleted "${ticket.title}" and its tasks are gone. Stop working on it. Anything you already landed is still on the branch; anything half-done is yours to keep or throw away.`
+      );
+    }
+    return { ticketId: ticket.id, tasksRemoved: tasks.length };
+  }
   startTicket(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const ticket = this.requireTicket(state, command.ticketId);
@@ -65345,13 +65459,14 @@ var SessionService = class {
   askForVerification(sessionId, actorId, state, ticket) {
     const who = this.verifier(state, ticket);
     if (!who) return;
+    const again = ticket.verification && !ticket.verification.passed;
     this.systemDirective(
       sessionId,
       actorId,
       [who],
       [
-        `Every task on "${ticket.title}" has landed on ${state.session?.contractBranch ?? "the contract branch"}.`,
-        "Nobody has run the whole thing yet. Do that now, before it goes anywhere near a PR:",
+        again ? `The fixes for "${ticket.title}" have landed. Last time it was run it failed: ${ticket.verification?.summary}` : `Every task on "${ticket.title}" has landed on ${state.session?.contractBranch ?? "the contract branch"}.`,
+        again ? "Run it again, the same way, and check that specific failure is gone:" : "Nobody has run the whole thing yet. Do that now, before it goes anywhere near a PR:",
         "",
         "1. ss_sync, so you have everyone's work together.",
         "2. Work out how this project actually runs -- package.json scripts, a dev server, a",
@@ -65364,14 +65479,18 @@ var SessionService = class {
         "   interesting failures are where the pieces meet.",
         "",
         "Then report with ss_ticket_verified: passed true or false, `how` you exercised it, and",
-        "what you saw. Passing sends it to review. Failing sends it back to the people who own",
-        "the broken part, so be specific about what actually happened."
+        "what you saw. Passing sends it to review. Failing reopens work, so it needs `broke`:",
+        "the ids of the tasks the failure is on. Leave `broke` out only if you truly cannot tell",
+        "-- every task reopens then, and everyone re-does work that was probably fine."
       ].join("\n")
     );
   }
   recordVerification(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const ticket = this.requireTicket(state, command.ticketId);
+    const ticketTasks = state.tasksOfTicket(ticket.id);
+    const named = new Set(command.broke);
+    const reopened = command.passed ? [] : ticketTasks.filter((task) => named.size === 0 || named.has(task.id));
     this.emit(sessionId, participantId, {
       type: "ticket.verified",
       ticketId: ticket.id,
@@ -65379,10 +65498,21 @@ var SessionService = class {
         passed: command.passed,
         how: command.how,
         summary: command.summary,
+        broke: reopened.map((task) => task.id),
         by: participantId,
         at: Date.now()
       }
     });
+    for (const task of reopened) {
+      this.emit(sessionId, participantId, {
+        type: "task.state",
+        taskId: task.id,
+        // Unowned rather than handed back to whoever had it: the person who
+        // wrote the broken part may not be the one at the keyboard now.
+        state: "ready",
+        ownerId: null
+      });
+    }
     this.refreshTicketStates(sessionId, participantId);
     const by = state.participants.get(participantId)?.displayName ?? "Someone";
     if (command.passed) {
@@ -65407,10 +65537,14 @@ var SessionService = class {
             "",
             command.summary,
             "",
-            "Fix it on your own task branches -- the lease gate still applies, so if the broken",
-            "part is not yours, say so in the room rather than reaching into it. Land the fix",
-            "with ss_done as usual and it will be run again."
-          ].join("\n")
+            `Reopened, and claimable again: ${reopened.map((task) => task.id).join(", ")}.`,
+            named.size === 0 ? "The run did not say which task broke it, so all of them are back -- claim yours," : "Claim yours and fix it:",
+            named.size === 0 ? "and if it turns out yours is fine, land it straight back with ss_done." : "",
+            "  ss_claim -> fix it -> run the acceptance command -> ss_done",
+            "Do it now, without waiting to be asked again. When the last one lands, whoever ran",
+            "it is asked to run the whole thing again -- that is the loop, and it repeats until",
+            "it actually works."
+          ].filter((line) => line !== "").join("\n")
         );
       }
     }
@@ -65511,9 +65645,6 @@ ${ticket.body}` : "",
    */
   requestPlan(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
-    if (state.session?.phase !== "plan") {
-      throw new ServiceError("not_ready", "This session is past planning.");
-    }
     const candidates = [...state.participants.values()].filter((p) => p.repoPath && p.connected);
     const requested = command.plannerId ? state.participants.get(command.plannerId) : null;
     if (command.plannerId && !requested) {
@@ -65577,9 +65708,6 @@ Issue: ${command.issueRef}` : "",
   }
   propose(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
-    if (state.session?.phase !== "plan") {
-      throw new ServiceError("not_ready", "Decomposition can only be proposed during the plan phase.");
-    }
     const validation = validateDecomposition({
       contract: command.contract,
       tasks: command.tasks,
@@ -65782,7 +65910,7 @@ Issue: ${command.issueRef}` : "",
     for (const [assignee, theirs] of byAssignee) {
       const listed = theirs.map((task) => `  ${task.id} -- ${task.title} (${task.estimateMinutes}m)${task.state === "blocked" ? `, waiting on ${task.dependsOn.join(", ")}` : ""}`).join("\n");
       const ticketId = theirs[0]?.ticketId ?? null;
-      const lands = ticketId && assignee === actorId && !contractLanded;
+      const lands = Boolean(ticketId) && assignee === actorId;
       this.systemDirective(
         sessionId,
         actorId,
@@ -65793,8 +65921,8 @@ Issue: ${command.issueRef}` : "",
           listed,
           "",
           ...ticketId ? [
-            lands ? "You proposed it, so land the contract first: ss_land_contract." : "",
-            contractLanded || lands ? "Then work them, one at a time and without waiting to be asked:" : "When the contract lands you will be told. Then work them, one at a time:",
+            lands ? "You started it, so land this ticket's contract first: ss_land_contract." : "",
+            lands ? "Then work them, one at a time and without waiting to be asked:" : "When the contract lands you will be told. Then work them, one at a time:",
             "  ss_claim -> do the work -> run the acceptance command -> ss_done",
             "Repeat until ss_claim says there is nothing left for you. Post in the room with",
             "ss_chat_post if you get stuck or need a file someone else owns."
@@ -65828,7 +65956,6 @@ Issue: ${command.issueRef}` : "",
       commitSha: command.commitSha,
       prNumber: command.prNumber
     });
-    this.emit(sessionId, participantId, { type: "session.phase", phase: "build" });
     for (const [assignee, theirs] of this.tasksByAssignee(state)) {
       if (assignee === participantId) continue;
       const ready = theirs.filter((task) => task.state === "ready");
@@ -65853,7 +65980,7 @@ Issue: ${command.issueRef}` : "",
   // -- tasks and leases ----------------------------------------------------
   claim(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
-    if (state.session?.phase !== "build") {
+    if (!state.session?.contractBranch) {
       throw new ServiceError("not_ready", "Tasks become claimable once the contract has landed.");
     }
     if (state.activeTaskCount(participantId) >= CLAIM_CAP) {
@@ -66020,12 +66147,8 @@ Issue: ${command.issueRef}` : "",
     this.refreshTicketStates(sessionId, participantId);
     const ticketId = task.ticketId;
     const ticket = ticketId ? state.tickets.get(ticketId) : null;
-    if (ticket && state.ticketStateFor(ticket.id) === "verify" && !ticket.verification) {
+    if (ticket && state.ticketStateFor(ticket.id) === "verify" && !ticket.verification?.passed) {
       this.askForVerification(sessionId, participantId, state, ticket);
-    }
-    const remaining = [...state.tasks.values()].filter((t) => t.state !== "merged");
-    if (remaining.length === 0 && state.session?.phase === "build") {
-      this.emit(sessionId, participantId, { type: "session.phase", phase: "integrate" });
     }
     return { unblocked };
   }
@@ -66040,12 +66163,12 @@ Issue: ${command.issueRef}` : "",
     for (const path of command.paths) {
       if (granted.has(path)) continue;
       const contractFile = state.decomposition?.contract.files.find((f) => f.path === path);
-      if (contractFile && state.session?.phase === "build") {
+      if (contractFile && state.session?.contractBranch) {
         denials.push({
           path,
           heldBy: null,
           heldByTaskId: null,
-          message: `${path} is a contract file and is frozen for the build phase. Raise it in chat -- changing the seam mid-flight breaks every task planned against it.`
+          message: `${path} is a contract file and is frozen now that the contract has landed. Raise it in chat -- changing the seam mid-flight breaks every task planned against it.`
         });
         continue;
       }
@@ -66592,7 +66715,7 @@ function createApp(options = {}) {
           id: state.session.id,
           slug: state.session.slug,
           title: state.session.title,
-          phase: state.session.phase,
+          phase: state.phaseNow(),
           repo: state.session.repo,
           issueRef: state.session.issueRef,
           createdAt: state.session.createdAt,
