@@ -575,7 +575,7 @@ export class SessionService {
           sessionId,
           participantId,
           [shipper],
-          `"${ticket.title}" was verified by ${by} (${command.how}). Open the pull request with ss_ship, then record it with ss_ticket_shipped so the card closes.`,
+          `"${ticket.title}" was verified by ${by} (${command.how}). Open the pull request with ss_ship, then record its number with ss_ticket_shipped. Leave it open -- merging is not yours to decide.`,
         )
       }
     } else {

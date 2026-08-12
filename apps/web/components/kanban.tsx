@@ -28,8 +28,12 @@ const COLUMNS: Array<{ states: TicketState[]; label: string; hint: string }> = [
   { states: ['splitting', 'proposed'], label: 'splitting', hint: 'being planned' },
   { states: ['building'], label: 'building', hint: 'tasks in flight' },
   { states: ['verify'], label: 'verify', hint: 'run it for real' },
-  { states: ['review'], label: 'review', hint: 'landed, PR pending' },
-  { states: ['done'], label: 'done', hint: '' },
+  /**
+   * Review is the end. Merging is a person's call, so a ticket sits here with
+   * its PR open until someone decides -- there is nothing after that this can
+   * honestly claim to know about.
+   */
+  { states: ['review', 'done'], label: 'review', hint: 'PR open — yours to merge' },
 ]
 
 export function Kanban({
@@ -175,13 +179,18 @@ function Card({
       <div className="flex items-start justify-between gap-2">
         <h3 className="text-xs leading-snug text-neutral-200">{ticket.title}</h3>
         {ticket.prNumber ? (
-          <span className="shrink-0 text-[10px] text-accent">#{ticket.prNumber}</span>
+          <span className="shrink-0 text-[10px] text-accent" title="open until you merge it">
+            PR #{ticket.prNumber}
+          </span>
         ) : null}
       </div>
 
       {/* A split that has been proposed is waiting on a person, so say so loudly. */}
       {ticket.state === 'proposed' ? (
         <p className="text-[10px] font-medium text-accent">split ready — open to start it</p>
+      ) : null}
+      {ticket.state === 'review' && !ticket.prNumber ? (
+        <p className="text-[10px] text-mute">verified — opening the pull request</p>
       ) : null}
       {ticket.state === 'verify' ? (
         <p

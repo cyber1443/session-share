@@ -122,9 +122,9 @@ export class SessionState {
       }
       case 'ticket.shipped': {
         const ticket = this.tickets.get(body.ticketId)
-        if (ticket) {
-          this.tickets.set(body.ticketId, { ...ticket, prNumber: body.prNumber, state: 'done' })
-        }
+        // The PR is the end of the board, not a step before it: a ticket sits
+        // in review with its number on it until a person merges the thing.
+        if (ticket) this.tickets.set(body.ticketId, { ...ticket, prNumber: body.prNumber })
         break
       }
 
@@ -334,7 +334,13 @@ export class SessionState {
   ticketStateFor(ticketId: TicketId): TicketState {
     const ticket = this.tickets.get(ticketId)
     if (!ticket) return 'plan'
-    if (ticket.prNumber !== null) return 'done'
+    /**
+     * A ticket with a pull request stays in review. Nothing here merges
+     * anything -- that is a decision with a human on the end of it -- so a
+     * `done` column would only ever mean "we opened a PR", which is what the
+     * review column already says.
+     */
+    if (ticket.prNumber !== null) return 'review'
 
     const tasks = this.tasksOfTicket(ticketId)
     if (tasks.length > 0) {

@@ -1297,18 +1297,33 @@ describe('tickets', () => {
     return joined.snapshot.tickets.at(-1)
   }
 
-  it('closes the card when the PR is recorded', async () => {
-    const { alice, bob } = await twoDevSession('ticket-done')
-    const { ticket } = await open(alice, 'Add due dates')
-    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+  /**
+   * Review is the last column. Nothing here merges anything, so a card that
+   * closed itself on `ss_ship` would be claiming an outcome nobody decided.
+   */
+  it('keeps a ticket in review with its PR open', async () => {
+    const { alice, aliceId } = await verifiableTicket('ticket-pr')
+    const ticket = await currentTicket(alice, 'ticket-pr')
+    await alice.send({
+      type: 'ticket.verified',
+      ticketId: ticket.id,
+      passed: true,
+      how: 'ran it',
+      summary: 'works',
+    })
 
     const shipped = await alice.send({
       type: 'ticket.shipped',
       ticketId: ticket.id,
       prNumber: 42,
     })
-    assert.equal(shipped.ticket.state, 'done')
     assert.equal(shipped.ticket.prNumber, 42)
+    assert.equal(shipped.ticket.state, 'review', 'it waits there until a person merges it')
+
+    // And it stays there: nothing later moves it on by itself.
+    const later = await currentTicket(alice, 'ticket-pr')
+    assert.equal(later.state, 'review')
+    assert.ok(aliceId)
   })
 
   it('will not let someone walk away from work they are holding', async () => {

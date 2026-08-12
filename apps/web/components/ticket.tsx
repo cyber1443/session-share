@@ -81,7 +81,7 @@ export function TicketPanel({
           <h2 className="text-sm leading-snug text-neutral-200">{ticket.title}</h2>
           <p className="mt-1 text-[10px] uppercase tracking-wider text-mute">
             {ticket.state}
-            {ticket.prNumber ? ` · PR #${ticket.prNumber}` : ''}
+            {ticket.prNumber ? ` · PR #${ticket.prNumber} open` : ''}
           </p>
         </div>
         <button className="text-mute hover:text-neutral-300" onClick={onClose}>
@@ -90,6 +90,18 @@ export function TicketPanel({
       </div>
 
       {ticket.body ? <p className="leading-relaxed text-neutral-400">{ticket.body}</p> : null}
+
+      {ticket.prNumber ? (
+        <div className="panel space-y-1 p-3">
+          <p className="text-[10px] uppercase tracking-wider text-accent">
+            Pull request #{ticket.prNumber}
+          </p>
+          <p className="leading-relaxed text-mute">
+            Open, and staying open. Nothing here merges anything — review it and merge it yourself
+            when you are happy with it.
+          </p>
+        </div>
+      ) : null}
 
       {/* What this ticket has cost, and on whose account. */}
       {spend.length > 0 ? (

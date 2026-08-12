@@ -674,7 +674,7 @@ export function createServer(): McpServer {
     'ss_ticket_shipped',
     {
       description:
-        'Record the pull request that finished a ticket, which closes its card. Call it after ss_ship.',
+        'Record the pull request opened for a ticket. The card stays in review with the number on it -- merging is a human decision and nothing here does it.',
       inputSchema: { ticketId: z.string(), prNumber: z.number().int().nullish() },
     },
     async ({ ticketId, prNumber }) => {
@@ -684,7 +684,9 @@ export function createServer(): McpServer {
         ticketId: ticketId as never,
         prNumber: prNumber ?? null,
       })
-      return text(`"${ticket.title}" is done${ticket.prNumber ? ` (PR #${ticket.prNumber})` : ''}.`)
+      return text(
+        `"${ticket.title}" has PR #${ticket.prNumber ?? '?'} open. It stays in review until someone merges it.`,
+      )
     },
   )
 
