@@ -63385,6 +63385,17 @@ var ChatMessage = external_exports.object({
   directive: external_exports.boolean().default(false),
   createdAt: Timestamp
 });
+var Usage = external_exports.object({
+  participantId: ParticipantId,
+  /** The ticket their work was against, when they were holding one of its tasks. */
+  ticketId: TicketId.nullable().default(null),
+  inputTokens: external_exports.number().int().nonnegative().default(0),
+  outputTokens: external_exports.number().int().nonnegative().default(0),
+  cacheReadTokens: external_exports.number().int().nonnegative().default(0),
+  cacheCreationTokens: external_exports.number().int().nonnegative().default(0),
+  /** Assistant turns counted, so an average is available. */
+  turns: external_exports.number().int().nonnegative().default(0)
+});
 var MergeQueueEntry = external_exports.object({
   taskId: TaskId,
   position: external_exports.number().int().nonnegative(),
@@ -63402,6 +63413,7 @@ var SessionSnapshot = external_exports.object({
   leases: external_exports.array(Lease),
   handoffs: external_exports.array(HandoffRequest),
   chat: external_exports.array(ChatMessage),
+  usage: external_exports.array(Usage).default([]),
   mergeQueue: external_exports.array(MergeQueueEntry),
   seq: external_exports.number().int().nonnegative()
 });
@@ -63530,6 +63542,16 @@ var EventBody = external_exports.discriminatedUnion("type", [
   // -- chat -----------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("chat.message"), message: ChatMessage }),
   // -- merge queue ----------------------------------------------------------
+  external_exports.object({
+    type: external_exports.literal("usage.recorded"),
+    participantId: ParticipantId,
+    ticketId: TicketId.nullable(),
+    inputTokens: external_exports.number().int().nonnegative(),
+    outputTokens: external_exports.number().int().nonnegative(),
+    cacheReadTokens: external_exports.number().int().nonnegative(),
+    cacheCreationTokens: external_exports.number().int().nonnegative(),
+    turns: external_exports.number().int().nonnegative()
+  }),
   external_exports.object({ type: external_exports.literal("merge.queue"), entries: external_exports.array(MergeQueueEntry) }),
   external_exports.object({
     type: external_exports.literal("merge.conflict"),
@@ -63697,6 +63719,18 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     limit: external_exports.number().int().min(1).max(200).default(50),
     beforeSeq: Seq.nullable().default(null),
     taskRef: TaskId.nullable().default(null)
+  }),
+  /**
+   * Tokens this participant's own account spent since the last report. Sent by
+   * the Stop hook, which is handed the transcript Claude Code just wrote.
+   */
+  external_exports.object({
+    type: external_exports.literal("usage.report"),
+    inputTokens: external_exports.number().int().nonnegative(),
+    outputTokens: external_exports.number().int().nonnegative(),
+    cacheReadTokens: external_exports.number().int().nonnegative().default(0),
+    cacheCreationTokens: external_exports.number().int().nonnegative().default(0),
+    turns: external_exports.number().int().nonnegative().default(0)
   }),
   external_exports.object({
     type: external_exports.literal("activity.report"),
@@ -64233,6 +64267,8 @@ var SessionState = class {
   leases = /* @__PURE__ */ new Map();
   handoffs = /* @__PURE__ */ new Map();
   chat = [];
+  /** Keyed by `participant|ticket`, so both totals fall out of one map. */
+  usage = /* @__PURE__ */ new Map();
   mergeQueue = [];
   apply(envelope) {
     if (envelope.seq <= this.seq)
@@ -64403,6 +64439,27 @@ var SessionState = class {
       case "chat.message":
         this.chat.push(body.message);
         break;
+      case "usage.recorded": {
+        const key = `${body.participantId}|${body.ticketId ?? ""}`;
+        const at = this.usage.get(key) ?? {
+          participantId: body.participantId,
+          ticketId: body.ticketId,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          turns: 0
+        };
+        this.usage.set(key, {
+          ...at,
+          inputTokens: at.inputTokens + body.inputTokens,
+          outputTokens: at.outputTokens + body.outputTokens,
+          cacheReadTokens: at.cacheReadTokens + body.cacheReadTokens,
+          cacheCreationTokens: at.cacheCreationTokens + body.cacheCreationTokens,
+          turns: at.turns + body.turns
+        });
+        break;
+      }
       case "merge.queue":
         this.mergeQueue = body.entries;
         break;
@@ -64520,6 +64577,10 @@ var SessionState = class {
       this.handoffs.set(handoff.id, handoff);
     this.chat.length = 0;
     this.chat.push(...snapshot.chat);
+    this.usage.clear();
+    for (const entry of snapshot.usage ?? []) {
+      this.usage.set(`${entry.participantId}|${entry.ticketId ?? ""}`, entry);
+    }
     this.mergeQueue = snapshot.mergeQueue;
     this.seq = snapshot.seq;
   }
@@ -64536,6 +64597,7 @@ var SessionState = class {
       leases: [...this.leases.values()],
       handoffs: [...this.handoffs.values()],
       chat: this.chat,
+      usage: [...this.usage.values()],
       mergeQueue: this.mergeQueue,
       seq: this.seq
     };
@@ -64941,6 +65003,7 @@ var ServiceError = class extends Error {
 };
 var PALETTE_SIZE = 8;
 var UNANIMOUS_UP_TO = 3;
+var PRESENT_FOR_MS = 10 * 60 * 1e3;
 var SessionService = class {
   constructor(store, broadcast, relayFrame) {
     this.store = store;
@@ -64951,6 +65014,8 @@ var SessionService = class {
   broadcast;
   relayFrame;
   states = /* @__PURE__ */ new Map();
+  /** Public so a test can age someone out without waiting ten minutes. */
+  lastSeen = /* @__PURE__ */ new Map();
   // -- state access --------------------------------------------------------
   /** Folds the log on first touch; afterwards the map is the live projection. */
   state(sessionId) {
@@ -64967,10 +65032,30 @@ var SessionService = class {
     this.broadcast(sessionId, envelope);
     return envelope;
   }
+  /** Marks someone present now -- used when a socket opens. */
+  seen(participantId) {
+    this.lastSeen.set(participantId, Date.now());
+  }
+  /**
+   * The snapshot everyone actually reads, with presence resolved from when each
+   * participant was last heard from rather than from a flag nobody clears.
+   */
+  snapshotOf(sessionId) {
+    const snapshot = this.state(sessionId).snapshot();
+    const now = Date.now();
+    return {
+      ...snapshot,
+      participants: snapshot.participants.map((participant) => ({
+        ...participant,
+        connected: participant.connected && now - (this.lastSeen.get(participant.id) ?? participant.joinedAt) < PRESENT_FOR_MS
+      }))
+    };
+  }
   readEvents(sessionId, fromSeq, limit) {
     return this.store.readEvents(sessionId, fromSeq, limit);
   }
   handle(command, ctx) {
+    if (ctx.participantId) this.lastSeen.set(ctx.participantId, Date.now());
     switch (command.type) {
       case "session.create":
         return this.createSession(command);
@@ -65026,6 +65111,8 @@ var SessionService = class {
         return this.postChat(command, ctx);
       case "chat.read":
         return this.readChat(command, ctx);
+      case "usage.report":
+        return this.recordUsage(command, ctx);
       case "activity.report":
         return this.reportActivity(command, ctx);
     }
@@ -65119,7 +65206,7 @@ var SessionService = class {
     return {
       participantId,
       sessionId,
-      snapshot: command.fromSeq === null ? state.snapshot() : null
+      snapshot: command.fromSeq === null ? this.snapshotOf(sessionId) : null
     };
   }
   // -- decomposition -------------------------------------------------------
@@ -66059,6 +66146,28 @@ Issue: ${command.issueRef}` : "",
     const filtered = command.taskRef ? state.chat.filter((m) => m.taskRef === command.taskRef) : state.chat;
     return { messages: filtered.slice(-command.limit) };
   }
+  /**
+   * Attributed to whatever they are holding, so cost lands on the ticket that
+   * caused it rather than in one undifferentiated pile.
+   */
+  recordUsage(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    if (command.inputTokens + command.outputTokens === 0) return { ok: true };
+    const held = [...state.tasks.values()].find(
+      (task) => task.ownerId === participantId && task.state !== "merged"
+    );
+    this.emit(sessionId, participantId, {
+      type: "usage.recorded",
+      participantId,
+      ticketId: held?.ticketId ?? null,
+      inputTokens: command.inputTokens,
+      outputTokens: command.outputTokens,
+      cacheReadTokens: command.cacheReadTokens,
+      cacheCreationTokens: command.cacheCreationTokens,
+      turns: command.turns
+    });
+    return { ok: true };
+  }
   reportActivity(command, ctx) {
     const { sessionId, participantId } = this.requireParticipant(ctx);
     this.emit(sessionId, participantId, {
@@ -66541,7 +66650,7 @@ function createApp(options = {}) {
     if (claims && claims.sessionId !== sessionId) {
       return reply.code(403).send({ error: "forbidden", message: "That token is for another session." });
     }
-    return service.state(sessionId).snapshot();
+    return service.snapshotOf(sessionId);
   });
   fastify.post("/api/sessions/:ref/join-token", async (request, reply) => {
     const user = requireUser(request, reply);

@@ -14658,8 +14658,12 @@ function describeDirectives(messages, names) {
     "",
     ...lines,
     "",
-    "Act on it in this repository now. Your file leases still apply, so an edit outside your task will be refused.",
-    "Reply in the room with ss_chat_post when you are done or if you need something from them."
+    "Do it now, in this turn, without asking whether you should. It was addressed to you by",
+    "someone who has already agreed to it -- asking them to confirm it a second time is the",
+    "coordination this exists to remove.",
+    "",
+    "Your file leases still apply, so an edit outside your task will be refused. Reply in the",
+    "room with ss_chat_post when you are done, or if you are genuinely stuck."
   ].join("\n");
 }
 
@@ -14952,6 +14956,17 @@ var ChatMessage = external_exports.object({
   directive: external_exports.boolean().default(false),
   createdAt: Timestamp
 });
+var Usage = external_exports.object({
+  participantId: ParticipantId,
+  /** The ticket their work was against, when they were holding one of its tasks. */
+  ticketId: TicketId.nullable().default(null),
+  inputTokens: external_exports.number().int().nonnegative().default(0),
+  outputTokens: external_exports.number().int().nonnegative().default(0),
+  cacheReadTokens: external_exports.number().int().nonnegative().default(0),
+  cacheCreationTokens: external_exports.number().int().nonnegative().default(0),
+  /** Assistant turns counted, so an average is available. */
+  turns: external_exports.number().int().nonnegative().default(0)
+});
 var MergeQueueEntry = external_exports.object({
   taskId: TaskId,
   position: external_exports.number().int().nonnegative(),
@@ -14969,6 +14984,7 @@ var SessionSnapshot = external_exports.object({
   leases: external_exports.array(Lease),
   handoffs: external_exports.array(HandoffRequest),
   chat: external_exports.array(ChatMessage),
+  usage: external_exports.array(Usage).default([]),
   mergeQueue: external_exports.array(MergeQueueEntry),
   seq: external_exports.number().int().nonnegative()
 });
@@ -15097,6 +15113,16 @@ var EventBody = external_exports.discriminatedUnion("type", [
   // -- chat -----------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("chat.message"), message: ChatMessage }),
   // -- merge queue ----------------------------------------------------------
+  external_exports.object({
+    type: external_exports.literal("usage.recorded"),
+    participantId: ParticipantId,
+    ticketId: TicketId.nullable(),
+    inputTokens: external_exports.number().int().nonnegative(),
+    outputTokens: external_exports.number().int().nonnegative(),
+    cacheReadTokens: external_exports.number().int().nonnegative(),
+    cacheCreationTokens: external_exports.number().int().nonnegative(),
+    turns: external_exports.number().int().nonnegative()
+  }),
   external_exports.object({ type: external_exports.literal("merge.queue"), entries: external_exports.array(MergeQueueEntry) }),
   external_exports.object({
     type: external_exports.literal("merge.conflict"),
@@ -15264,6 +15290,18 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     limit: external_exports.number().int().min(1).max(200).default(50),
     beforeSeq: Seq.nullable().default(null),
     taskRef: TaskId.nullable().default(null)
+  }),
+  /**
+   * Tokens this participant's own account spent since the last report. Sent by
+   * the Stop hook, which is handed the transcript Claude Code just wrote.
+   */
+  external_exports.object({
+    type: external_exports.literal("usage.report"),
+    inputTokens: external_exports.number().int().nonnegative(),
+    outputTokens: external_exports.number().int().nonnegative(),
+    cacheReadTokens: external_exports.number().int().nonnegative().default(0),
+    cacheCreationTokens: external_exports.number().int().nonnegative().default(0),
+    turns: external_exports.number().int().nonnegative().default(0)
   }),
   external_exports.object({
     type: external_exports.literal("activity.report"),
@@ -15437,6 +15475,73 @@ function readPreferences() {
   }
 }
 
+// packages/plugin/src/usage.ts
+import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync5, statSync as statSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join5 } from "node:path";
+var EMPTY = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheCreationTokens: 0,
+  turns: 0
+};
+function stateDir2() {
+  return process.env.SESSION_SHARE_HOME ?? join5(homedir3(), ".session-share");
+}
+var offsetsFile = () => join5(stateDir2(), "usage.json");
+function readOffsets() {
+  const path = offsetsFile();
+  if (!existsSync5(path)) return {};
+  try {
+    return JSON.parse(readFileSync5(path, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function writeOffset(transcript, bytes) {
+  mkdirSync5(stateDir2(), { recursive: true });
+  writeFileSync5(offsetsFile(), `${JSON.stringify({ ...readOffsets(), [transcript]: bytes }, null, 2)}
+`);
+}
+function usageSince(transcriptPath) {
+  if (!transcriptPath || !existsSync5(transcriptPath)) return EMPTY;
+  let size;
+  try {
+    size = statSync2(transcriptPath).size;
+  } catch {
+    return EMPTY;
+  }
+  const seen = readOffsets()[transcriptPath] ?? 0;
+  const from = seen > size ? 0 : seen;
+  if (from === size) return EMPTY;
+  let text;
+  try {
+    text = readFileSync5(transcriptPath, "utf8").slice(from);
+  } catch {
+    return EMPTY;
+  }
+  const delta = { ...EMPTY };
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const usage = entry.message?.usage;
+    if (!usage) continue;
+    delta.inputTokens += usage.input_tokens ?? 0;
+    delta.outputTokens += usage.output_tokens ?? 0;
+    delta.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
+    delta.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
+    delta.turns += 1;
+  }
+  writeOffset(transcriptPath, size);
+  return delta;
+}
+
 // packages/plugin/src/hook.ts
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 var TIMEOUT_MS = 1500;
@@ -15507,6 +15612,16 @@ async function collectRoom(input) {
   if (pending.length === 0) return null;
   return describeDirectives(pending, await participantNames(config2));
 }
+async function reportUsage(input) {
+  const config2 = readConfig(input.cwd ?? process.cwd());
+  if (!config2) return;
+  const delta = usageSince(input.transcript_path);
+  if (delta.inputTokens + delta.outputTokens === 0) return;
+  try {
+    await runCommand(config2, { type: "usage.report", ...delta }, ROOM_TIMEOUT_MS);
+  } catch {
+  }
+}
 async function route(input) {
   const event = input.hook_event_name ?? (input.tool_name ? "PreToolUse" : "");
   switch (event) {
@@ -15518,6 +15633,7 @@ async function route(input) {
      * continue with the directive as its instruction.
      */
     case "Stop": {
+      await reportUsage(input);
       if (input.stop_hook_active) return null;
       const reason = await collectRoom(input);
       return reason ? { decision: "block", reason } : null;

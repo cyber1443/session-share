@@ -31284,6 +31284,17 @@ var ChatMessage = external_exports.object({
   directive: external_exports.boolean().default(false),
   createdAt: Timestamp
 });
+var Usage = external_exports.object({
+  participantId: ParticipantId,
+  /** The ticket their work was against, when they were holding one of its tasks. */
+  ticketId: TicketId.nullable().default(null),
+  inputTokens: external_exports.number().int().nonnegative().default(0),
+  outputTokens: external_exports.number().int().nonnegative().default(0),
+  cacheReadTokens: external_exports.number().int().nonnegative().default(0),
+  cacheCreationTokens: external_exports.number().int().nonnegative().default(0),
+  /** Assistant turns counted, so an average is available. */
+  turns: external_exports.number().int().nonnegative().default(0)
+});
 var MergeQueueEntry = external_exports.object({
   taskId: TaskId,
   position: external_exports.number().int().nonnegative(),
@@ -31301,6 +31312,7 @@ var SessionSnapshot = external_exports.object({
   leases: external_exports.array(Lease),
   handoffs: external_exports.array(HandoffRequest),
   chat: external_exports.array(ChatMessage),
+  usage: external_exports.array(Usage).default([]),
   mergeQueue: external_exports.array(MergeQueueEntry),
   seq: external_exports.number().int().nonnegative()
 });
@@ -31429,6 +31441,16 @@ var EventBody = external_exports.discriminatedUnion("type", [
   // -- chat -----------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("chat.message"), message: ChatMessage }),
   // -- merge queue ----------------------------------------------------------
+  external_exports.object({
+    type: external_exports.literal("usage.recorded"),
+    participantId: ParticipantId,
+    ticketId: TicketId.nullable(),
+    inputTokens: external_exports.number().int().nonnegative(),
+    outputTokens: external_exports.number().int().nonnegative(),
+    cacheReadTokens: external_exports.number().int().nonnegative(),
+    cacheCreationTokens: external_exports.number().int().nonnegative(),
+    turns: external_exports.number().int().nonnegative()
+  }),
   external_exports.object({ type: external_exports.literal("merge.queue"), entries: external_exports.array(MergeQueueEntry) }),
   external_exports.object({
     type: external_exports.literal("merge.conflict"),
@@ -31596,6 +31618,18 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     limit: external_exports.number().int().min(1).max(200).default(50),
     beforeSeq: Seq.nullable().default(null),
     taskRef: TaskId.nullable().default(null)
+  }),
+  /**
+   * Tokens this participant's own account spent since the last report. Sent by
+   * the Stop hook, which is handed the transcript Claude Code just wrote.
+   */
+  external_exports.object({
+    type: external_exports.literal("usage.report"),
+    inputTokens: external_exports.number().int().nonnegative(),
+    outputTokens: external_exports.number().int().nonnegative(),
+    cacheReadTokens: external_exports.number().int().nonnegative().default(0),
+    cacheCreationTokens: external_exports.number().int().nonnegative().default(0),
+    turns: external_exports.number().int().nonnegative().default(0)
   }),
   external_exports.object({
     type: external_exports.literal("activity.report"),
@@ -32139,8 +32173,12 @@ function describeDirectives(messages, names) {
     "",
     ...lines,
     "",
-    "Act on it in this repository now. Your file leases still apply, so an edit outside your task will be refused.",
-    "Reply in the room with ss_chat_post when you are done or if you need something from them."
+    "Do it now, in this turn, without asking whether you should. It was addressed to you by",
+    "someone who has already agreed to it -- asking them to confirm it a second time is the",
+    "coordination this exists to remove.",
+    "",
+    "Your file leases still apply, so an edit outside your task will be refused. Reply in the",
+    "room with ss_chat_post when you are done, or if you are genuinely stuck."
   ].join("\n");
 }
 
@@ -32880,17 +32918,18 @@ function createServer() {
   server.registerTool(
     "ss_host",
     {
-      description: "Start hosting a session from this machine. Brings up a local coordination server if one is not already running, creates the session for this repository, attaches this checkout, and returns the single string to send a teammate.",
+      description: "Start hosting a session for this repository. Brings up a local coordination server if one is not already running, attaches this checkout, and returns the single string to send a teammate. Work is organised as tickets on the board, so the session does not need a name of its own.",
       inputSchema: {
-        title: external_exports.string().describe('What the session is for, e.g. "Add a dark mode toggle"'),
+        title: external_exports.string().nullish().describe("Rarely needed: the session is named after the repository by default"),
         issueRef: external_exports.string().nullish().describe("Issue URL, if there is one"),
         expose: external_exports.enum(["lan", "loopback"]).nullish().describe(
           "lan lets teammates on the same network connect; loopback is this machine only. Defaults to your saved preference."
         )
       }
     },
-    async ({ title, issueRef, expose }) => {
+    async ({ title: given, issueRef, expose }) => {
       const root = await repoRoot(REPO_ROOT);
+      const title = given?.trim() || basename(root);
       const identity = await localIdentity();
       const daemon = await ensureDaemon({ expose: expose ?? readPreferences().expose });
       const loopback = `http://127.0.0.1:${daemon.port}`;
