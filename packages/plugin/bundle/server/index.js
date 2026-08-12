@@ -7862,7 +7862,7 @@ var require_thread_stream = __commonJS({
     var { version: version2 } = require_package();
     var { EventEmitter } = __require("events");
     var { Worker } = __require("worker_threads");
-    var { join } = __require("path");
+    var { join: join2 } = __require("path");
     var { pathToFileURL } = __require("url");
     var { wait } = require_wait();
     var {
@@ -7913,7 +7913,7 @@ var require_thread_stream = __commonJS({
     function createWorker(stream, opts) {
       const { filename, workerData } = opts;
       const bundlerOverrides = "__bundlerPathsOverrides" in globalThis ? globalThis.__bundlerPathsOverrides : {};
-      const toExecute = bundlerOverrides["thread-stream-worker"] || join(__dirname, "lib", "worker.js");
+      const toExecute = bundlerOverrides["thread-stream-worker"] || join2(__dirname, "lib", "worker.js");
       const worker = new Worker(toExecute, {
         ...opts.workerOpts,
         name: opts.workerOpts?.name || "thread-stream",
@@ -8379,9 +8379,9 @@ var require_transport = __commonJS({
   "node_modules/.pnpm/pino@10.3.1/node_modules/pino/lib/transport.js"(exports, module) {
     "use strict";
     var { createRequire } = __require("module");
-    var { existsSync: existsSync2 } = __require("node:fs");
+    var { existsSync: existsSync3 } = __require("node:fs");
     var getCallers = require_caller();
-    var { join, isAbsolute, sep } = __require("node:path");
+    var { join: join2, isAbsolute, sep } = __require("node:path");
     var { fileURLToPath: fileURLToPath2 } = __require("node:url");
     var sleep = require_atomic_sleep();
     var onExit = require_on_exit_leak_free();
@@ -8453,7 +8453,7 @@ var require_transport = __commonJS({
           return false;
         }
       }
-      return isAbsolute(path) && !existsSync2(path);
+      return isAbsolute(path) && !existsSync3(path);
     }
     function stripQuotes(value) {
       const first = value[0];
@@ -8534,7 +8534,7 @@ var require_transport = __commonJS({
         throw new Error("only one of target or targets can be specified");
       }
       if (targets) {
-        target = bundlerOverrides["pino-worker"] || join(__dirname, "worker.js");
+        target = bundlerOverrides["pino-worker"] || join2(__dirname, "worker.js");
         options.targets = targets.filter((dest) => dest.target).map((dest) => {
           return {
             ...dest,
@@ -8552,7 +8552,7 @@ var require_transport = __commonJS({
           });
         });
       } else if (pipeline) {
-        target = bundlerOverrides["pino-worker"] || join(__dirname, "worker.js");
+        target = bundlerOverrides["pino-worker"] || join2(__dirname, "worker.js");
         options.pipelines = [pipeline.map((dest) => {
           return {
             ...dest,
@@ -8575,7 +8575,7 @@ var require_transport = __commonJS({
           return origin;
         }
         if (origin === "pino/file") {
-          return join(__dirname, "..", "file.js");
+          return join2(__dirname, "..", "file.js");
         }
         let fixTarget2;
         for (const filePath of callers) {
@@ -9555,7 +9555,7 @@ var require_safe_stable_stringify = __commonJS({
               return circularValue;
             }
             let res = "";
-            let join = ",";
+            let join2 = ",";
             const originalIndentation = indentation;
             if (Array.isArray(value)) {
               if (value.length === 0) {
@@ -9569,7 +9569,7 @@ var require_safe_stable_stringify = __commonJS({
                 indentation += spacer;
                 res += `
 ${indentation}`;
-                join = `,
+                join2 = `,
 ${indentation}`;
               }
               const maximumValuesToStringify = Math.min(value.length, maximumBreadth);
@@ -9577,13 +9577,13 @@ ${indentation}`;
               for (; i < maximumValuesToStringify - 1; i++) {
                 const tmp2 = stringifyFnReplacer(String(i), value, stack, replacer, spacer, indentation);
                 res += tmp2 !== void 0 ? tmp2 : "null";
-                res += join;
+                res += join2;
               }
               const tmp = stringifyFnReplacer(String(i), value, stack, replacer, spacer, indentation);
               res += tmp !== void 0 ? tmp : "null";
               if (value.length - 1 > maximumBreadth) {
                 const removedKeys = value.length - maximumBreadth - 1;
-                res += `${join}"... ${getItemCount(removedKeys)} not stringified"`;
+                res += `${join2}"... ${getItemCount(removedKeys)} not stringified"`;
               }
               if (spacer !== "") {
                 res += `
@@ -9604,7 +9604,7 @@ ${originalIndentation}`;
             let separator = "";
             if (spacer !== "") {
               indentation += spacer;
-              join = `,
+              join2 = `,
 ${indentation}`;
               whitespace = " ";
             }
@@ -9618,13 +9618,13 @@ ${indentation}`;
               const tmp = stringifyFnReplacer(key2, value, stack, replacer, spacer, indentation);
               if (tmp !== void 0) {
                 res += `${separator}${strEscape(key2)}:${whitespace}${tmp}`;
-                separator = join;
+                separator = join2;
               }
             }
             if (keyLength > maximumBreadth) {
               const removedKeys = keyLength - maximumBreadth;
               res += `${separator}"...":${whitespace}"${getItemCount(removedKeys)} not stringified"`;
-              separator = join;
+              separator = join2;
             }
             if (spacer !== "" && separator.length > 1) {
               res = `
@@ -9665,7 +9665,7 @@ ${originalIndentation}`;
             }
             const originalIndentation = indentation;
             let res = "";
-            let join = ",";
+            let join2 = ",";
             if (Array.isArray(value)) {
               if (value.length === 0) {
                 return "[]";
@@ -9678,7 +9678,7 @@ ${originalIndentation}`;
                 indentation += spacer;
                 res += `
 ${indentation}`;
-                join = `,
+                join2 = `,
 ${indentation}`;
               }
               const maximumValuesToStringify = Math.min(value.length, maximumBreadth);
@@ -9686,13 +9686,13 @@ ${indentation}`;
               for (; i < maximumValuesToStringify - 1; i++) {
                 const tmp2 = stringifyArrayReplacer(String(i), value[i], stack, replacer, spacer, indentation);
                 res += tmp2 !== void 0 ? tmp2 : "null";
-                res += join;
+                res += join2;
               }
               const tmp = stringifyArrayReplacer(String(i), value[i], stack, replacer, spacer, indentation);
               res += tmp !== void 0 ? tmp : "null";
               if (value.length - 1 > maximumBreadth) {
                 const removedKeys = value.length - maximumBreadth - 1;
-                res += `${join}"... ${getItemCount(removedKeys)} not stringified"`;
+                res += `${join2}"... ${getItemCount(removedKeys)} not stringified"`;
               }
               if (spacer !== "") {
                 res += `
@@ -9705,7 +9705,7 @@ ${originalIndentation}`;
             let whitespace = "";
             if (spacer !== "") {
               indentation += spacer;
-              join = `,
+              join2 = `,
 ${indentation}`;
               whitespace = " ";
             }
@@ -9714,7 +9714,7 @@ ${indentation}`;
               const tmp = stringifyArrayReplacer(key2, value[key2], stack, replacer, spacer, indentation);
               if (tmp !== void 0) {
                 res += `${separator}${strEscape(key2)}:${whitespace}${tmp}`;
-                separator = join;
+                separator = join2;
               }
             }
             if (spacer !== "" && separator.length > 1) {
@@ -9772,20 +9772,20 @@ ${originalIndentation}`;
               indentation += spacer;
               let res2 = `
 ${indentation}`;
-              const join2 = `,
+              const join3 = `,
 ${indentation}`;
               const maximumValuesToStringify = Math.min(value.length, maximumBreadth);
               let i = 0;
               for (; i < maximumValuesToStringify - 1; i++) {
                 const tmp2 = stringifyIndent(String(i), value[i], stack, spacer, indentation);
                 res2 += tmp2 !== void 0 ? tmp2 : "null";
-                res2 += join2;
+                res2 += join3;
               }
               const tmp = stringifyIndent(String(i), value[i], stack, spacer, indentation);
               res2 += tmp !== void 0 ? tmp : "null";
               if (value.length - 1 > maximumBreadth) {
                 const removedKeys = value.length - maximumBreadth - 1;
-                res2 += `${join2}"... ${getItemCount(removedKeys)} not stringified"`;
+                res2 += `${join3}"... ${getItemCount(removedKeys)} not stringified"`;
               }
               res2 += `
 ${originalIndentation}`;
@@ -9801,16 +9801,16 @@ ${originalIndentation}`;
               return '"[Object]"';
             }
             indentation += spacer;
-            const join = `,
+            const join2 = `,
 ${indentation}`;
             let res = "";
             let separator = "";
             let maximumPropertiesToStringify = Math.min(keyLength, maximumBreadth);
             if (isTypedArrayWithEntries(value)) {
-              res += stringifyTypedArray(value, join, maximumBreadth);
+              res += stringifyTypedArray(value, join2, maximumBreadth);
               keys = keys.slice(value.length);
               maximumPropertiesToStringify -= value.length;
-              separator = join;
+              separator = join2;
             }
             if (deterministic) {
               keys = sort(keys, comparator);
@@ -9821,13 +9821,13 @@ ${indentation}`;
               const tmp = stringifyIndent(key2, value[key2], stack, spacer, indentation);
               if (tmp !== void 0) {
                 res += `${separator}${strEscape(key2)}: ${tmp}`;
-                separator = join;
+                separator = join2;
               }
             }
             if (keyLength > maximumBreadth) {
               const removedKeys = keyLength - maximumBreadth;
               res += `${separator}"...": "${getItemCount(removedKeys)} not stringified"`;
-              separator = join;
+              separator = join2;
             }
             if (separator !== "") {
               res = `
@@ -43467,7 +43467,7 @@ var require_send = __commonJS({
     var { parseTokenList } = require_parseTokenList();
     var { createHttpError } = require_createHttpError();
     var extname = path.extname;
-    var join = path.join;
+    var join2 = path.join;
     var normalize = path.normalize;
     var resolve2 = path.resolve;
     var sep = path.sep;
@@ -43554,7 +43554,7 @@ var require_send = __commonJS({
           return { statusCode: 403 };
         }
         parts = path2.split(sep);
-        path2 = normalize(join(root, path2));
+        path2 = normalize(join2(root, path2));
       } else {
         if (UP_PATH_REGEXP.test(path2)) {
           debug('malicious path "%s"', path2);
@@ -43837,7 +43837,7 @@ var require_send = __commonJS({
       let err;
       for (let i = 0; i < options.index.length; i++) {
         const index = options.index[i];
-        const p = join(path2, index);
+        const p = join2(path2, index);
         const { error: error51, stat } = await tryStat(p);
         if (error51) {
           err = error51;
@@ -44488,7 +44488,7 @@ var require_static = __commonJS({
     "use strict";
     var path = __require("node:path");
     var { fileURLToPath: fileURLToPath2 } = __require("node:url");
-    var { statSync } = __require("node:fs");
+    var { statSync: statSync2 } = __require("node:fs");
     var { glob } = require_commonjs6();
     var fp = require_plugin2();
     var send2 = require_send2();
@@ -44621,8 +44621,8 @@ var require_static = __commonJS({
               }
             }
           }
-          for (const [dirname3, rootPath] of indexDirs.entries()) {
-            const pathname = dirname3 + (dirname3.endsWith("/") ? "" : "/");
+          for (const [dirname4, rootPath] of indexDirs.entries()) {
+            const pathname = dirname4 + (dirname4.endsWith("/") ? "" : "/");
             const file2 = "/" + pathname.replace(prefix, "");
             setUpHeadAndGet(routeOpts, pathname, file2, rootPath);
             if (opts.redirect === true) {
@@ -44851,7 +44851,7 @@ var require_static = __commonJS({
       }
       let pathStat;
       try {
-        pathStat = statSync(rootPath);
+        pathStat = statSync2(rootPath);
       } catch (e) {
         if (e.code === "ENOENT") {
           fastify.log.warn(`"root" path "${rootPath}" must exist`);
@@ -44875,7 +44875,7 @@ var require_static = __commonJS({
         return indexFiles.find((filename) => {
           const p = path.join(root, pathname, filename);
           try {
-            const stats = statSync(p);
+            const stats = statSync2(p);
             return !stats.isDirectory();
           } catch {
             return false;
@@ -47156,7 +47156,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes2, createHash } = __require("crypto");
+    var { randomBytes: randomBytes2, createHash: createHash2 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -47824,7 +47824,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash("sha1").update(key + GUID).digest("base64");
+        const digest = createHash2("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -48193,7 +48193,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash } = __require("crypto");
+    var { createHash: createHash2 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -48500,7 +48500,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash("sha1").update(key + GUID).digest("base64");
+        const digest = createHash2("sha1").update(key + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -48591,8 +48591,8 @@ var require_websocket_server = __commonJS({
 var import_fastify = __toESM(require_fastify(), 1);
 var import_static = __toESM(require_static(), 1);
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { existsSync } from "node:fs";
-import { dirname as dirname2, resolve } from "node:path";
+import { existsSync as existsSync2 } from "node:fs";
+import { dirname as dirname3, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/external.js
@@ -64575,10 +64575,36 @@ function devLoginAllowed(config2, remoteAddress) {
   return normalised === "::1" || normalised.startsWith("127.");
 }
 
+// packages/server/src/build.ts
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+function computeBuildId(entry = process.argv[1] ?? "") {
+  if (!entry || !existsSync(entry)) return "unknown";
+  const hash2 = createHash("sha256");
+  try {
+    const dir = dirname(entry);
+    const files = readdirSync(dir).filter((name) => name.endsWith(".js")).sort();
+    for (const name of files) {
+      const path = join(dir, name);
+      if (!statSync(path).isFile()) continue;
+      hash2.update(name);
+      hash2.update(readFileSync(path));
+    }
+  } catch {
+    return "unknown";
+  }
+  return hash2.digest("hex").slice(0, 12);
+}
+var BUILD = computeBuildId();
+function buildId() {
+  return BUILD;
+}
+
 // packages/server/src/db.ts
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname as dirname2 } from "node:path";
 var SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
   id          TEXT PRIMARY KEY,
@@ -64624,7 +64650,7 @@ CREATE TABLE IF NOT EXISTS oauth_states (
 var Store = class {
   db;
   constructor(path) {
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+    if (path !== ":memory:") mkdirSync(dirname2(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
@@ -65780,7 +65806,7 @@ var PeerJoinRequest = external_exports.object({
   repoPath: external_exports.string().min(1).nullish()
 });
 function defaultWebRoot() {
-  const here = dirname2(fileURLToPath(import.meta.url));
+  const here = dirname3(fileURLToPath(import.meta.url));
   const candidates = [
     process.env.SESSION_SHARE_WEB_ROOT,
     // Packaged: the board is vendored next to the server's own dist.
@@ -65788,7 +65814,7 @@ function defaultWebRoot() {
     // In the monorepo: packages/server/dist -> apps/web/out.
     resolve(here, "../../../apps/web/out")
   ].filter((value) => Boolean(value));
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+  return candidates.find((candidate) => existsSync2(candidate)) ?? null;
 }
 function createApp(options = {}) {
   const auth = { ...loadAuthConfig(), ...options.auth };
@@ -65827,7 +65853,9 @@ function createApp(options = {}) {
   fastify.get("/healthz", async () => ({
     ok: true,
     mode: auth.mode,
-    serverId: serverFingerprint(auth)
+    serverId: serverFingerprint(auth),
+    // Which code is running, so a client can tell a stale daemon from a fresh one.
+    build: buildId()
   }));
   fastify.get("/auth/github", async (request, reply) => {
     if (!auth.githubClientId) {
@@ -66142,7 +66170,7 @@ function createApp(options = {}) {
     }
   });
   const webRoot = options.webRoot ?? defaultWebRoot();
-  if (webRoot && existsSync(webRoot)) {
+  if (webRoot && existsSync2(webRoot)) {
     fastify.register(import_static.default, { root: webRoot });
     fastify.setNotFoundHandler((request, reply) => {
       if (request.url.startsWith("/api/") || request.url.startsWith("/auth/")) {
@@ -66157,7 +66185,7 @@ function createApp(options = {}) {
     gateway,
     store,
     auth,
-    webRoot: webRoot && existsSync(webRoot) ? webRoot : null,
+    webRoot: webRoot && existsSync2(webRoot) ? webRoot : null,
     async listen(port, host = "127.0.0.1") {
       return fastify.listen({ port, host });
     },
@@ -66212,6 +66240,8 @@ export {
   SessionService,
   SessionState,
   Store,
+  buildId,
+  computeBuildId,
   createApp,
   isLoopbackAddress
 };

@@ -31784,8 +31784,8 @@ function writeConfig(repoPath, config3) {
 
 // packages/plugin/src/daemon.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { createHmac, randomBytes } from "node:crypto";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, readdirSync, statSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { homedir } from "node:os";
 import { dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
@@ -31823,6 +31823,27 @@ function writeDaemon(info) {
   ensureStateDir();
   writeFileSync2(DAEMON_FILE, `${JSON.stringify(info, null, 2)}
 `);
+}
+function expectedBuild() {
+  let entry;
+  try {
+    entry = serverEntrypoint();
+  } catch {
+    return "unknown";
+  }
+  const hash2 = createHash("sha256");
+  try {
+    const dir = dirname2(entry);
+    for (const name of readdirSync(dir).filter((file2) => file2.endsWith(".js")).sort()) {
+      const path = join2(dir, name);
+      if (!statSync(path).isFile()) continue;
+      hash2.update(name);
+      hash2.update(readFileSync2(path));
+    }
+  } catch {
+    return "unknown";
+  }
+  return hash2.digest("hex").slice(0, 12);
 }
 async function probe(url2, timeoutMs = 1500) {
   const controller = new AbortController();
@@ -31882,7 +31903,8 @@ async function ensureDaemon(options = {}) {
   if (existing) {
     const health = await probe(`http://127.0.0.1:${existing.port}`);
     if (health && (!health.serverId || health.serverId === mine)) {
-      if (health.serverId && existing.expose === expose) return refreshAddress(existing);
+      const current = health.build === expectedBuild();
+      if (current && health.serverId && existing.expose === expose) return refreshAddress(existing);
       stopDaemon();
       await waitUntilDown(`http://127.0.0.1:${existing.port}`);
     }
@@ -32352,6 +32374,14 @@ Stored in ${PREFERENCES_FILE}.${preferences.configured ? "" : "\n\nThese are def
         lines.push(
           `server     ${health ? "running" : "recorded but NOT responding"} on port ${daemon.port}, bound to ${daemon.expose === "lan" ? "0.0.0.0" : "127.0.0.1"}${health?.serverId ? ` (id ${health.serverId})` : ""}`
         );
+        const expected = expectedBuild();
+        if (health && health.build !== expected) {
+          lines.push(
+            `build      running ${health.build ?? "an unknown build"}, installed is ${expected} \u2014 this server predates your plugin. Hosting again replaces it; /ss:stop then /ss:host if you want it now`
+          );
+        } else if (health?.build) {
+          lines.push(`build      ${health.build}, matching the installed plugin`);
+        }
         const lan = lanAddress();
         lines.push(
           isLoopbackUrl(daemon.url) ? 'reach      loopback only \u2014 a teammate on another machine cannot connect, and any invite from here names their own machine, not yours. Re-host with expose "lan", or use a tunnel' : `reach      teammates dial ${daemon.url}${lan && !daemon.url.includes(lan) ? ` (this machine is now ${lan} \u2014 the invite you sent may be stale)` : ""}`

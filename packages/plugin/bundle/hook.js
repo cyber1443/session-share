@@ -14605,8 +14605,8 @@ import { join as join3 } from "node:path";
 
 // packages/plugin/src/daemon.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { createHmac, randomBytes } from "node:crypto";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, readdirSync, statSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { homedir } from "node:os";
 import { dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
