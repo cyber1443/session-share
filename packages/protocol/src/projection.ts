@@ -448,7 +448,16 @@ export class SessionState {
     return {
       session: { ...this.session, phase: this.phaseNow() },
       participants: [...this.participants.values()],
-      tickets: [...this.tickets.values()],
+      /**
+       * Served with the state the work says they are in, not the last one
+       * anybody wrote down. The stored field is only ever an echo of this, and
+       * an echo can lag -- a card sitting in Splitting with a claimed task
+       * under it is the board lying about the one thing it exists to show.
+       */
+      tickets: [...this.tickets.values()].map((ticket) => ({
+        ...ticket,
+        state: this.ticketStateFor(ticket.id),
+      })),
       decomposition: this.decomposition,
       validation: this.validation,
       tasks: [...this.tasks.values()],

@@ -219,3 +219,46 @@ describe('SessionState on a deleted ticket', () => {
     assert.deepEqual([...state.tasks.keys()], ['other'])
   })
 })
+
+/**
+ * The stored state is only an echo of what the work says. An echo can lag, and
+ * a card in Splitting with a claimed task under it is the board lying about the
+ * one thing it exists to show.
+ */
+describe('SessionState.snapshot', () => {
+  it('serves each ticket in the state its work puts it in', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: SESSION }))
+    state.apply(envelope(1, { type: 'ticket.created', ticket: { ...TICKET, state: 'proposed' } }))
+    state.apply(
+      envelope(2, {
+        type: 'tasks.seeded',
+        tasks: [
+          {
+            id: 'a',
+            sessionId: 's1',
+            ticketId: 't1',
+            title: 'A',
+            intent: '',
+            ownedPaths: ['src/a.ts'],
+            dependsOn: [],
+            assumes: [],
+            acceptance: { testCommand: 'npm test', testFiles: [], manualChecks: [] },
+            estimateMinutes: 10,
+            state: 'claimed',
+            assigneeId: null,
+            ownerId: 'p1',
+            branch: null,
+            prNumber: null,
+            lastTest: null,
+            activityLine: null,
+            depth: 0,
+          },
+        ],
+      }),
+    )
+
+    assert.equal(state.tickets.get('t1').state, 'proposed', 'the stored field has not caught up')
+    assert.equal(state.snapshot().tickets[0].state, 'building', 'what a client is told')
+  })
+})
