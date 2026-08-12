@@ -63172,7 +63172,23 @@ var Participant = external_exports.object({
   activity: ParticipantActivity,
   joinedAt: Timestamp
 });
-var TicketState = external_exports.enum(["plan", "splitting", "proposed", "building", "review", "done"]);
+var Verification = external_exports.object({
+  passed: external_exports.boolean(),
+  /** How it was exercised: the command, the URL, the simulator. */
+  how: external_exports.string().max(500),
+  summary: external_exports.string().max(2e3),
+  by: ParticipantId,
+  at: Timestamp
+});
+var TicketState = external_exports.enum([
+  "plan",
+  "splitting",
+  "proposed",
+  "building",
+  "verify",
+  "review",
+  "done"
+]);
 var Ticket = external_exports.object({
   id: TicketId,
   sessionId: SessionId,
@@ -63187,6 +63203,14 @@ var Ticket = external_exports.object({
    */
   members: external_exports.array(ParticipantId).default([]),
   state: TicketState,
+  /**
+   * Whether the assembled thing was actually exercised, and what happened.
+   *
+   * Every task passing its own acceptance command says each piece works alone.
+   * It says nothing about the pieces working together, which is the failure the
+   * split makes more likely rather than less.
+   */
+  verification: Verification.nullable().default(null),
   decompositionId: DecompositionId.nullable().default(null),
   prNumber: external_exports.number().int().nullable().default(null),
   createdAt: Timestamp
@@ -63415,6 +63439,7 @@ var EventBody = external_exports.discriminatedUnion("type", [
     members: external_exports.array(ParticipantId)
   }),
   external_exports.object({ type: external_exports.literal("ticket.state"), ticketId: TicketId, state: TicketState }),
+  external_exports.object({ type: external_exports.literal("ticket.verified"), ticketId: TicketId, verification: Verification }),
   external_exports.object({
     type: external_exports.literal("ticket.shipped"),
     ticketId: TicketId,
@@ -63576,6 +63601,14 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
    * that everyone votes.
    */
   external_exports.object({ type: external_exports.literal("ticket.approve"), ticketId: TicketId }),
+  /** What running the assembled feature showed. Passing sends it to review. */
+  external_exports.object({
+    type: external_exports.literal("ticket.verified"),
+    ticketId: TicketId,
+    passed: external_exports.boolean(),
+    how: external_exports.string().max(500),
+    summary: external_exports.string().max(2e3)
+  }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
   /**
@@ -64263,6 +64296,12 @@ var SessionState = class {
           this.tickets.set(body.ticketId, { ...ticket, state: body.state });
         break;
       }
+      case "ticket.verified": {
+        const ticket = this.tickets.get(body.ticketId);
+        if (ticket)
+          this.tickets.set(body.ticketId, { ...ticket, verification: body.verification });
+        break;
+      }
       case "ticket.shipped": {
         const ticket = this.tickets.get(body.ticketId);
         if (ticket) {
@@ -64438,7 +64477,9 @@ var SessionState = class {
       return "done";
     const tasks = this.tasksOfTicket(ticketId);
     if (tasks.length > 0) {
-      return tasks.every((task) => task.state === "merged") ? "review" : "building";
+      if (!tasks.every((task) => task.state === "merged"))
+        return "building";
+      return ticket.verification?.passed ? "review" : "verify";
     }
     if (ticket.decompositionId)
       return "proposed";
@@ -64947,6 +64988,8 @@ var SessionService = class {
         return this.startTicket(command, ctx);
       case "ticket.approve":
         return this.approveTicket(command, ctx);
+      case "ticket.verified":
+        return this.recordVerification(command, ctx);
       case "ticket.shipped":
         return this.shipTicket(command, ctx);
       case "plan.request":
@@ -65101,6 +65144,7 @@ var SessionService = class {
       authorId: participantId,
       members: [participantId],
       state: "plan",
+      verification: null,
       decompositionId: null,
       prNumber: null,
       createdAt: Date.now()
@@ -65196,6 +65240,94 @@ var SessionService = class {
     });
     this.seedTasks(sessionId, participantId, state);
     this.refreshTicketStates(sessionId, participantId);
+    return { ticket: this.requireTicket(state, command.ticketId) };
+  }
+  /** Who runs the assembled thing: the author if they can, else any member with a checkout. */
+  verifier(state, ticket) {
+    if (state.participants.get(ticket.authorId)?.repoPath) return ticket.authorId;
+    return ticket.members.find((id) => state.participants.get(id)?.repoPath) ?? null;
+  }
+  /**
+   * The step between "all the tests pass" and "it works".
+   *
+   * Each task proved itself in isolation, which is exactly the guarantee a
+   * contract-first split is designed to give -- and exactly the one that says
+   * nothing about the parts fitting together. So somebody assembles it and
+   * drives it the way a person would, in whatever this project actually runs
+   * in.
+   */
+  askForVerification(sessionId, actorId, state, ticket) {
+    const who = this.verifier(state, ticket);
+    if (!who) return;
+    this.systemDirective(
+      sessionId,
+      actorId,
+      [who],
+      [
+        `Every task on "${ticket.title}" has landed on ${state.session?.contractBranch ?? "the contract branch"}.`,
+        "Nobody has run the whole thing yet. Do that now, before it goes anywhere near a PR:",
+        "",
+        "1. ss_sync, so you have everyone's work together.",
+        "2. Work out how this project actually runs -- package.json scripts, a dev server, a",
+        "   Playwright or Cypress config, docker compose, an Xcode or Android target, a CLI.",
+        "   Read the repo rather than assuming; the answer is in there.",
+        "3. Start it and exercise the feature end to end, the way a person would. If it is a",
+        "   web app, drive the browser. If it is an app, use the simulator or emulator. If it",
+        "   is a library or CLI, run the real commands against real input.",
+        "4. Look at the seams specifically: each task passed its own tests in isolation, so the",
+        "   interesting failures are where the pieces meet.",
+        "",
+        "Then report with ss_ticket_verified: passed true or false, `how` you exercised it, and",
+        "what you saw. Passing sends it to review. Failing sends it back to the people who own",
+        "the broken part, so be specific about what actually happened."
+      ].join("\n")
+    );
+  }
+  recordVerification(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    this.emit(sessionId, participantId, {
+      type: "ticket.verified",
+      ticketId: ticket.id,
+      verification: {
+        passed: command.passed,
+        how: command.how,
+        summary: command.summary,
+        by: participantId,
+        at: Date.now()
+      }
+    });
+    this.refreshTicketStates(sessionId, participantId);
+    const by = state.participants.get(participantId)?.displayName ?? "Someone";
+    if (command.passed) {
+      const shipper = this.verifier(state, ticket);
+      if (shipper) {
+        this.systemDirective(
+          sessionId,
+          participantId,
+          [shipper],
+          `"${ticket.title}" was verified by ${by} (${command.how}). Open the pull request with ss_ship, then record it with ss_ticket_shipped so the card closes.`
+        );
+      }
+    } else {
+      const others = ticket.members.filter((id) => state.participants.get(id)?.repoPath);
+      if (others.length > 0) {
+        this.systemDirective(
+          sessionId,
+          participantId,
+          others,
+          [
+            `"${ticket.title}" does not work assembled. ${by} ran it (${command.how}) and saw:`,
+            "",
+            command.summary,
+            "",
+            "Fix it on your own task branches -- the lease gate still applies, so if the broken",
+            "part is not yours, say so in the room rather than reaching into it. Land the fix",
+            "with ss_done as usual and it will be run again."
+          ].join("\n")
+        );
+      }
+    }
     return { ticket: this.requireTicket(state, command.ticketId) };
   }
   shipTicket(command, ctx) {
@@ -65798,16 +65930,8 @@ Issue: ${command.issueRef}` : "",
     this.refreshTicketStates(sessionId, participantId);
     const ticketId = task.ticketId;
     const ticket = ticketId ? state.tickets.get(ticketId) : null;
-    if (ticket && state.ticketStateFor(ticket.id) === "review" && ticket.prNumber === null) {
-      const shipper = state.participants.get(ticket.authorId)?.repoPath ? ticket.authorId : ticket.members.find((id) => state.participants.get(id)?.repoPath);
-      if (shipper) {
-        this.systemDirective(
-          sessionId,
-          participantId,
-          [shipper],
-          `Every task on "${ticket.title}" has landed on the contract branch. Open the pull request for it with ss_ship, then record it with ss_ticket_shipped so the card closes.`
-        );
-      }
+    if (ticket && state.ticketStateFor(ticket.id) === "verify" && !ticket.verification) {
+      this.askForVerification(sessionId, participantId, state, ticket);
     }
     const remaining = [...state.tasks.values()].filter((t) => t.state !== "merged");
     if (remaining.length === 0 && state.session?.phase === "build") {

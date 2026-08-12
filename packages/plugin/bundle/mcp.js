@@ -31071,7 +31071,23 @@ var Participant = external_exports.object({
   activity: ParticipantActivity,
   joinedAt: Timestamp
 });
-var TicketState = external_exports.enum(["plan", "splitting", "proposed", "building", "review", "done"]);
+var Verification = external_exports.object({
+  passed: external_exports.boolean(),
+  /** How it was exercised: the command, the URL, the simulator. */
+  how: external_exports.string().max(500),
+  summary: external_exports.string().max(2e3),
+  by: ParticipantId,
+  at: Timestamp
+});
+var TicketState = external_exports.enum([
+  "plan",
+  "splitting",
+  "proposed",
+  "building",
+  "verify",
+  "review",
+  "done"
+]);
 var Ticket = external_exports.object({
   id: TicketId,
   sessionId: SessionId,
@@ -31086,6 +31102,14 @@ var Ticket = external_exports.object({
    */
   members: external_exports.array(ParticipantId).default([]),
   state: TicketState,
+  /**
+   * Whether the assembled thing was actually exercised, and what happened.
+   *
+   * Every task passing its own acceptance command says each piece works alone.
+   * It says nothing about the pieces working together, which is the failure the
+   * split makes more likely rather than less.
+   */
+  verification: Verification.nullable().default(null),
   decompositionId: DecompositionId.nullable().default(null),
   prNumber: external_exports.number().int().nullable().default(null),
   createdAt: Timestamp
@@ -31314,6 +31338,7 @@ var EventBody = external_exports.discriminatedUnion("type", [
     members: external_exports.array(ParticipantId)
   }),
   external_exports.object({ type: external_exports.literal("ticket.state"), ticketId: TicketId, state: TicketState }),
+  external_exports.object({ type: external_exports.literal("ticket.verified"), ticketId: TicketId, verification: Verification }),
   external_exports.object({
     type: external_exports.literal("ticket.shipped"),
     ticketId: TicketId,
@@ -31475,6 +31500,14 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
    * that everyone votes.
    */
   external_exports.object({ type: external_exports.literal("ticket.approve"), ticketId: TicketId }),
+  /** What running the assembled feature showed. Passing sends it to review. */
+  external_exports.object({
+    type: external_exports.literal("ticket.verified"),
+    ticketId: TicketId,
+    passed: external_exports.boolean(),
+    how: external_exports.string().max(500),
+    summary: external_exports.string().max(2e3)
+  }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
   /**
@@ -33208,6 +33241,31 @@ function createServer() {
         ticketId
       });
       return text(`"${ticket.title}" is ${ticket.state}. Everyone in it has been told what they own.`);
+    }
+  );
+  server.registerTool(
+    "ss_ticket_verified",
+    {
+      description: "Report what happened when you ran the assembled feature -- in the browser, the simulator, the emulator, or whatever this project actually runs in. Passing sends the ticket to review; failing sends it back to whoever built the broken part.",
+      inputSchema: {
+        ticketId: external_exports.string(),
+        passed: external_exports.boolean(),
+        how: external_exports.string().max(500).describe("How you exercised it: the command you ran, the URL you drove, the simulator"),
+        summary: external_exports.string().max(2e3).describe("What you saw. On a failure, be specific enough that someone can fix it")
+      }
+    },
+    async ({ ticketId, passed, how, summary }) => {
+      const cfg = config2();
+      const { ticket } = await runCommand(cfg, {
+        type: "ticket.verified",
+        ticketId,
+        passed,
+        how,
+        summary
+      });
+      return text(
+        passed ? `"${ticket.title}" verified. It is in review; open the PR with ss_ship.` : `Recorded as broken. Everyone who built "${ticket.title}" has been told what you saw.`
+      );
     }
   );
   server.registerTool(
