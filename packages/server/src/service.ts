@@ -16,6 +16,9 @@ import {
   type SessionId,
   type Task,
   type TaskId,
+  type Ticket,
+  type TicketId,
+  type TicketState,
   analyzeDag,
   autoAssign,
   globsIntersect,
@@ -122,6 +125,16 @@ export class SessionService {
         return this.join(command, ctx)
       case 'session.sync':
         return { upToSeq: this.store.maxSeq(this.requireSession(ctx)) }
+      case 'ticket.create':
+        return this.createTicket(command, ctx)
+      case 'ticket.join':
+        return this.joinTicket(command, ctx)
+      case 'ticket.leave':
+        return this.leaveTicket(command, ctx)
+      case 'ticket.start':
+        return this.startTicket(command, ctx)
+      case 'ticket.shipped':
+        return this.shipTicket(command, ctx)
       case 'plan.request':
         return this.requestPlan(command, ctx)
       case 'decomposition.propose':
@@ -282,6 +295,257 @@ export class SessionService {
 
   // -- decomposition -------------------------------------------------------
 
+  // -- tickets ---------------------------------------------------------------
+
+  private requireTicket(state: SessionState, ticketId: TicketId): Ticket {
+    const ticket = state.tickets.get(ticketId)
+    if (!ticket) throw new ServiceError('not_found', `No ticket "${ticketId}".`)
+    return ticket
+  }
+
+  /**
+   * Anyone can open a ticket. The author is in it from the start, and everyone
+   * else is told it exists -- as a message, not a directive, because joining is
+   * a person's decision and hijacking their agent to make it is not an offer.
+   */
+  private createTicket(
+    command: Extract<ClientCommand, { type: 'ticket.create' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+
+    const ticket: Ticket = {
+      id: randomUUID() as TicketId,
+      sessionId,
+      title: command.title,
+      body: command.body,
+      authorId: participantId,
+      members: [participantId],
+      state: 'plan',
+      decompositionId: null,
+      prNumber: null,
+      createdAt: Date.now(),
+    }
+    this.emit(sessionId, participantId, { type: 'ticket.created', ticket })
+
+    const others = [...state.participants.values()].filter((p) => p.id !== participantId)
+    const author = state.participants.get(participantId)?.displayName ?? 'Someone'
+    if (others.length > 0) {
+      this.systemMessage(
+        sessionId,
+        participantId,
+        others.map((p) => p.id),
+        `${author} opened "${ticket.title}". Join it on the board if you want in -- joining is all it takes, there is nothing to approve.`,
+      )
+    } else {
+      // Nobody to wait for. Start splitting it immediately.
+      this.beginSplit(sessionId, participantId, state, ticket)
+    }
+
+    return { ticket: state.tickets.get(ticket.id)! }
+  }
+
+  /**
+   * Opting in. This is the consent step: no approval follows, so joining has to
+   * mean "I accept whatever split this produces for me".
+   */
+  private joinTicket(
+    command: Extract<ClientCommand, { type: 'ticket.join' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+
+    if (!ticket.members.includes(participantId)) {
+      this.emit(sessionId, participantId, {
+        type: 'ticket.members',
+        ticketId: ticket.id,
+        members: [...ticket.members, participantId],
+      })
+    }
+
+    const joined = this.requireTicket(state, command.ticketId)
+    if (joined.state === 'plan') {
+      // Somebody wants in, so there is now something to split.
+      this.beginSplit(sessionId, participantId, state, joined)
+    } else if (joined.decompositionId) {
+      // Late to a ticket already being built: fold them into the assignment.
+      this.rebalanceTicket(sessionId, participantId, state, joined)
+    }
+
+    return { ticket: this.requireTicket(state, command.ticketId) }
+  }
+
+  private leaveTicket(
+    command: Extract<ClientCommand, { type: 'ticket.leave' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+
+    const held = state
+      .tasksOfTicket(ticket.id)
+      .find((task) => task.ownerId === participantId && task.state !== 'merged')
+    if (held) {
+      throw new ServiceError(
+        'conflict',
+        `You are holding ${held.id}. Release or finish it before leaving the ticket.`,
+      )
+    }
+
+    this.emit(sessionId, participantId, {
+      type: 'ticket.members',
+      ticketId: ticket.id,
+      members: ticket.members.filter((id) => id !== participantId),
+    })
+    const left = this.requireTicket(state, command.ticketId)
+    if (left.decompositionId) this.rebalanceTicket(sessionId, participantId, state, left)
+    return { ticket: left }
+  }
+
+  private startTicket(
+    command: Extract<ClientCommand, { type: 'ticket.start' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    if (ticket.state !== 'plan') return { ticket }
+    this.beginSplit(sessionId, participantId, state, ticket)
+    return { ticket: this.requireTicket(state, command.ticketId) }
+  }
+
+  private shipTicket(
+    command: Extract<ClientCommand, { type: 'ticket.shipped' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    this.emit(sessionId, participantId, {
+      type: 'ticket.shipped',
+      ticketId: ticket.id,
+      prNumber: command.prNumber,
+    })
+    return { ticket: this.requireTicket(state, command.ticketId) }
+  }
+
+  /** Hands the ticket to a member's agent to split, and moves the card. */
+  private beginSplit(
+    sessionId: SessionId,
+    actorId: ParticipantId,
+    state: SessionState,
+    ticket: Ticket,
+  ): void {
+    const planner = ticket.members
+      .map((id) => state.participants.get(id))
+      .find((p) => p?.repoPath && p.connected)
+
+    if (!planner) {
+      // Nobody in it can read the repo, so it stays where it is rather than
+      // moving to a column where nothing is happening.
+      this.systemMessage(
+        sessionId,
+        actorId,
+        ticket.members,
+        `"${ticket.title}" cannot be split yet: nobody in it has a checkout attached. Run /ss:join in a clone.`,
+      )
+      return
+    }
+
+    this.setTicketState(sessionId, actorId, ticket.id, 'splitting')
+    this.systemDirective(
+      sessionId,
+      actorId,
+      [planner.id],
+      [
+        `Split the ticket "${ticket.title}" for ${ticket.members.length} person(s).`,
+        ticket.body ? `\n${ticket.body}` : '',
+        '',
+        'Read the repository, then call ss_propose with:',
+        `  ticketId: ${ticket.id}`,
+        'a contract of the shared types and stubs every task will import, plus tasks that own',
+        'disjoint file globs and are each proved by one command.',
+        '',
+        'Nobody approves this. The validator checks it and the work starts immediately, so',
+        'propose what you would be willing to have run.',
+      ]
+        .filter((line) => line !== '')
+        .join('\n'),
+    )
+  }
+
+  private setTicketState(
+    sessionId: SessionId,
+    actorId: ParticipantId | null,
+    ticketId: TicketId,
+    state: TicketState,
+  ): void {
+    const current = this.state(sessionId).tickets.get(ticketId)
+    if (!current || current.state === state) return
+    this.emit(sessionId, actorId, { type: 'ticket.state', ticketId, state })
+  }
+
+  /** Re-derives every ticket's column from what its tasks are actually doing. */
+  private refreshTicketStates(sessionId: SessionId, actorId: ParticipantId | null): void {
+    const state = this.state(sessionId)
+    for (const ticket of [...state.tickets.values()]) {
+      const derived = state.ticketStateFor(ticket.id)
+      if (derived !== ticket.state) {
+        this.emit(sessionId, actorId, { type: 'ticket.state', ticketId: ticket.id, state: derived })
+      }
+    }
+  }
+
+  /** Assignment across a ticket's members, rather than the whole session. */
+  private rebalanceTicket(
+    sessionId: SessionId,
+    actorId: ParticipantId,
+    state: SessionState,
+    ticket: Ticket,
+  ): void {
+    const tasks = state.tasksOfTicket(ticket.id)
+    if (tasks.length === 0) return
+
+    const members = ticket.members
+      .map((id) => state.participants.get(id))
+      .filter((p): p is Participant => Boolean(p?.repoPath))
+      .sort((a, b) => a.joinedAt - b.joinedAt)
+      .map((p) => p.id)
+    if (members.length === 0) return
+
+    // Anything already being worked on stays where it is.
+    const pinned = tasks
+      .filter((task) => task.ownerId)
+      .map((task) => ({ taskId: task.id, participantId: task.ownerId! }))
+
+    const assignments = autoAssign({ tasks, participants: members, pinned })
+    for (const { taskId, participantId } of assignments) {
+      const task = state.tasks.get(taskId)
+      if (!task || task.assigneeId === participantId || task.state === 'merged') continue
+      this.emit(sessionId, actorId, { type: 'task.assigned', taskId, assigneeId: participantId })
+    }
+  }
+
+  /** A message from the session itself, shown in the room but not acted on. */
+  private systemMessage(
+    sessionId: SessionId,
+    actorId: ParticipantId | null,
+    mentions: ParticipantId[],
+    body: string,
+  ): void {
+    const message: ChatMessage = {
+      id: randomUUID() as MessageId,
+      sessionId,
+      authorId: null,
+      authorKind: 'system',
+      body,
+      taskRef: null,
+      mentions,
+      directive: false,
+      createdAt: Date.now(),
+    }
+    this.emit(sessionId, actorId, { type: 'chat.message', message })
+  }
+
   /**
    * The board's half of planning. It cannot read a repo or run a model, so it
    * does the part it is good at -- capturing the brief and choosing whose agent
@@ -395,6 +659,18 @@ export class SessionService {
       participantCount: Math.max(command.participantCount, state.participants.size),
     })
 
+    /**
+     * The validator only sees one split at a time, but several tickets run at
+     * once -- so two of them can each be internally sound and still send two
+     * agents at the same file. The lease gate would catch it, but not until
+     * someone tried to claim, by which point the split has been agreed and the
+     * work handed out. Cheaper to say so now, while it is still a proposal.
+     */
+    for (const issue of this.crossTicketOverlaps(state, command.tasks, command.ticketId)) {
+      validation.issues.push(issue)
+      validation.ok = false
+    }
+
     const decompositionId = randomUUID() as DecompositionId
     /**
      * A failing proposal is still recorded. The board needs to show what was
@@ -406,6 +682,7 @@ export class SessionService {
       decomposition: {
         id: decompositionId,
         sessionId,
+        ticketId: command.ticketId,
         issueRef: command.issueRef,
         contract: command.contract,
         tasks: command.tasks,
@@ -426,9 +703,72 @@ export class SessionService {
      * proposal like everything else here, so it can be dragged around before
      * anyone approves.
      */
-    if (validation.ok) this.rebalance(sessionId, participantId, state, [])
+    if (!validation.ok) return { decompositionId, validation }
 
+    /**
+     * A ticket's split needs no approval: joining the ticket was the consent,
+     * so the work starts here. The validator still runs -- whether two agents
+     * are about to edit the same file is not a matter of opinion, and no amount
+     * of enthusiasm makes an overlap safe.
+     */
+    const ticketId = command.ticketId
+    if (ticketId) {
+      const ticket = this.requireTicket(state, ticketId)
+      const members = ticket.members
+        .map((id) => state.participants.get(id))
+        .filter((p): p is Participant => Boolean(p?.repoPath))
+        .sort((a, b) => a.joinedAt - b.joinedAt)
+        .map((p) => p.id)
+
+      this.emit(sessionId, participantId, {
+        type: 'decomposition.assigned',
+        assignments: autoAssign({ tasks: command.tasks, participants: members }),
+      })
+      this.emit(sessionId, participantId, {
+        type: 'decomposition.approval',
+        participantId,
+        approvals: ticket.members,
+        satisfied: true,
+      })
+      this.seedTasks(sessionId, participantId, state)
+      this.refreshTicketStates(sessionId, participantId)
+      return { decompositionId, validation }
+    }
+
+    this.rebalance(sessionId, participantId, state, [])
     return { decompositionId, validation }
+  }
+
+  /** Paths already spoken for by another ticket's unfinished work. */
+  private crossTicketOverlaps(
+    state: SessionState,
+    proposed: Array<{ id: TaskId; ownedPaths: string[] }>,
+    ticketId: TicketId | null,
+  ) {
+    const issues = []
+    const live = [...state.tasks.values()].filter(
+      (task) => task.state !== 'merged' && task.ticketId && task.ticketId !== ticketId,
+    )
+
+    for (const spec of proposed) {
+      for (const held of live) {
+        const collision = spec.ownedPaths.find((glob) =>
+          held.ownedPaths.some((other) => globsIntersect(glob, other)),
+        )
+        if (!collision) continue
+
+        const ticket = held.ticketId ? state.tickets.get(held.ticketId) : null
+        issues.push({
+          code: 'overlaps_other_ticket' as const,
+          severity: 'error' as const,
+          message: `"${spec.id}" owns ${collision}, which "${held.id}" already owns on the ticket "${ticket?.title ?? held.ticketId}".`,
+          taskIds: [spec.id],
+          repairHint: `Scope this ticket away from ${collision}, or wait for "${ticket?.title ?? 'that ticket'}" to land. Two tickets editing one file is the collision the whole split exists to prevent.`,
+        })
+        break
+      }
+    }
+    return issues
   }
 
   /** Recomputes the automatic part of the assignment around whatever is pinned. */
@@ -564,6 +904,7 @@ export class SessionService {
     const tasks: Task[] = specs.map((spec) => ({
       ...spec,
       sessionId,
+      ticketId: state.decomposition?.ticketId ?? null,
       state: spec.dependsOn.length === 0 ? 'ready' : 'blocked',
       assigneeId: assignedTo.get(spec.id) ?? null,
       ownerId: null,
@@ -602,19 +943,44 @@ export class SessionService {
         .map((task) => `  ${task.id} -- ${task.title} (${task.estimateMinutes}m)${task.state === 'blocked' ? `, waiting on ${task.dependsOn.join(', ')}` : ''}`)
         .join('\n')
 
+      /**
+       * A ticket runs itself. Nobody approved anything and nobody is going to
+       * type /ss:next, so the instruction is the whole loop rather than the
+       * next step -- otherwise "automatic" means "automatic until the first
+       * time someone has to be told to carry on".
+       */
+      const ticketId = theirs[0]?.ticketId ?? null
+      const lands = ticketId && assignee === actorId && !contractLanded
+
       this.systemDirective(
         sessionId,
         actorId,
         [assignee],
         [
-          `The split was approved. ${theirs.length} task(s) are yours:`,
+          ticketId
+            ? `The split for this ticket is live. ${theirs.length} task(s) are yours:`
+            : `The split was approved. ${theirs.length} task(s) are yours:`,
           '',
           listed,
           '',
-          contractLanded
-            ? 'Run ss_next to claim the first one and start.'
-            : 'Nothing is claimable until the contract lands. If you are the lead, run ss_land_contract; otherwise wait for it and then run ss_next.',
-        ].join('\n'),
+          ...(ticketId
+            ? [
+                lands ? 'You proposed it, so land the contract first: ss_land_contract.' : '',
+                contractLanded || lands
+                  ? 'Then work them, one at a time and without waiting to be asked:'
+                  : 'When the contract lands you will be told. Then work them, one at a time:',
+                '  ss_claim -> do the work -> run the acceptance command -> ss_done',
+                'Repeat until ss_claim says there is nothing left for you. Post in the room with',
+                'ss_chat_post if you get stuck or need a file someone else owns.',
+              ]
+            : [
+                contractLanded
+                  ? 'Run ss_next to claim the first one and start.'
+                  : 'Nothing is claimable until the contract lands. If you are the lead, run ss_land_contract; otherwise wait for it and then run ss_next.',
+              ]),
+        ]
+          .filter((line) => line !== '')
+          .join('\n'),
       )
     }
   }
@@ -897,6 +1263,29 @@ export class SessionService {
         [assignee],
         `${task.id} landed, which unblocks ${taskIds.join(', ')} -- yours. Run ss_sync then ss_next.`,
       )
+    }
+
+    /**
+     * The cards move because the work moved. This is the whole reason no column
+     * is draggable: a board you have to maintain by hand drifts from the truth
+     * the moment anyone is busy.
+     */
+    this.refreshTicketStates(sessionId, participantId)
+
+    const ticketId = task.ticketId
+    const ticket = ticketId ? state.tickets.get(ticketId) : null
+    if (ticket && state.ticketStateFor(ticket.id) === 'review' && ticket.prNumber === null) {
+      const shipper = state.participants.get(ticket.authorId)?.repoPath
+        ? ticket.authorId
+        : ticket.members.find((id) => state.participants.get(id)?.repoPath)
+      if (shipper) {
+        this.systemDirective(
+          sessionId,
+          participantId,
+          [shipper],
+          `Every task on "${ticket.title}" has landed on the contract branch. Open the pull request for it with ss_ship, then record it with ss_ticket_shipped so the card closes.`,
+        )
+      }
     }
 
     // Everything merged means the build phase is over.

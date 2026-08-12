@@ -862,3 +862,257 @@ describe('merging', () => {
     assert.equal(phase.body.phase, 'integrate')
   })
 })
+
+/**
+ * The board people actually use: anyone opens a ticket, whoever wants in joins,
+ * and nothing else is asked of them. No approval step exists here on purpose --
+ * joining is the consent, so everything after it has to be automatic.
+ */
+describe('tickets', () => {
+  const open = (client, title, body = '') =>
+    client.send({ type: 'ticket.create', title, body })
+
+  it('tells the others a ticket exists without hijacking their agents', async () => {
+    const { alice, bob, aliceId, bobId } = await twoDevSession('ticket-notify')
+    const { ticket } = await open(alice, 'Add due dates')
+    await settle()
+
+    assert.equal(ticket.authorId, aliceId)
+    assert.deepEqual(ticket.members, [aliceId], 'the author is in it from the start')
+    assert.equal(ticket.state, 'plan')
+
+    const message = bob
+      .eventsOfType('chat.message')
+      .map((event) => event.body.message)
+      .at(-1)
+    assert.match(message.body, /Join it on the board/)
+    assert.deepEqual(message.mentions, [bobId])
+    assert.equal(
+      message.directive,
+      false,
+      'joining is a decision, so the invitation must not drive their agent',
+    )
+  })
+
+  it('starts splitting the moment someone joins, with nothing to approve', async () => {
+    const { alice, bob, aliceId } = await twoDevSession('ticket-join')
+    const { ticket } = await open(alice, 'Add due dates')
+
+    const joined = await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+    assert.equal(joined.ticket.members.length, 2)
+    await settle()
+
+    const state = alice.eventsOfType('ticket.state').at(-1)
+    assert.equal(state.body.state, 'splitting')
+
+    const directive = alice
+      .eventsOfType('chat.message')
+      .map((event) => event.body.message)
+      .findLast((m) => m.directive)
+    assert.deepEqual(directive.mentions, [aliceId], 'the split goes to someone with a checkout')
+    assert.match(directive.body, new RegExp(ticket.id))
+    assert.match(directive.body, /Nobody approves this/)
+  })
+
+  it('splits alone when there is nobody else to wait for', async () => {
+    const solo = await new TestClient(url).connect()
+    await solo.send({
+      type: 'session.create',
+      slug: 'ticket-solo',
+      title: 'Solo',
+      repo: REPO,
+      issueRef: null,
+    })
+    await solo.send({
+      type: 'session.join',
+      sessionRef: 'ticket-solo',
+      githubLogin: 'alice',
+      displayName: 'Alice',
+      repoPath: '/tmp/alice/solo',
+      fromSeq: null,
+    })
+    const { ticket } = await open(solo, 'Just me')
+    assert.equal(ticket.state, 'splitting', 'waiting for a join that cannot come would deadlock')
+    await solo.close()
+  })
+
+  it('goes live on a valid split, with no approval anywhere', async () => {
+    const { alice, bob, aliceId, bobId } = await twoDevSession('ticket-live')
+    const { ticket } = await open(alice, 'Add due dates')
+    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+
+    const proposal = await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+      ticketId: ticket.id,
+    })
+    assert.equal(proposal.validation.ok, true)
+    await settle()
+
+    const seeded = alice.eventsOfType('tasks.seeded').at(-1)
+    assert.ok(seeded, 'a valid split starts immediately')
+    assert.ok(
+      seeded.body.tasks.every((task) => task.ticketId === ticket.id),
+      'tasks belong to the ticket they came from',
+    )
+    assert.ok(
+      seeded.body.tasks.every((task) => [aliceId, bobId].includes(task.assigneeId)),
+      'and are shared out between the people who joined',
+    )
+
+    const column = alice.eventsOfType('ticket.state').at(-1)
+    assert.equal(column.body.state, 'building', 'the card moves because the work moved')
+  })
+
+  it('refuses to start work an overlapping split would break', async () => {
+    const { alice, bob } = await twoDevSession('ticket-invalid')
+    const { ticket } = await open(alice, 'Collide')
+    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+
+    const proposal = await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks: [
+        { ...tasks[0], ownedPaths: ['src/**'] },
+        { ...tasks[1], ownedPaths: ['src/lib/**'] },
+      ],
+      participantCount: 2,
+      issueRef: null,
+      ticketId: ticket.id,
+    })
+    assert.equal(proposal.validation.ok, false)
+    await settle()
+
+    assert.equal(
+      alice.eventsOfType('tasks.seeded').length,
+      0,
+      'skipping approval must not mean skipping the validator',
+    )
+  })
+
+  it('moves the card to review when the last task lands, and asks for the PR', async () => {
+    const { alice, bob, aliceId } = await twoDevSession('ticket-review')
+    const { ticket } = await open(alice, 'Add due dates')
+    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+    await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+      ticketId: ticket.id,
+    })
+    await alice.send({
+      type: 'contract.committed',
+      branch: 'ss/ticket-review/contract',
+      commitSha: 'abc1234',
+      prNumber: null,
+    })
+
+    // Land every task, whoever holds it.
+    for (const spec of tasks) {
+      const claim = await alice.send({ type: 'task.claim', taskId: spec.id }).catch(() => null)
+      const client = claim?.task ? alice : bob
+      if (!claim?.task) await client.send({ type: 'task.claim', taskId: spec.id })
+      await client.send({ type: 'task.merged', taskId: spec.id })
+    }
+    await settle()
+
+    const column = alice.eventsOfType('ticket.state').at(-1)
+    assert.equal(column.body.state, 'review')
+
+    const ship = alice
+      .eventsOfType('chat.message')
+      .map((event) => event.body.message)
+      .findLast((m) => m.directive)
+    assert.deepEqual(ship.mentions, [aliceId], 'the author is asked to ship it')
+    assert.match(ship.body, /ss_ship/)
+  })
+
+  it('refuses a split that would fight another ticket for the same files', async () => {
+    const { alice, bob } = await twoDevSession('ticket-collide')
+    const first = await open(alice, 'Theme work')
+    await bob.send({ type: 'ticket.join', ticketId: first.ticket.id })
+    await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+      ticketId: first.ticket.id,
+    })
+
+    const second = await open(bob, 'Something else that touches the toggle')
+    await alice.send({ type: 'ticket.join', ticketId: second.ticket.id })
+    const clash = await bob.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks: [{ ...tasks[0], id: 'other-toggle' }],
+      participantCount: 2,
+      issueRef: null,
+      ticketId: second.ticket.id,
+    })
+
+    /**
+     * Each split is fine on its own; together they send two agents at one file.
+     * The lease gate would catch it eventually, but only once someone tried to
+     * claim -- long after the work was handed out.
+     */
+    assert.equal(clash.validation.ok, false)
+    const issue = clash.validation.issues.find((i) => i.code === 'overlaps_other_ticket')
+    assert.ok(issue, JSON.stringify(clash.validation.issues))
+    assert.match(issue.message, /Theme work/)
+    await settle()
+    assert.equal(
+      bob.eventsOfType('tasks.seeded').filter((e) => e.body.tasks[0]?.ticketId === second.ticket.id)
+        .length,
+      0,
+      'nothing from a colliding split may go live',
+    )
+  })
+
+  it('closes the card when the PR is recorded', async () => {
+    const { alice, bob } = await twoDevSession('ticket-done')
+    const { ticket } = await open(alice, 'Add due dates')
+    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+
+    const shipped = await alice.send({
+      type: 'ticket.shipped',
+      ticketId: ticket.id,
+      prNumber: 42,
+    })
+    assert.equal(shipped.ticket.state, 'done')
+    assert.equal(shipped.ticket.prNumber, 42)
+  })
+
+  it('will not let someone walk away from work they are holding', async () => {
+    const { alice, bob } = await twoDevSession('ticket-leave')
+    const { ticket } = await open(alice, 'Add due dates')
+    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+    await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+      ticketId: ticket.id,
+    })
+    await alice.send({
+      type: 'contract.committed',
+      branch: 'ss/ticket-leave/contract',
+      commitSha: 'abc1234',
+      prNumber: null,
+    })
+    const claimed = await alice.send({ type: 'task.claim', taskId: null })
+    assert.ok(claimed.task)
+
+    const error = await expectError(
+      alice.send({ type: 'ticket.leave', ticketId: ticket.id }),
+      'conflict',
+    )
+    assert.match(error.message, /Release or finish it/)
+  })
+})
