@@ -9,6 +9,7 @@ import type {
   MergeQueueEntry,
   Participant,
   Session,
+  SessionPhase,
   SessionSnapshot,
   Task,
   ValidationReport,
@@ -357,6 +358,31 @@ export class SessionState {
     return ticket.state === 'splitting' ? 'splitting' : 'plan'
   }
 
+  /**
+   * The session's phase, worked out from the tickets rather than latched.
+   *
+   * This used to be a stored field moved by events, from `plan` to `build` when
+   * the contract landed and to `integrate` when the last task merged -- one
+   * decomposition per session, one way, no way back. Tickets made that wrong:
+   * several run at once, each with its own lifecycle, and a session that
+   * finished one ticket would sit in `integrate` forever, refusing to plan
+   * anything ever again. Derived, it cannot latch, and it cannot be stale.
+   */
+  phaseNow(): SessionPhase {
+    const tickets = [...this.tickets.values()]
+    if (tickets.length > 0) {
+      const states = tickets.map((ticket) => this.ticketStateFor(ticket.id))
+      if (states.every((state) => state === 'review')) return 'integrate'
+      if (states.some((state) => state === 'building' || state === 'verify')) return 'build'
+      return 'plan'
+    }
+
+    // A session from before tickets: the tasks say the same thing about it.
+    const tasks = [...this.tasks.values()]
+    if (tasks.length === 0) return 'plan'
+    return tasks.every((task) => task.state === 'merged') ? 'integrate' : 'build'
+  }
+
   /** Tasks whose blocked/ready state no longer matches their dependencies. */
   staleStateTasks(): Task[] {
     return [...this.tasks.values()].filter((task) => {
@@ -401,7 +427,7 @@ export class SessionState {
   snapshot(): SessionSnapshot {
     if (!this.session) throw new Error('snapshot before session.created')
     return {
-      session: this.session,
+      session: { ...this.session, phase: this.phaseNow() },
       participants: [...this.participants.values()],
       tickets: [...this.tickets.values()],
       decomposition: this.decomposition,

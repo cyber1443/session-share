@@ -101,6 +101,22 @@ async function twoDevSession(slug) {
   return { alice, bob, aliceId: aliceJoin.participantId, bobId: bobJoin.participantId }
 }
 
+/**
+ * The phase as the session reports it. Derived rather than stored, so the only
+ * honest way to read it is the same way a client does: ask for a snapshot.
+ */
+async function phaseOf(client, slug) {
+  const { snapshot } = await client.send({
+    type: 'session.join',
+    sessionRef: slug,
+    githubLogin: 'alice',
+    displayName: 'Alice',
+    repoPath: '/tmp/alice/web',
+    fromSeq: null,
+  })
+  return snapshot.session.phase
+}
+
 /** Walk a session all the way to the build phase with tasks seeded. */
 async function buildPhaseSession(slug) {
   const session = await twoDevSession(slug)
@@ -528,12 +544,12 @@ describe('the lease gate', () => {
     assert.equal(alice.eventsOfType('lease.denied').length, 1)
   })
 
-  it('freezes contract files for everyone during build', async () => {
+  it('freezes contract files for everyone once the contract has landed', async () => {
     const { alice } = await buildPhaseSession('lease-contract')
     await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
     const result = await alice.send({ type: 'lease.check', paths: ['src/lib/theme-types.ts'] })
     assert.equal(result.allowed, false)
-    assert.match(result.denials[0].message, /frozen for the build phase/)
+    assert.match(result.denials[0].message, /frozen now that the contract has landed/)
   })
 
   it('allows an unowned path', async () => {
@@ -848,7 +864,7 @@ describe('merging', () => {
     assert.deepEqual(again.unblocked, [])
   })
 
-  it('moves the session to integrate once everything has landed', async () => {
+  it('reads as integrate once everything has landed', async () => {
     const { alice, bob } = await buildPhaseSession('merge-phase')
     await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
     await bob.send({ type: 'task.claim', taskId: 'theme-persist' })
@@ -858,8 +874,48 @@ describe('merging', () => {
     await alice.send({ type: 'task.merged', taskId: 'theme-docs' })
     await settle()
 
-    const phase = alice.eventsOfType('session.phase').at(-1)
-    assert.equal(phase.body.phase, 'integrate')
+    assert.equal(await phaseOf(alice, 'merge-phase'), 'integrate')
+  })
+
+  /**
+   * The phase used to be a latch, and once it reached `integrate` nothing could
+   * ever be planned in that session again -- one finished ticket killed the
+   * board for good. It is derived now, so the only way to test it is to plan
+   * again afterwards and watch it come back.
+   */
+  it('lets the session plan again after everything has landed', async () => {
+    const { alice, bob } = await buildPhaseSession('merge-replan')
+    await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
+    await bob.send({ type: 'task.claim', taskId: 'theme-persist' })
+    await alice.send({ type: 'task.merged', taskId: 'theme-toggle' })
+    await bob.send({ type: 'task.merged', taskId: 'theme-persist' })
+    await alice.send({ type: 'task.claim', taskId: 'theme-docs' })
+    await alice.send({ type: 'task.merged', taskId: 'theme-docs' })
+    await settle()
+    assert.equal(await phaseOf(alice, 'merge-replan'), 'integrate')
+
+    const plan = await alice.send({ type: 'plan.request', goal: 'Add a settings page', issueRef: null })
+    assert.ok(plan.plannerId)
+
+    const proposal = await alice.send({
+      type: 'decomposition.propose',
+      contract: { summary: 'Settings route stub', files: [{ path: 'src/lib/settings-types.ts', purpose: 'shared Settings shape', contents: 'export type Settings = { theme: string }\n' }] },
+      tasks: [
+        {
+          id: 'settings-page',
+          title: 'Settings page',
+          intent: 'Render the settings route',
+          ownedPaths: ['src/app/settings/**'],
+          dependsOn: [],
+          assumes: ['Settings from src/lib/settings-types.ts'],
+          acceptance: { testCommand: 'npm test -- settings', testFiles: ['src/app/settings/page.test.tsx'], manualChecks: [] },
+          estimateMinutes: 40,
+        },
+      ],
+      participantCount: 2,
+      issueRef: null,
+    })
+    assert.equal(proposal.validation.ok, true, JSON.stringify(proposal.validation.issues, null, 2))
   })
 })
 

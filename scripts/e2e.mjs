@@ -399,6 +399,63 @@ try {
   })
   check(verified.ticket.state === 'review', 'only a passing run moves it on')
 
+  say('The session takes another ticket after that one is done')
+  /**
+   * The phase used to latch: finishing a ticket moved the whole session to
+   * `integrate`, and every split after that was refused with "this session is
+   * past planning". A session is for a repo, not for one piece of work, so the
+   * second ticket has to behave exactly like the first.
+   */
+  const secondTicket = await aliceBoardEarly.command({
+    type: 'ticket.create',
+    title: 'Archive completed todos',
+    body: 'Hide anything ticked off, with a way to see them again.',
+  })
+  await bobBoard.command({ type: 'ticket.join', ticketId: secondTicket.ticket.id })
+
+  const secondSplit = JSON.parse(
+    await alice.call('ss_propose', {
+      contract: {
+        summary: 'Archive flag shared by the store and the list',
+        files: [
+          {
+            path: 'src/lib/archive-types.js',
+            purpose: 'what counts as archived',
+            contents: 'export const isArchived = (todo) => Boolean(todo.archivedAt)\n',
+          },
+        ],
+      },
+      tasks: [
+        {
+          id: 'archive-store',
+          title: 'Archive a todo',
+          intent: 'Stamp archivedAt and keep it out of the default list',
+          ownedPaths: ['src/lib/archive.js', 'src/lib/archive.test.js'],
+          dependsOn: [],
+          assumes: ['isArchived from src/lib/archive-types.js'],
+          acceptance: {
+            testCommand: 'node --test src/lib',
+            testFiles: ['src/lib/archive.test.js'],
+            manualChecks: [],
+          },
+          estimateMinutes: 35,
+        },
+      ],
+      ticketId: secondTicket.ticket.id,
+    }),
+  )
+  check(secondSplit.accepted === true, 'a finished ticket does not close the session to new work')
+
+  const afterSecond = await aliceBoardEarly.snapshot()
+  check(
+    afterSecond.tickets.find((t) => t.id === secondTicket.ticket.id)?.state === 'proposed',
+    'the second ticket reaches its own split like the first',
+  )
+  check(
+    afterSecond.tickets.find((t) => t.id === opened.ticket.id)?.state === 'review',
+    'without disturbing the one already in review',
+  )
+
   /**
    * The session-wide plan-and-approve flow that tickets replaced still exists
    * in the server and has its own tests; it is not exercised here because it is

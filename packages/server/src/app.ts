@@ -296,7 +296,7 @@ export function createApp(options: AppOptions = {}): App {
           id: state.session.id,
           slug: state.session.slug,
           title: state.session.title,
-          phase: state.session.phase,
+          phase: state.phaseNow(),
           repo: state.session.repo,
           issueRef: state.session.issueRef,
           createdAt: state.session.createdAt,

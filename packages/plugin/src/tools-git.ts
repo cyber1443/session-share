@@ -178,9 +178,12 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       if (state.decomposition.status !== 'approved') {
         throw new Error('The split has not been approved yet. Approve it on the board first.')
       }
-      if (state.session.phase !== 'plan') {
-        return ctx.text(`The contract already landed on ${state.session.contractBranch}.`)
-      }
+      /**
+       * Runs once per ticket, not once per session. Every ticket brings its own
+       * seam and they all land on the same branch, so this checks out whatever
+       * is already there and adds to it -- writing the same files twice commits
+       * nothing, which is what makes it safe to be told to do this again.
+       */
 
       /**
        * session-share's own wiring is not work in progress, and refusing to

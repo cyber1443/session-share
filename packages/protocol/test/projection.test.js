@@ -109,3 +109,52 @@ describe('SessionState.hydrate', () => {
     assert.equal(state.session.title, 'Different')
   })
 })
+
+const TICKET = {
+  id: 't1',
+  sessionId: 's1',
+  title: 'Trello style board',
+  body: '',
+  authorId: 'p1',
+  members: ['p1'],
+  state: 'plan',
+  decompositionId: null,
+  verification: null,
+  prNumber: null,
+  createdAt: 0,
+}
+
+/**
+ * The phase used to be latched by events and had no way back, so one finished
+ * ticket left the session in `integrate` and every later split was refused.
+ */
+describe('SessionState.phaseNow', () => {
+  const seeded = () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: { ...SESSION, phase: 'integrate' } }))
+    return state
+  }
+
+  it('ignores a phase the log latched, and answers from the tickets', () => {
+    const state = seeded()
+    state.apply(envelope(1, { type: 'ticket.created', ticket: TICKET }))
+    assert.equal(state.phaseNow(), 'plan')
+    assert.equal(state.snapshot().session.phase, 'plan')
+  })
+
+  it('comes back to plan when a new ticket opens after one has shipped', () => {
+    const state = seeded()
+    state.apply(envelope(1, { type: 'ticket.created', ticket: TICKET }))
+    state.apply(envelope(2, { type: 'ticket.shipped', ticketId: 't1', prNumber: 7 }))
+    assert.equal(state.phaseNow(), 'integrate')
+
+    state.apply(envelope(3, { type: 'ticket.created', ticket: { ...TICKET, id: 't2' } }))
+    assert.equal(state.phaseNow(), 'plan')
+  })
+
+  it('falls back to the tasks for a session that predates tickets', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: { ...SESSION, phase: 'plan' } }))
+    assert.equal(state.phaseNow(), 'plan')
+  })
+})

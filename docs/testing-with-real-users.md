@@ -358,7 +358,7 @@ tasks with no test, tasks owning contract files — and hands back repair hints 
 it fails. Watch the board: the split appears for approval.
 
 Both approve, then commit the contract branch (today this is still manual —
-see the gap below). Once it lands, the phase flips to build, and each developer
+see the gap below). Once it lands, tasks become claimable, and each developer
 runs:
 
 ```

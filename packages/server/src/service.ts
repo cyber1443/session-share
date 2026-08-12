@@ -749,9 +749,6 @@ export class SessionService {
     ctx: CommandContext,
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
-    if (state.session?.phase !== 'plan') {
-      throw new ServiceError('not_ready', 'This session is past planning.')
-    }
 
     /**
      * Planning needs a checkout to read. Someone watching from the board with
@@ -841,10 +838,14 @@ export class SessionService {
     ctx: CommandContext,
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
-    if (state.session?.phase !== 'plan') {
-      throw new ServiceError('not_ready', 'Decomposition can only be proposed during the plan phase.')
-    }
 
+    /**
+     * No phase gate here. A session hosts tickets for as long as the repo is
+     * worked on, and each one plans, builds and ships on its own clock -- so
+     * there is no session-wide moment after which planning is over. Whether a
+     * particular split is sound is the validator's question, and whether two of
+     * them collide is `crossTicketOverlaps`; neither needs a phase.
+     */
     const validation = validateDecomposition({
       contract: command.contract,
       tasks: command.tasks,
@@ -1169,7 +1170,13 @@ export class SessionService {
        * time someone has to be told to carry on".
        */
       const ticketId = theirs[0]?.ticketId ?? null
-      const lands = ticketId && assignee === actorId && !contractLanded
+      /**
+       * Once per ticket rather than once per session: the second ticket brings
+       * its own seam, and skipping the landing because an earlier ticket
+       * already made the branch leaves everyone importing files that are not
+       * there. Landing again is a no-op when nothing changed.
+       */
+      const lands = Boolean(ticketId) && assignee === actorId
 
       this.systemDirective(
         sessionId,
@@ -1184,8 +1191,10 @@ export class SessionService {
           '',
           ...(ticketId
             ? [
-                lands ? 'You proposed it, so land the contract first: ss_land_contract.' : '',
-                contractLanded || lands
+                lands
+                  ? 'You started it, so land this ticket\'s contract first: ss_land_contract.'
+                  : '',
+                lands
                   ? 'Then work them, one at a time and without waiting to be asked:'
                   : 'When the contract lands you will be told. Then work them, one at a time:',
                 '  ss_claim -> do the work -> run the acceptance command -> ss_done',
@@ -1234,9 +1243,6 @@ export class SessionService {
       commitSha: command.commitSha,
       prNumber: command.prNumber,
     })
-    // Only now is the seam real, so only now can tasks be claimed.
-    this.emit(sessionId, participantId, { type: 'session.phase', phase: 'build' })
-
     /**
      * The people who were told to wait are the people who now need to know they
      * can stop waiting. Whoever landed the contract already knows.
@@ -1270,7 +1276,7 @@ export class SessionService {
 
   private claim(command: Extract<ClientCommand, { type: 'task.claim' }>, ctx: CommandContext) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
-    if (state.session?.phase !== 'build') {
+    if (!state.session?.contractBranch) {
       throw new ServiceError('not_ready', 'Tasks become claimable once the contract has landed.')
     }
 
@@ -1497,12 +1503,6 @@ export class SessionService {
       this.askForVerification(sessionId, participantId, state, ticket)
     }
 
-    // Everything merged means the build phase is over.
-    const remaining = [...state.tasks.values()].filter((t) => t.state !== 'merged')
-    if (remaining.length === 0 && state.session?.phase === 'build') {
-      this.emit(sessionId, participantId, { type: 'session.phase', phase: 'integrate' })
-    }
-
     return { unblocked }
   }
 
@@ -1524,12 +1524,12 @@ export class SessionService {
       // The contract is frozen once committed: every task was planned against
       // it, so changing it under them is how a clean split silently rots.
       const contractFile = state.decomposition?.contract.files.find((f) => f.path === path)
-      if (contractFile && state.session?.phase === 'build') {
+      if (contractFile && state.session?.contractBranch) {
         denials.push({
           path,
           heldBy: null,
           heldByTaskId: null,
-          message: `${path} is a contract file and is frozen for the build phase. Raise it in chat -- changing the seam mid-flight breaks every task planned against it.`,
+          message: `${path} is a contract file and is frozen now that the contract has landed. Raise it in chat -- changing the seam mid-flight breaks every task planned against it.`,
         })
         continue
       }
