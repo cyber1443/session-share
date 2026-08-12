@@ -7,12 +7,10 @@ import { AuthProvider, SignIn, useAuth } from '@/components/auth'
 import { PeerGate } from '@/components/peer-gate'
 import { api, peerToken } from '@/lib/api'
 import { useQueryParam } from '@/lib/query'
-import { Dag } from '@/components/dag'
-import { Graph } from '@/components/graph'
 import { JoinCode } from '@/components/join-code'
 import { Kanban } from '@/components/kanban'
-import { Plan } from '@/components/plan'
 import { Room } from '@/components/room'
+import { TicketPanel } from '@/components/ticket'
 import { useLiveSession } from '@/lib/live'
 
 const DOT = [
@@ -31,13 +29,7 @@ const PHASES = ['plan', 'build', 'integrate', 'done'] as const
 function Board({ slug }: { slug: string }) {
   const { me, mode } = useAuth()
   const { snapshot, status, error, activity, events, send } = useLiveSession(slug)
-  const [selected, setSelected] = useState<string | null>(null)
-  /**
-   * Plan is where the work is decided; topics answers "what is this about" and
-   * order answers "what unblocks what". Planning opens on the plan view because
-   * during that phase the graph has nothing in it yet.
-   */
-  const [viewOverride, setView] = useState<'board' | 'plan' | 'graph' | 'dag' | null>(null)
+  const [openTicket, setOpenTicket] = useState<string | null>(null)
   const [chatFilter, setChatFilter] = useState<string | null>(null)
   const [pairing, setPairing] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -52,18 +44,14 @@ function Board({ slug }: { slug: string }) {
   if (!snapshot) return <div className="p-8 text-xs text-mute">connecting…</div>
 
   const mine = snapshot.participants.find((p) => p.userId === me?.id)
-  const selectedTask = snapshot.tasks.find((t) => t.id === selected) ?? null
   const pendingHandoffs = snapshot.handoffs.filter(
     (h) => h.status === 'pending' && h.holderId === mine?.id,
   )
-  const decomposition = snapshot.decomposition
-  const planning = snapshot.session.phase === 'plan'
   /**
-   * The kanban is the session. Tickets are how work is proposed, joined and
-   * tracked, so it opens there unless someone asks for another lens.
+   * One view. The board is the session: a ticket card opens into everything
+   * about it, which is where the graph and the DAG used to send you.
    */
-  const view = viewOverride ?? 'board'
-  const awaitingApproval = decomposition?.status === 'proposed' && snapshot.validation?.ok
+  const ticket = snapshot.tickets.find((t) => t.id === openTicket) ?? null
 
   const act = async (fn: () => Promise<unknown>) => {
     setActionError(null)
@@ -155,19 +143,6 @@ function Board({ slug }: { slug: string }) {
             </ul>
           </div>
 
-          {awaitingApproval && view !== 'plan' ? (
-            <div className="panel space-y-2 p-3">
-              <p className="text-[10px] uppercase tracking-wider text-mute">Split proposed</p>
-              <p className="text-xs leading-relaxed text-neutral-300">
-                {decomposition!.tasks.length} tasks, up to {snapshot.validation!.maxFrontier} at once.
-              </p>
-              {/* Approving happens where you can see what you are approving. */}
-              <button className="btn btn-accent w-full" onClick={() => setView('plan')}>
-                review it
-              </button>
-            </div>
-          ) : null}
-
           {pendingHandoffs.map((handoff) => (
             <div key={handoff.id} className="panel space-y-2 p-3">
               <p className="text-[10px] uppercase tracking-wider text-amber-400">Handoff asked</p>
@@ -201,99 +176,19 @@ function Board({ slug }: { slug: string }) {
           {actionError ? <p className="text-xs text-red-400">{actionError}</p> : null}
         </aside>
 
-        {/* graph + room */}
+        {/* the board + the room */}
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="relative min-h-0 flex-1 border-b border-edge">
-            <div className="absolute right-3 top-3 z-10 flex gap-3 text-[10px] uppercase tracking-wider">
-              <button
-                className={view === 'board' ? 'text-neutral-200' : 'text-mute hover:text-neutral-400'}
-                onClick={() => setView('board')}
-              >
-                board
-              </button>
-              {planning ? (
-                <button
-                  className={view === 'plan' ? 'text-neutral-200' : 'text-mute hover:text-neutral-400'}
-                  onClick={() => setView('plan')}
-                >
-                  plan
-                </button>
-              ) : null}
-              <button
-                className={view === 'graph' ? 'text-neutral-200' : 'text-mute hover:text-neutral-400'}
-                onClick={() => setView('graph')}
-              >
-                topics
-              </button>
-              <button
-                className={view === 'dag' ? 'text-neutral-200' : 'text-mute hover:text-neutral-400'}
-                onClick={() => setView('dag')}
-              >
-                order
-              </button>
-            </div>
-
-            {view === 'board' ? (
-              <Kanban
-                snapshot={snapshot}
-                meId={mine?.id ?? null}
-                onCreate={(title, body) =>
-                  act(() => send({ type: 'ticket.create', title, body }))
-                }
-                onJoin={(ticketId) => act(() => send({ type: 'ticket.join', ticketId: ticketId as never }))}
-                onLeave={(ticketId) => act(() => send({ type: 'ticket.leave', ticketId: ticketId as never }))}
-                onStart={(ticketId) => act(() => send({ type: 'ticket.start', ticketId: ticketId as never }))}
-                onSelectTask={setSelected}
-              />
-            ) : view === 'plan' ? (
-              <Plan
-                snapshot={snapshot}
-                meId={mine?.id ?? null}
-                onRequest={(goal, plannerId) =>
-                  act(() => send({ type: 'plan.request', goal, issueRef: null, plannerId: plannerId as never }))
-                }
-                onAssign={(taskId, participantId) =>
-                  act(() =>
-                    send({
-                      type: 'task.assign',
-                      taskId: taskId as never,
-                      participantId: participantId as never,
-                    }),
-                  )
-                }
-                onApprove={() =>
-                  act(() =>
-                    send({ type: 'decomposition.approve', decompositionId: decomposition!.id }),
-                  )
-                }
-                onReject={(reason) =>
-                  act(() =>
-                    send({
-                      type: 'decomposition.reject',
-                      decompositionId: decomposition!.id,
-                      reason,
-                    }),
-                  )
-                }
-              />
-            ) : view === 'graph' ? (
-              <Graph
-                tasks={snapshot.tasks}
-                contract={snapshot.decomposition?.contract ?? null}
-                participants={snapshot.participants}
-                activity={activity}
-                selected={selected}
-                onSelect={(taskId) => setSelected(taskId === selected ? null : taskId)}
-              />
-            ) : (
-              <Dag
-                tasks={snapshot.tasks}
-                participants={snapshot.participants}
-                activity={activity}
-                selected={selected}
-                onSelect={(taskId) => setSelected(taskId === selected ? null : taskId)}
-              />
-            )}
+            <Kanban
+              snapshot={snapshot}
+              meId={mine?.id ?? null}
+              selected={openTicket}
+              onCreate={(title, body) => act(() => send({ type: 'ticket.create', title, body }))}
+              onJoin={(ticketId) =>
+                act(() => send({ type: 'ticket.join', ticketId: ticketId as never }))
+              }
+              onOpen={(ticketId) => setOpenTicket(ticketId === openTicket ? null : ticketId)}
+            />
           </div>
           <div className="h-64 shrink-0">
             <Room
@@ -308,21 +203,22 @@ function Board({ slug }: { slug: string }) {
           </div>
         </main>
 
-        {/* drawer */}
-        {selectedTask ? (
-          <TaskDrawer
-            task={selectedTask}
-            participants={snapshot.participants}
-            ownerName={
-              snapshot.participants.find((p) => p.id === selectedTask.ownerId)?.displayName ?? null
-            }
-            onClose={() => setSelected(null)}
-            onFilterChat={() => setChatFilter(selectedTask.id)}
-            onAssign={(participantId) =>
+        {ticket ? (
+          <TicketPanel
+            ticket={ticket}
+            snapshot={snapshot}
+            meId={mine?.id ?? null}
+            activity={activity}
+            onClose={() => setOpenTicket(null)}
+            onJoin={() => act(() => send({ type: 'ticket.join', ticketId: ticket.id }))}
+            onLeave={() => act(() => send({ type: 'ticket.leave', ticketId: ticket.id }))}
+            onStart={() => act(() => send({ type: 'ticket.start', ticketId: ticket.id }))}
+            onApprove={() => act(() => send({ type: 'ticket.approve', ticketId: ticket.id }))}
+            onAssign={(taskId, participantId) =>
               act(() =>
                 send({
                   type: 'task.assign',
-                  taskId: selectedTask.id,
+                  taskId: taskId as never,
                   participantId: participantId as never,
                 }),
               )
@@ -332,116 +228,6 @@ function Board({ slug }: { slug: string }) {
       </div>
 
       {pairing ? <JoinCode sessionRef={slug} mode={mode} onClose={() => setPairing(false)} /> : null}
-    </div>
-  )
-}
-
-function TaskDrawer({
-  task,
-  participants,
-  ownerName,
-  onClose,
-  onFilterChat,
-  onAssign,
-}: {
-  task: Task
-  participants: Participant[]
-  ownerName: string | null
-  onClose: () => void
-  onFilterChat: () => void
-  onAssign: (participantId: string | null) => Promise<void>
-}) {
-  return (
-    <aside className="flex w-80 shrink-0 flex-col gap-5 overflow-y-auto border-l border-edge p-4 text-xs">
-      <div className="flex items-start justify-between gap-2">
-        <h2 className="text-sm text-neutral-200">{task.title}</h2>
-        <button className="text-mute hover:text-neutral-300" onClick={onClose}>
-          ×
-        </button>
-      </div>
-
-      <Row label="state" value={`${task.state}${ownerName ? ` · ${ownerName}` : ''}`} />
-
-      <div>
-        <p className="text-[10px] uppercase tracking-wider text-mute">Assigned to</p>
-        {/* Re-pointing an unclaimed task is how work moves without a handoff. */}
-        <select
-          className="field mt-1"
-          value={task.assigneeId ?? ''}
-          disabled={Boolean(task.ownerId) || task.state === 'merged'}
-          onChange={(event) => void onAssign(event.target.value || null)}
-        >
-          <option value="">nobody</option>
-          {participants
-            .filter((participant) => participant.repoPath)
-            .map((participant) => (
-              <option key={participant.id} value={participant.id}>
-                {participant.displayName}
-              </option>
-            ))}
-        </select>
-        {task.ownerId ? (
-          <p className="mt-1 text-[10px] text-mute">
-            Held right now, so it cannot be reassigned until it is released.
-          </p>
-        ) : null}
-      </div>
-      <div>
-        <p className="text-[10px] uppercase tracking-wider text-mute">Intent</p>
-        <p className="mt-1 leading-relaxed text-neutral-300">{task.intent}</p>
-      </div>
-
-      <div>
-        <p className="text-[10px] uppercase tracking-wider text-mute">Owns</p>
-        <ul className="mt-1 space-y-0.5">
-          {task.ownedPaths.map((path) => (
-            <li key={path} className="break-all text-neutral-400">
-              {path}
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      {task.assumes.length > 0 ? (
-        <div>
-          <p className="text-[10px] uppercase tracking-wider text-mute">Assumes from contract</p>
-          <ul className="mt-1 space-y-0.5">
-            {task.assumes.map((assumption) => (
-              <li key={assumption} className="text-neutral-400">
-                {assumption}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-
-      <div>
-        <p className="text-[10px] uppercase tracking-wider text-mute">Proven by</p>
-        <code className="mt-1 block break-all text-accent">{task.acceptance.testCommand}</code>
-        {task.lastTest ? (
-          <p className={`mt-1 ${task.lastTest.passed ? 'text-accent' : 'text-red-400'}`}>
-            {task.lastTest.passed ? 'passed' : 'failed'} · {task.lastTest.summary}
-          </p>
-        ) : null}
-      </div>
-
-      {task.dependsOn.length > 0 ? (
-        <Row label="depends on" value={task.dependsOn.join(', ')} />
-      ) : null}
-      {task.branch ? <Row label="branch" value={task.branch} /> : null}
-
-      <button className="btn" onClick={onFilterChat}>
-        show chat for #{task.id}
-      </button>
-    </aside>
-  )
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p className="text-[10px] uppercase tracking-wider text-mute">{label}</p>
-      <p className="mt-1 break-all text-neutral-300">{value}</p>
     </div>
   )
 }

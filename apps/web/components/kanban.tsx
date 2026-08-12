@@ -23,12 +23,12 @@ const DOT = [
  * hand drifts from the truth the moment anyone is busy, and then the board is
  * something to keep up to date rather than something to trust.
  */
-const COLUMNS: Array<{ state: TicketState; label: string; hint: string }> = [
-  { state: 'plan', label: 'plan', hint: 'write one' },
-  { state: 'splitting', label: 'splitting', hint: 'an agent is reading the repo' },
-  { state: 'building', label: 'building', hint: 'tasks in flight' },
-  { state: 'review', label: 'review', hint: 'landed, PR pending' },
-  { state: 'done', label: 'done', hint: '' },
+const COLUMNS: Array<{ states: TicketState[]; label: string; hint: string }> = [
+  { states: ['plan'], label: 'plan', hint: 'write one' },
+  { states: ['splitting', 'proposed'], label: 'splitting', hint: 'being planned' },
+  { states: ['building'], label: 'building', hint: 'tasks in flight' },
+  { states: ['review'], label: 'review', hint: 'landed, PR pending' },
+  { states: ['done'], label: 'done', hint: '' },
 ]
 
 export function Kanban({
@@ -36,17 +36,15 @@ export function Kanban({
   meId,
   onCreate,
   onJoin,
-  onLeave,
-  onStart,
-  onSelectTask,
+  onOpen,
+  selected,
 }: {
   snapshot: SessionSnapshot
   meId: string | null
   onCreate: (title: string, body: string) => Promise<void>
   onJoin: (ticketId: string) => Promise<void>
-  onLeave: (ticketId: string) => Promise<void>
-  onStart: (ticketId: string) => Promise<void>
-  onSelectTask: (taskId: string) => void
+  onOpen: (ticketId: string) => void
+  selected: string | null
 }) {
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
@@ -83,9 +81,9 @@ export function Kanban({
       {error ? <p className="px-4 pt-2 text-xs text-red-400">{error}</p> : null}
       <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3">
         {COLUMNS.map((column) => {
-          const tickets = snapshot.tickets.filter((ticket) => ticket.state === column.state)
+          const tickets = snapshot.tickets.filter((ticket) => column.states.includes(ticket.state))
           return (
-            <section key={column.state} className="flex w-72 shrink-0 flex-col">
+            <section key={column.label} className="flex w-72 shrink-0 flex-col">
               <header className="flex items-baseline justify-between px-1 pb-2">
                 <h2 className="text-[10px] uppercase tracking-wider text-mute">
                   {column.label} {tickets.length > 0 ? `· ${tickets.length}` : ''}
@@ -94,7 +92,7 @@ export function Kanban({
               </header>
 
               <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
-                {column.state === 'plan' ? (
+                {column.states[0] === 'plan' ? (
                   <div className="panel p-2">
                     <textarea
                       className="field min-h-16 w-full resize-y text-xs leading-relaxed"
@@ -125,14 +123,13 @@ export function Kanban({
                     tasks={snapshot.tasks.filter((task) => task.ticketId === ticket.id)}
                     participants={snapshot.participants}
                     meId={meId}
+                    selected={selected === ticket.id}
+                    onOpen={() => onOpen(ticket.id)}
                     onJoin={() => void act(() => onJoin(ticket.id))}
-                    onLeave={() => void act(() => onLeave(ticket.id))}
-                    onStart={() => void act(() => onStart(ticket.id))}
-                    onSelectTask={onSelectTask}
                   />
                 ))}
 
-                {tickets.length === 0 && column.state !== 'plan' ? (
+                {tickets.length === 0 && column.states[0] !== 'plan' ? (
                   <p className="px-1 text-[10px] text-mute/50">nothing here</p>
                 ) : null}
               </div>
@@ -149,19 +146,17 @@ function Card({
   tasks,
   participants,
   meId,
+  selected,
+  onOpen,
   onJoin,
-  onLeave,
-  onStart,
-  onSelectTask,
 }: {
   ticket: Ticket
   tasks: Task[]
   participants: Participant[]
   meId: string | null
+  selected: boolean
+  onOpen: () => void
   onJoin: () => void
-  onLeave: () => void
-  onStart: () => void
-  onSelectTask: (taskId: string) => void
 }) {
   const mine = Boolean(meId && ticket.members.includes(meId as never))
   const members = ticket.members
@@ -170,7 +165,12 @@ function Card({
   const merged = tasks.filter((task) => task.state === 'merged').length
 
   return (
-    <article className="panel space-y-2 p-3">
+    <article
+      className={`panel w-full cursor-pointer space-y-2 p-3 text-left transition-colors hover:bg-[#12151b] ${
+        selected ? 'ring-1 ring-neutral-500' : ''
+      }`}
+      onClick={onOpen}
+    >
       <div className="flex items-start justify-between gap-2">
         <h3 className="text-xs leading-snug text-neutral-200">{ticket.title}</h3>
         {ticket.prNumber ? (
@@ -178,57 +178,27 @@ function Card({
         ) : null}
       </div>
 
-      {ticket.body ? (
-        <p className="line-clamp-3 text-[10px] leading-relaxed text-mute">{ticket.body}</p>
+      {/* A split that has been proposed is waiting on a person, so say so loudly. */}
+      {ticket.state === 'proposed' ? (
+        <p className="text-[10px] font-medium text-accent">split ready — open to start it</p>
       ) : null}
-
-      {/*
-        Splitting with nothing to show means an agent was asked and has not
-        answered yet. Saying whose, and how to wake it, is the difference
-        between "working" and "broken" -- an idle Claude Code has no turn
-        ending, so it picks the request up only when something nudges it.
-      */}
-      {ticket.state === 'splitting' && tasks.length === 0 ? (
-        <p className="text-[10px] leading-relaxed text-amber-400/80">
-          waiting on {members[0]?.displayName ?? 'an agent'} — it picks this up when their Claude
-          Code next finishes a turn. Nudge it there with <code>/ss:go</code>.
+      {ticket.state === 'splitting' ? (
+        <p className="text-[10px] text-amber-400/80">
+          {members.find((m) => m.repoPath)?.displayName ?? 'an agent'} is planning it
         </p>
       ) : null}
 
       {tasks.length > 0 ? (
-        <div className="space-y-1">
-          <div className="flex items-center gap-2 text-[10px] text-mute">
-            <span>
-              {merged}/{tasks.length} landed
-            </span>
-            <span className="h-1 flex-1 overflow-hidden rounded bg-neutral-800">
-              <span
-                className="block h-full bg-accent transition-all"
-                style={{ width: `${(merged / tasks.length) * 100}%` }}
-              />
-            </span>
-          </div>
-          <ul className="space-y-0.5">
-            {tasks.map((task) => {
-              const owner = participants.find((p) => p.id === (task.ownerId ?? task.assigneeId))
-              return (
-                <li key={task.id}>
-                  <button
-                    className="flex w-full items-center gap-1.5 text-left text-[10px] text-mute hover:text-neutral-300"
-                    onClick={() => onSelectTask(task.id)}
-                  >
-                    <span
-                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                        owner ? DOT[owner.colorIndex % DOT.length] : 'bg-neutral-700'
-                      } ${task.state === 'merged' ? '' : 'opacity-60'}`}
-                    />
-                    <span className="truncate">{task.id}</span>
-                    <span className="ml-auto shrink-0 text-mute/60">{task.state}</span>
-                  </button>
-                </li>
-              )
-            })}
-          </ul>
+        <div className="flex items-center gap-2 text-[10px] text-mute">
+          <span>
+            {merged}/{tasks.length}
+          </span>
+          <span className="h-1 flex-1 overflow-hidden rounded bg-neutral-800">
+            <span
+              className="block h-full bg-accent transition-all"
+              style={{ width: `${(merged / tasks.length) * 100}%` }}
+            />
+          </span>
         </div>
       ) : null}
 
@@ -242,28 +212,21 @@ function Card({
             />
           ))}
         </div>
-        <span className="text-[10px] text-mute">
+        <span className="truncate text-[10px] text-mute">
           {members.map((m) => m.displayName).join(', ') || 'nobody yet'}
         </span>
-
-        <div className="ml-auto flex gap-2">
-          {ticket.state === 'plan' && mine ? (
-            <button className="btn text-[10px]" onClick={onStart} title="Split it now instead of waiting">
-              start
-            </button>
-          ) : null}
-          {mine ? (
-            ticket.state === 'plan' ? (
-              <button className="btn text-[10px]" onClick={onLeave}>
-                leave
-              </button>
-            ) : null
-          ) : (
-            <button className="btn btn-accent text-[10px]" onClick={onJoin} disabled={!meId}>
-              join
-            </button>
-          )}
-        </div>
+        {!mine ? (
+          <button
+            className="btn btn-accent ml-auto text-[10px]"
+            disabled={!meId}
+            onClick={(event) => {
+              event.stopPropagation()
+              onJoin()
+            }}
+          >
+            join
+          </button>
+        ) : null}
       </div>
     </article>
   )
