@@ -15462,6 +15462,17 @@ var Preferences = external_exports.object({
    * nothing anyone types reaches your agent.
    */
   acceptDirectives: external_exports.boolean().default(true),
+  /**
+   * Whether queued work runs itself when this Claude Code is idle.
+   *
+   * `full` is the point of the product: the only thing anyone should have to do
+   * is join a ticket. It also means an agent writes to this repository and
+   * pushes branches with nobody watching, which is why it is one word to turn
+   * off and why the spend is capped.
+   */
+  autopilot: external_exports.enum(["off", "splits", "full"]).default("full"),
+  /** Tokens per day this machine may spend unattended. */
+  autopilotBudget: external_exports.number().int().min(0).default(1e6),
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });

@@ -32182,13 +32182,194 @@ function describeDirectives(messages, names) {
   ].join("\n");
 }
 
-// packages/plugin/src/open.ts
+// packages/plugin/src/autopilot.ts
 import { spawn as spawn2 } from "node:child_process";
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync5 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join5 } from "node:path";
+
+// packages/plugin/src/preferences.ts
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname3, join as join4 } from "node:path";
+var Preferences = external_exports.object({
+  /**
+   * explicit: nothing is committed until you run /ss:done.
+   * auto-on-green: the agent commits when it reports a passing acceptance test.
+   */
+  commitPolicy: external_exports.enum(["explicit", "auto-on-green"]).default("explicit"),
+  /** Push branches to origin. Off means two clones never exchange code. */
+  push: external_exports.boolean().default(true),
+  /** Open a pull request per task, and one for the finished session. */
+  openPullRequests: external_exports.boolean().default(true),
+  /** Whether hosting binds the local network or only this machine. */
+  expose: external_exports.enum(["lan", "loopback"]).default("lan"),
+  /** Open the live board automatically when you host or join. */
+  openBoard: external_exports.boolean().default(true),
+  /**
+   * Let messages sent to the room as directives run in this Claude Code
+   * session. Off makes the room read-only: you still see everything, but
+   * nothing anyone types reaches your agent.
+   */
+  acceptDirectives: external_exports.boolean().default(true),
+  /**
+   * Whether queued work runs itself when this Claude Code is idle.
+   *
+   * `full` is the point of the product: the only thing anyone should have to do
+   * is join a ticket. It also means an agent writes to this repository and
+   * pushes branches with nobody watching, which is why it is one word to turn
+   * off and why the spend is capped.
+   */
+  autopilot: external_exports.enum(["off", "splits", "full"]).default("full"),
+  /** Tokens per day this machine may spend unattended. */
+  autopilotBudget: external_exports.number().int().min(0).default(1e6),
+  /** Set once the setup questions have been answered. */
+  configured: external_exports.boolean().default(false)
+});
+var PREFERENCES_PATH = join4(STATE_DIR, "preferences.json");
+function readPreferences() {
+  if (!existsSync4(PREFERENCES_PATH)) return Preferences.parse({});
+  try {
+    return Preferences.parse(JSON.parse(readFileSync4(PREFERENCES_PATH, "utf8")));
+  } catch {
+    return Preferences.parse({});
+  }
+}
+function writePreferences(update) {
+  const merged = Preferences.parse({ ...readPreferences(), ...update });
+  mkdirSync4(dirname3(PREFERENCES_PATH), { recursive: true });
+  writeFileSync4(PREFERENCES_PATH, `${JSON.stringify(merged, null, 2)}
+`);
+  return merged;
+}
+var PREFERENCES_FILE = PREFERENCES_PATH;
+function describePreferences(preferences) {
+  return [
+    `commits:  ${preferences.commitPolicy === "explicit" ? "only when you run /ss:done" : "automatically when the acceptance test passes"}`,
+    `push:     ${preferences.push ? "branches are pushed to origin" : "nothing leaves this machine"}`,
+    `PRs:      ${preferences.openPullRequests ? "opened per task and for the session" : "never opened"}`,
+    `hosting:  ${preferences.expose === "lan" ? "reachable on your local network" : "this machine only"}`,
+    `board:    ${preferences.openBoard ? "opens in your browser on host and join" : "never opened for you"}`,
+    `room:     ${preferences.acceptDirectives ? "directives from the room run in this session" : "read-only; nothing from the room reaches your agent"}`,
+    `autopilot: ${preferences.autopilot === "off" ? "off \u2014 queued work waits for you" : preferences.autopilot === "splits" ? `planning runs itself when you are idle (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)` : `everything runs itself when you are idle, including writing and pushing code (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)`}`
+  ].join("\n");
+}
+
+// packages/plugin/src/autopilot.ts
+var POLL_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_POLL_MS ?? 2e4);
+var IDLE_GRACE_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_GRACE_MS ?? 25e3);
+function stateDir2() {
+  return process.env.SESSION_SHARE_HOME ?? join5(homedir3(), ".session-share");
+}
+var spendFile = () => join5(stateDir2(), "autopilot.json");
+function readSpend(today) {
+  try {
+    const spend = JSON.parse(readFileSync5(spendFile(), "utf8"));
+    return spend.day === today ? spend : { day: today, tokens: 0 };
+  } catch {
+    return { day: today, tokens: 0 };
+  }
+}
+function addSpend(today, tokens) {
+  const spend = readSpend(today);
+  mkdirSync5(stateDir2(), { recursive: true });
+  writeFileSync5(spendFile(), `${JSON.stringify({ day: today, tokens: spend.tokens + tokens })}
+`);
+}
+function decide(input) {
+  if (input.preferences.autopilot === "off") return { run: false, reason: "autopilot is off" };
+  if (input.pending === 0) return { run: false, reason: "nothing is waiting" };
+  if (input.inFlight) return { run: false, reason: "a headless run is already going" };
+  if (input.preferences.autopilot === "splits" && !input.planningOnly) {
+    return { run: false, reason: "autopilot is set to splits only, and this is not a split" };
+  }
+  if (input.spentToday >= input.preferences.autopilotBudget) {
+    return { run: false, reason: `today's unattended budget is spent (${input.spentToday})` };
+  }
+  return { run: true, reason: "work is waiting" };
+}
+var PLANNING_TOOLS = [
+  "Read",
+  "Grep",
+  "Glob",
+  "mcp__session-share__ss_propose",
+  "mcp__session-share__ss_tickets",
+  "mcp__session-share__ss_get_contract",
+  "mcp__session-share__ss_chat_post"
+];
+var isPlanning = (messages) => messages.every((message) => /ss_propose|Split the ticket/.test(message.body));
+var running = false;
+function runHeadless(config3, prompt, planningOnly) {
+  return new Promise((resolve4) => {
+    const args = ["-p", prompt, "--add-dir", config3.repoPath];
+    if (planningOnly) args.push("--allowedTools", ...PLANNING_TOOLS);
+    const child = spawn2("claude", args, {
+      cwd: config3.repoPath,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        // Its own hooks must not recurse into another headless run.
+        SESSION_SHARE_AUTOPILOT: "child"
+      }
+    });
+    child.on("error", () => resolve4());
+    child.on("close", () => resolve4());
+  });
+}
+async function tick() {
+  const config3 = readConfig(process.env.SESSION_SHARE_REPO ?? process.cwd());
+  if (!config3) return;
+  const preferences = readPreferences();
+  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  let waiting;
+  try {
+    waiting = await peekDirectives(config3);
+  } catch {
+    return;
+  }
+  const planningOnly = waiting.length > 0 && isPlanning(waiting);
+  const verdict = decide({
+    preferences,
+    pending: waiting.length,
+    planningOnly,
+    inFlight: running,
+    spentToday: readSpend(today).tokens
+  });
+  if (!verdict.run) return;
+  const oldest = Math.min(...waiting.map((message) => message.createdAt));
+  if (Date.now() - oldest < IDLE_GRACE_MS) return;
+  running = true;
+  try {
+    const taken = await pendingDirectives(config3);
+    if (taken.length === 0) return;
+    const prompt = describeDirectives(taken, /* @__PURE__ */ new Map());
+    await runHeadless(config3, prompt, planningOnly);
+    addSpend(today, 2e4);
+    await runCommand(config3, {
+      type: "chat.post",
+      body: `Ran that headlessly \u2014 nobody was at the keyboard. ${taken.length} instruction(s).`,
+      taskRef: null,
+      asAgent: true,
+      directive: false
+    }).catch(() => void 0);
+  } catch {
+  } finally {
+    running = false;
+  }
+}
+function startAutopilot() {
+  if (process.env.SESSION_SHARE_AUTOPILOT === "child") return () => void 0;
+  const timer = setInterval(() => void tick(), POLL_MS);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
+// packages/plugin/src/open.ts
+import { spawn as spawn3 } from "node:child_process";
 function openInBrowser(url2) {
   if (process.env.SESSION_SHARE_NO_OPEN === "1") return false;
   const [command, args] = process.platform === "darwin" ? ["open", [url2]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url2]] : ["xdg-open", [url2]];
   try {
-    const child = spawn2(command, args, {
+    const child = spawn3(command, args, {
       detached: true,
       stdio: "ignore"
     });
@@ -32206,8 +32387,8 @@ function boardUrl(serverUrl, packedInvite, as) {
 
 // packages/plugin/src/git.ts
 import { execFile } from "node:child_process";
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname3, join as join4 } from "node:path";
+import { existsSync as existsSync6, mkdirSync as mkdirSync6, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname4, join as join6 } from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
 var GitError = class extends Error {
@@ -32280,9 +32461,9 @@ async function checkoutBranch(cwd, branch, from) {
 async function writeFiles(cwd, files) {
   const written = [];
   for (const file2 of files) {
-    const absolute = join4(cwd, file2.path);
-    mkdirSync4(dirname3(absolute), { recursive: true });
-    writeFileSync4(absolute, file2.contents);
+    const absolute = join6(cwd, file2.path);
+    mkdirSync6(dirname4(absolute), { recursive: true });
+    writeFileSync6(absolute, file2.contents);
     written.push(file2.path);
   }
   return written;
@@ -32345,7 +32526,7 @@ async function existingPullRequest(cwd, head) {
   }
 }
 async function addWorktree(cwd, path, branch, from) {
-  if (existsSync4(path)) return "existing";
+  if (existsSync6(path)) return "existing";
   await fetch2(cwd);
   const base = await remoteBranchExists(cwd, from) ? `origin/${from}` : from;
   const args = await branchExists(cwd, branch) ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, base];
@@ -32359,60 +32540,6 @@ async function canPush(cwd) {
   } catch {
     return false;
   }
-}
-
-// packages/plugin/src/preferences.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname4, join as join5 } from "node:path";
-var Preferences = external_exports.object({
-  /**
-   * explicit: nothing is committed until you run /ss:done.
-   * auto-on-green: the agent commits when it reports a passing acceptance test.
-   */
-  commitPolicy: external_exports.enum(["explicit", "auto-on-green"]).default("explicit"),
-  /** Push branches to origin. Off means two clones never exchange code. */
-  push: external_exports.boolean().default(true),
-  /** Open a pull request per task, and one for the finished session. */
-  openPullRequests: external_exports.boolean().default(true),
-  /** Whether hosting binds the local network or only this machine. */
-  expose: external_exports.enum(["lan", "loopback"]).default("lan"),
-  /** Open the live board automatically when you host or join. */
-  openBoard: external_exports.boolean().default(true),
-  /**
-   * Let messages sent to the room as directives run in this Claude Code
-   * session. Off makes the room read-only: you still see everything, but
-   * nothing anyone types reaches your agent.
-   */
-  acceptDirectives: external_exports.boolean().default(true),
-  /** Set once the setup questions have been answered. */
-  configured: external_exports.boolean().default(false)
-});
-var PREFERENCES_PATH = join5(STATE_DIR, "preferences.json");
-function readPreferences() {
-  if (!existsSync5(PREFERENCES_PATH)) return Preferences.parse({});
-  try {
-    return Preferences.parse(JSON.parse(readFileSync4(PREFERENCES_PATH, "utf8")));
-  } catch {
-    return Preferences.parse({});
-  }
-}
-function writePreferences(update) {
-  const merged = Preferences.parse({ ...readPreferences(), ...update });
-  mkdirSync5(dirname4(PREFERENCES_PATH), { recursive: true });
-  writeFileSync5(PREFERENCES_PATH, `${JSON.stringify(merged, null, 2)}
-`);
-  return merged;
-}
-var PREFERENCES_FILE = PREFERENCES_PATH;
-function describePreferences(preferences) {
-  return [
-    `commits:  ${preferences.commitPolicy === "explicit" ? "only when you run /ss:done" : "automatically when the acceptance test passes"}`,
-    `push:     ${preferences.push ? "branches are pushed to origin" : "nothing leaves this machine"}`,
-    `PRs:      ${preferences.openPullRequests ? "opened per task and for the session" : "never opened"}`,
-    `hosting:  ${preferences.expose === "lan" ? "reachable on your local network" : "this machine only"}`,
-    `board:    ${preferences.openBoard ? "opens in your browser on host and join" : "never opened for you"}`,
-    `room:     ${preferences.acceptDirectives ? "directives from the room run in this session" : "read-only; nothing from the room reaches your agent"}`
-  ].join("\n");
 }
 
 // packages/plugin/src/identity.ts
@@ -32502,14 +32629,16 @@ function registerGitTools(server, ctx) {
   server.registerTool(
     "ss_settings",
     {
-      description: "Read or change how session-share touches this machine: when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, and whether the room can drive this agent.",
+      description: "Read or change how session-share touches this machine: whether queued work runs itself while you are idle (autopilot) and what it may spend, when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, and whether the room can drive this agent.",
       inputSchema: {
         commitPolicy: external_exports.enum(["explicit", "auto-on-green"]).nullish(),
         push: external_exports.boolean().nullish(),
         openPullRequests: external_exports.boolean().nullish(),
         expose: external_exports.enum(["lan", "loopback"]).nullish(),
         openBoard: external_exports.boolean().nullish(),
-        acceptDirectives: external_exports.boolean().nullish()
+        acceptDirectives: external_exports.boolean().nullish(),
+        autopilot: external_exports.enum(["off", "splits", "full"]).nullish(),
+        autopilotBudget: external_exports.number().int().min(0).nullish()
       }
     },
     async (input) => {
@@ -33599,6 +33728,7 @@ if (isEntrypoint) {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  startAutopilot();
   process.stderr.write("[session-share] mcp server ready\n");
 }
 export {
