@@ -988,10 +988,18 @@ describe('tickets', () => {
     assert.equal(proposal.validation.ok, true)
     await settle()
 
-    // The split is shown before it runs; one member presses start.
+    // The split is shown before it runs, and starting it is itself a directive
+    // so a session running unattended can carry on.
     const waiting = alice.eventsOfType('ticket.state').at(-1)
     assert.equal(waiting.body.state, 'proposed', 'the split is put in front of a person first')
-    assert.equal(alice.eventsOfType('tasks.seeded').length, 0, 'and nothing runs until it is')
+    assert.equal(alice.eventsOfType('tasks.seeded').length, 0, 'and nothing runs until it is started')
+
+    const toStart = alice
+      .eventsOfType('chat.message')
+      .map((event) => event.body.message)
+      .findLast((m) => m.directive)
+    assert.match(toStart.body, /ss_ticket_approve/)
+    assert.deepEqual(toStart.mentions.sort(), [aliceId, bobId].sort())
 
     await bob.send({ type: 'ticket.approve', ticketId: ticket.id })
     await settle()

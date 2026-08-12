@@ -16,6 +16,7 @@ import { CommandError, pair, peerJoin, runCommand } from './client.js'
 import { readConfig, writeConfig, type SessionConfig } from './config.js'
 import { ensureDaemon, probe, stopDaemon } from './daemon.js'
 import { describeDirectives, markCaughtUp, peekDirectives, pendingDirectives } from './inbox.js'
+import { startAutopilot } from './autopilot.js'
 import { boardUrl, openInBrowser } from './open.js'
 import {
   addWorktree,
@@ -1014,6 +1015,13 @@ if (isEntrypoint) {
   const server = createServer()
   const transport = new StdioServerTransport()
   await server.connect(transport)
+
+  /**
+   * This process outlives every turn, which is exactly what queued work needs:
+   * an idle Claude Code has no turn ending to deliver on, so without something
+   * alive between turns a session stops the moment someone steps away.
+   */
+  startAutopilot()
   process.stderr.write('[session-share] mcp server ready\n')
 }
 

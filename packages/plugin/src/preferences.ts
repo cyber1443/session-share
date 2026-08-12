@@ -28,6 +28,17 @@ export const Preferences = z.object({
    * nothing anyone types reaches your agent.
    */
   acceptDirectives: z.boolean().default(true),
+  /**
+   * Whether queued work runs itself when this Claude Code is idle.
+   *
+   * `full` is the point of the product: the only thing anyone should have to do
+   * is join a ticket. It also means an agent writes to this repository and
+   * pushes branches with nobody watching, which is why it is one word to turn
+   * off and why the spend is capped.
+   */
+  autopilot: z.enum(['off', 'splits', 'full']).default('full'),
+  /** Tokens per day this machine may spend unattended. */
+  autopilotBudget: z.number().int().min(0).default(1_000_000),
   /** Set once the setup questions have been answered. */
   configured: z.boolean().default(false),
 })
@@ -62,5 +73,12 @@ export function describePreferences(preferences: Preferences): string {
     `hosting:  ${preferences.expose === 'lan' ? 'reachable on your local network' : 'this machine only'}`,
     `board:    ${preferences.openBoard ? 'opens in your browser on host and join' : 'never opened for you'}`,
     `room:     ${preferences.acceptDirectives ? 'directives from the room run in this session' : 'read-only; nothing from the room reaches your agent'}`,
+    `autopilot: ${
+      preferences.autopilot === 'off'
+        ? 'off — queued work waits for you'
+        : preferences.autopilot === 'splits'
+          ? `planning runs itself when you are idle (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)`
+          : `everything runs itself when you are idle, including writing and pushing code (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)`
+    }`,
   ].join('\n')
 }

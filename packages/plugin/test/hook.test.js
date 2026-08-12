@@ -479,3 +479,61 @@ describe('reading what a turn cost', () => {
     assert.equal(usageSince(undefined).turns, 0)
   })
 })
+
+/**
+ * Work running itself while nobody is at the keyboard. The decision to start a
+ * headless run is pure on purpose: every reason not to start one is a rule
+ * someone will want to check, and none of them should need a subprocess.
+ */
+describe('autopilot', () => {
+  const base = {
+    preferences: { autopilot: 'full', autopilotBudget: 1_000_000 },
+    pending: 1,
+    planningOnly: false,
+    inFlight: false,
+    spentToday: 0,
+  }
+
+  it('runs when work is waiting and nothing else is', async () => {
+    const { decide } = await import('../dist/autopilot.js')
+    assert.equal(decide(base).run, true)
+  })
+
+  it('stays out of the way when it is off, or there is nothing to do', async () => {
+    const { decide } = await import('../dist/autopilot.js')
+    assert.equal(decide({ ...base, preferences: { ...base.preferences, autopilot: 'off' } }).run, false)
+    assert.equal(decide({ ...base, pending: 0 }).run, false)
+  })
+
+  it('never runs two at once', async () => {
+    const { decide } = await import('../dist/autopilot.js')
+    const verdict = decide({ ...base, inFlight: true })
+    assert.equal(verdict.run, false)
+    assert.match(verdict.reason, /already going/)
+  })
+
+  it('holds the line on the daily budget, because nobody is watching', async () => {
+    const { decide } = await import('../dist/autopilot.js')
+    const verdict = decide({ ...base, spentToday: 1_000_000 })
+    assert.equal(verdict.run, false)
+    assert.match(verdict.reason, /budget is spent/)
+  })
+
+  it('in splits mode, only plans', async () => {
+    const { decide } = await import('../dist/autopilot.js')
+    const preferences = { autopilot: 'splits', autopilotBudget: 1_000_000 }
+    assert.equal(decide({ ...base, preferences, planningOnly: true }).run, true)
+    const refused = decide({ ...base, preferences, planningOnly: false })
+    assert.equal(refused.run, false)
+    assert.match(refused.reason, /splits only/)
+  })
+
+  it('counts spend per day and forgets yesterday', async () => {
+    const { readSpend, addSpend } = await import('../dist/autopilot.js')
+    process.env.SESSION_SHARE_HOME = stateDir
+    addSpend('2026-08-12', 30_000)
+    addSpend('2026-08-12', 20_000)
+    assert.equal(readSpend('2026-08-12').tokens, 50_000)
+    assert.equal(readSpend('2026-08-13').tokens, 0, 'a new day starts at nothing')
+  })
+})

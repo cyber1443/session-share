@@ -923,11 +923,22 @@ export class SessionService {
        * files. It is one button, pressed by whoever is looking.
        */
       this.setTicketState(sessionId, participantId, ticket.id, 'proposed')
-      this.systemMessage(
+      /**
+       * Addressed to the members rather than merely announced, so a session
+       * that is running itself can carry on: joining the ticket was the
+       * agreement, and waiting for a second one from the same person is the
+       * ceremony this is supposed to remove. It is still on the board, and
+       * still one click, for anyone who would rather look first.
+       */
+      this.systemDirective(
         sessionId,
         participantId,
         ticket.members,
-        `The split for "${ticket.title}" is ready: ${command.tasks.length} task(s). Look it over on the board and press start.`,
+        [
+          `The split for "${ticket.title}" is ready: ${command.tasks.length} task(s).`,
+          'Look it over, change who does what if you disagree, then start it with',
+          `ss_ticket_approve (ticketId: ${ticket.id}). Starting it hands everyone their tasks.`,
+        ].join('\n'),
       )
       return { decompositionId, validation }
     }
