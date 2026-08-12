@@ -32040,26 +32040,69 @@ var sleep = (ms) => new Promise((resolve4) => setTimeout(resolve4, ms));
 
 // packages/plugin/src/inbox.ts
 import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
 import { join as join3 } from "node:path";
-var INBOX_FILE = join3(STATE_DIR, "inbox.json");
+function stateDir() {
+  return process.env.SESSION_SHARE_HOME ?? join3(homedir2(), ".session-share");
+}
+var inboxFile = () => join3(stateDir(), "inbox.json");
 function cursorKey(config3) {
   return `${config3.serverUrl}|${config3.sessionRef}|${config3.participantId}`;
 }
 function readCursors() {
-  if (!existsSync3(INBOX_FILE)) return {};
+  const path = inboxFile();
+  if (!existsSync3(path)) return {};
   try {
-    return JSON.parse(readFileSync3(INBOX_FILE, "utf8"));
+    return JSON.parse(readFileSync3(path, "utf8"));
   } catch {
     return {};
   }
 }
 function writeCursor(key, value) {
-  mkdirSync3(STATE_DIR, { recursive: true });
-  writeFileSync3(INBOX_FILE, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
+  mkdirSync3(stateDir(), { recursive: true });
+  writeFileSync3(inboxFile(), `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
 `);
 }
 function markCaughtUp(config3, at = Date.now()) {
   writeCursor(cursorKey(config3), at);
+}
+async function pendingDirectives(config3, timeoutMs = 2500, consume = true) {
+  const key = cursorKey(config3);
+  const cursor = readCursors()[key];
+  if (cursor === void 0) {
+    markCaughtUp(config3);
+    return [];
+  }
+  const { messages } = await runCommand(
+    config3,
+    { type: "chat.read", limit: 50, beforeSeq: null, taskRef: null },
+    timeoutMs
+  );
+  const pending = messages.filter(
+    (message) => message.directive && message.createdAt > cursor && message.authorId !== config3.participantId && (message.mentions.length === 0 || message.mentions.includes(config3.participantId))
+  );
+  if (consume && pending.length > 0) {
+    writeCursor(key, Math.max(...pending.map((message) => message.createdAt)));
+  }
+  return pending;
+}
+function peekDirectives(config3, timeoutMs = 2e3) {
+  return pendingDirectives(config3, timeoutMs, false);
+}
+function describeDirectives(messages, names) {
+  const lines = messages.map((message) => {
+    const author = message.authorId && names.get(message.authorId) || "a teammate";
+    const scope = message.taskRef ? ` (about #${message.taskRef})` : "";
+    return `- ${author}${scope}: ${message.body}`;
+  });
+  return [
+    `[session-share] ${messages.length === 1 ? "A teammate sent an instruction" : `${messages.length} instructions arrived`} in the session room:`,
+    "",
+    ...lines,
+    "",
+    "Act on it in this repository now. Your file leases still apply, so an edit outside your task will be refused.",
+    "Reply in the room with ss_chat_post when you are done or if you need something from them."
+  ].join("\n");
 }
 
 // packages/plugin/src/open.ts
@@ -33039,6 +33082,21 @@ function createServer() {
     }
   );
   server.registerTool(
+    "ss_inbox",
+    {
+      description: "Take whatever the session has queued for you and act on it. Use this when you have been told there is work waiting -- a split to propose, tasks to claim, a PR to open. Normally it arrives by itself at the end of a turn; this is for picking it up on demand.",
+      inputSchema: {}
+    },
+    async () => {
+      const cfg = config2();
+      const pending = await pendingDirectives(cfg, 5e3);
+      if (pending.length === 0) return text("Nothing waiting. The room has asked you for nothing.");
+      const state = await snapshot(cfg);
+      const names = new Map(state.participants.map((p) => [p.id, p.displayName]));
+      return text(describeDirectives(pending, names));
+    }
+  );
+  server.registerTool(
     "ss_tickets",
     {
       description: "The board: every ticket in this session, which column it is in, who is in it, and how its tasks are going. Read this before asking what to do next.",
@@ -33048,8 +33106,10 @@ function createServer() {
       const cfg = config2();
       const state = await snapshot(cfg);
       const names = new Map(state.participants.map((p) => [p.id, p.displayName]));
-      return text(
-        state.tickets.map((ticket) => ({
+      const waiting = await peekDirectives(cfg).catch(() => []);
+      return text({
+        waiting: waiting.length > 0 ? `${waiting.length} instruction(s) are queued for you -- run ss_inbox to take them.` : void 0,
+        tickets: state.tickets.map((ticket) => ({
           id: ticket.id,
           title: ticket.title,
           column: ticket.state,
@@ -33058,7 +33118,7 @@ function createServer() {
           tasks: state.tasks.filter((task) => task.ticketId === ticket.id).map((task) => `${task.id}: ${task.state}${task.assigneeId ? ` (${names.get(task.assigneeId)})` : ""}`),
           prNumber: ticket.prNumber
         }))
-      );
+      });
     }
   );
   server.registerTool(

@@ -14600,16 +14600,80 @@ async function runCommand(config2, command, timeoutMs = 3e3) {
 }
 
 // packages/plugin/src/inbox.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir } from "node:os";
+import { join as join2 } from "node:path";
+function stateDir() {
+  return process.env.SESSION_SHARE_HOME ?? join2(homedir(), ".session-share");
+}
+var inboxFile = () => join2(stateDir(), "inbox.json");
+function cursorKey(config2) {
+  return `${config2.serverUrl}|${config2.sessionRef}|${config2.participantId}`;
+}
+function readCursors() {
+  const path = inboxFile();
+  if (!existsSync2(path)) return {};
+  try {
+    return JSON.parse(readFileSync2(path, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function writeCursor(key, value) {
+  mkdirSync2(stateDir(), { recursive: true });
+  writeFileSync2(inboxFile(), `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
+`);
+}
+function markCaughtUp(config2, at = Date.now()) {
+  writeCursor(cursorKey(config2), at);
+}
+async function pendingDirectives(config2, timeoutMs = 2500, consume = true) {
+  const key = cursorKey(config2);
+  const cursor = readCursors()[key];
+  if (cursor === void 0) {
+    markCaughtUp(config2);
+    return [];
+  }
+  const { messages } = await runCommand(
+    config2,
+    { type: "chat.read", limit: 50, beforeSeq: null, taskRef: null },
+    timeoutMs
+  );
+  const pending = messages.filter(
+    (message) => message.directive && message.createdAt > cursor && message.authorId !== config2.participantId && (message.mentions.length === 0 || message.mentions.includes(config2.participantId))
+  );
+  if (consume && pending.length > 0) {
+    writeCursor(key, Math.max(...pending.map((message) => message.createdAt)));
+  }
+  return pending;
+}
+function describeDirectives(messages, names) {
+  const lines = messages.map((message) => {
+    const author = message.authorId && names.get(message.authorId) || "a teammate";
+    const scope = message.taskRef ? ` (about #${message.taskRef})` : "";
+    return `- ${author}${scope}: ${message.body}`;
+  });
+  return [
+    `[session-share] ${messages.length === 1 ? "A teammate sent an instruction" : `${messages.length} instructions arrived`} in the session room:`,
+    "",
+    ...lines,
+    "",
+    "Act on it in this repository now. Your file leases still apply, so an edit outside your task will be refused.",
+    "Reply in the room with ss_chat_post when you are done or if you need something from them."
+  ].join("\n");
+}
+
+// packages/plugin/src/preferences.ts
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname3, join as join4 } from "node:path";
 
 // packages/plugin/src/daemon.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, readdirSync, statSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, openSync, readFileSync as readFileSync3, readdirSync, statSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
-import { homedir } from "node:os";
-import { dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname2, join as join3, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // packages/protocol/dist/ids.js
@@ -15293,73 +15357,14 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
 ]);
 
 // packages/plugin/src/daemon.ts
-var STATE_DIR = process.env.SESSION_SHARE_HOME ?? join2(homedir(), ".session-share");
-var DAEMON_FILE = join2(STATE_DIR, "daemon.json");
-var SECRET_FILE = join2(STATE_DIR, "secret");
-var DB_FILE = join2(STATE_DIR, "sessions.db");
-var LOG_FILE = join2(STATE_DIR, "server.log");
+var STATE_DIR = process.env.SESSION_SHARE_HOME ?? join3(homedir2(), ".session-share");
+var DAEMON_FILE = join3(STATE_DIR, "daemon.json");
+var SECRET_FILE = join3(STATE_DIR, "secret");
+var DB_FILE = join3(STATE_DIR, "sessions.db");
+var LOG_FILE = join3(STATE_DIR, "server.log");
 var DEFAULT_PORT = Number(process.env.SESSION_SHARE_PORT ?? 4310);
 
-// packages/plugin/src/inbox.ts
-var INBOX_FILE = join3(STATE_DIR, "inbox.json");
-function cursorKey(config2) {
-  return `${config2.serverUrl}|${config2.sessionRef}|${config2.participantId}`;
-}
-function readCursors() {
-  if (!existsSync3(INBOX_FILE)) return {};
-  try {
-    return JSON.parse(readFileSync3(INBOX_FILE, "utf8"));
-  } catch {
-    return {};
-  }
-}
-function writeCursor(key, value) {
-  mkdirSync3(STATE_DIR, { recursive: true });
-  writeFileSync3(INBOX_FILE, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
-`);
-}
-function markCaughtUp(config2, at = Date.now()) {
-  writeCursor(cursorKey(config2), at);
-}
-async function pendingDirectives(config2, timeoutMs = 2500) {
-  const key = cursorKey(config2);
-  const cursor = readCursors()[key];
-  if (cursor === void 0) {
-    markCaughtUp(config2);
-    return [];
-  }
-  const { messages } = await runCommand(
-    config2,
-    { type: "chat.read", limit: 50, beforeSeq: null, taskRef: null },
-    timeoutMs
-  );
-  const pending = messages.filter(
-    (message) => message.directive && message.createdAt > cursor && message.authorId !== config2.participantId && (message.mentions.length === 0 || message.mentions.includes(config2.participantId))
-  );
-  if (pending.length > 0) {
-    writeCursor(key, Math.max(...pending.map((message) => message.createdAt)));
-  }
-  return pending;
-}
-function describeDirectives(messages, names) {
-  const lines = messages.map((message) => {
-    const author = message.authorId && names.get(message.authorId) || "a teammate";
-    const scope = message.taskRef ? ` (about #${message.taskRef})` : "";
-    return `- ${author}${scope}: ${message.body}`;
-  });
-  return [
-    `[session-share] ${messages.length === 1 ? "A teammate sent an instruction" : `${messages.length} instructions arrived`} in the session room:`,
-    "",
-    ...lines,
-    "",
-    "Act on it in this repository now. Your file leases still apply, so an edit outside your task will be refused.",
-    "Reply in the room with ss_chat_post when you are done or if you need something from them."
-  ].join("\n");
-}
-
 // packages/plugin/src/preferences.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname3, join as join4 } from "node:path";
 var Preferences = external_exports.object({
   /**
    * explicit: nothing is committed until you run /ss:done.
