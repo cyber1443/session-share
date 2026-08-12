@@ -12,6 +12,7 @@ import { Kanban } from '@/components/kanban'
 import { Room } from '@/components/room'
 import { TicketPanel } from '@/components/ticket'
 import { useLiveSession } from '@/lib/live'
+import { tokens } from '@/lib/tokens'
 
 const DOT = [
   'bg-emerald-400',
@@ -25,6 +26,7 @@ const DOT = [
 ]
 
 const PHASES = ['plan', 'build', 'integrate', 'done'] as const
+
 
 function Board({ slug }: { slug: string }) {
   const { me, mode } = useAuth()
@@ -127,6 +129,16 @@ function Board({ slug }: { slug: string }) {
                     {participant.activity.detail}
                     {participant.repoPath ? '' : ' · watching'}
                   </p>
+                  {/* What their own Claude account has spent on this session. */}
+                  {(() => {
+                    const spent = snapshot.usage
+                      .filter((u) => u.participantId === participant.id)
+                      .reduce((sum, u) => sum + u.inputTokens + u.outputTokens, 0)
+                    return spent > 0 ? (
+                      <p className="truncate pl-4 text-[10px] text-mute">{tokens(spent)} tokens</p>
+                    ) : null
+                  })()}
+
                   {/* What they were given, and how much of it is done. */}
                   {(() => {
                     const theirs = snapshot.tasks.filter((t) => t.assigneeId === participant.id)

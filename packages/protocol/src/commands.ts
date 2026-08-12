@@ -171,6 +171,18 @@ export const ClientCommand = z.discriminatedUnion('type', [
     taskRef: TaskId.nullable().default(null),
   }),
 
+  /**
+   * Tokens this participant's own account spent since the last report. Sent by
+   * the Stop hook, which is handed the transcript Claude Code just wrote.
+   */
+  z.object({
+    type: z.literal('usage.report'),
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    cacheReadTokens: z.number().int().nonnegative().default(0),
+    cacheCreationTokens: z.number().int().nonnegative().default(0),
+    turns: z.number().int().nonnegative().default(0),
+  }),
   z.object({
     type: z.literal('activity.report'),
     activity: ParticipantActivity.omit({ updatedAt: true }),
@@ -250,6 +262,7 @@ export interface CommandResultMap {
   'handoff.resolve': { ok: true }
   'chat.post': { message: ChatMessage }
   'chat.read': { messages: ChatMessage[] }
+  'usage.report': { ok: true }
   'activity.report': { ok: true }
 }
 

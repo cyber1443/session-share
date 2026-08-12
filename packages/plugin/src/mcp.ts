@@ -178,9 +178,12 @@ export function createServer(): McpServer {
     'ss_host',
     {
       description:
-        'Start hosting a session from this machine. Brings up a local coordination server if one is not already running, creates the session for this repository, attaches this checkout, and returns the single string to send a teammate.',
+        'Start hosting a session for this repository. Brings up a local coordination server if one is not already running, attaches this checkout, and returns the single string to send a teammate. Work is organised as tickets on the board, so the session does not need a name of its own.',
       inputSchema: {
-        title: z.string().describe('What the session is for, e.g. "Add a dark mode toggle"'),
+        title: z
+          .string()
+          .nullish()
+          .describe('Rarely needed: the session is named after the repository by default'),
         issueRef: z.string().nullish().describe('Issue URL, if there is one'),
         expose: z
           .enum(['lan', 'loopback'])
@@ -190,8 +193,15 @@ export function createServer(): McpServer {
           ),
       },
     },
-    async ({ title, issueRef, expose }) => {
+    async ({ title: given, issueRef, expose }) => {
       const root = await repoRoot(REPO_ROOT)
+      /**
+       * A session is the repository, not a piece of work -- tickets are the
+       * pieces. Naming it after the work was a leftover from when a session
+       * held exactly one plan, and it made every new session need a decision
+       * nobody had a reason to make.
+       */
+      const title = given?.trim() || basename(root)
       const identity = await localIdentity()
       const daemon = await ensureDaemon({ expose: expose ?? readPreferences().expose })
       const loopback = `http://127.0.0.1:${daemon.port}`

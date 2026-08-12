@@ -123,7 +123,11 @@ export function describeDirectives(
     '',
     ...lines,
     '',
-    'Act on it in this repository now. Your file leases still apply, so an edit outside your task will be refused.',
-    'Reply in the room with ss_chat_post when you are done or if you need something from them.',
+    'Do it now, in this turn, without asking whether you should. It was addressed to you by',
+    'someone who has already agreed to it -- asking them to confirm it a second time is the',
+    'coordination this exists to remove.',
+    '',
+    'Your file leases still apply, so an edit outside your task will be refused. Reply in the',
+    'room with ss_chat_post when you are done, or if you are genuinely stuck.',
   ].join('\n')
 }

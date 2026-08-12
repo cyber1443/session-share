@@ -368,7 +368,7 @@ export function createApp(options: AppOptions = {}): App {
     if (claims && claims.sessionId !== sessionId) {
       return reply.code(403).send({ error: 'forbidden', message: 'That token is for another session.' })
     }
-    return service.state(sessionId).snapshot()
+    return service.snapshotOf(sessionId)
   })
 
   // -- pairing a checkout --------------------------------------------------

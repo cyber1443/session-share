@@ -382,6 +382,26 @@ export const ChatMessage = z.object({
 })
 export type ChatMessage = z.infer<typeof ChatMessage>
 
+/**
+ * What a stretch of agent work cost, and whose account paid for it.
+ *
+ * Nobody proxies inference here -- each person's Claude runs on their own
+ * account -- which makes "who is this costing" a real question that nothing
+ * else in the session can answer.
+ */
+export const Usage = z.object({
+  participantId: ParticipantId,
+  /** The ticket their work was against, when they were holding one of its tasks. */
+  ticketId: TicketId.nullable().default(null),
+  inputTokens: z.number().int().nonnegative().default(0),
+  outputTokens: z.number().int().nonnegative().default(0),
+  cacheReadTokens: z.number().int().nonnegative().default(0),
+  cacheCreationTokens: z.number().int().nonnegative().default(0),
+  /** Assistant turns counted, so an average is available. */
+  turns: z.number().int().nonnegative().default(0),
+})
+export type Usage = z.infer<typeof Usage>
+
 // ---------------------------------------------------------------------------
 // Merge queue
 // ---------------------------------------------------------------------------
@@ -409,6 +429,7 @@ export const SessionSnapshot = z.object({
   leases: z.array(Lease),
   handoffs: z.array(HandoffRequest),
   chat: z.array(ChatMessage),
+  usage: z.array(Usage).default([]),
   mergeQueue: z.array(MergeQueueEntry),
   seq: z.number().int().nonnegative(),
 })

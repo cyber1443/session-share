@@ -1297,3 +1297,120 @@ describe('tickets', () => {
     assert.match(error.message, /Release or finish it/)
   })
 })
+
+describe('what it cost and who is still here', () => {
+  const open = (client, title, body = '') => client.send({ type: 'ticket.create', title, body })
+
+  it('bills tokens to the ticket whose task the person is holding', async () => {
+    const { alice, bob, aliceId } = await twoDevSession('usage-ticket')
+    const { ticket } = await open(alice, 'Add due dates')
+    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+    await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+      ticketId: ticket.id,
+    })
+    await alice.send({ type: 'ticket.approve', ticketId: ticket.id })
+    await alice.send({
+      type: 'contract.committed',
+      branch: 'ss/usage-ticket/contract',
+      commitSha: 'abc1234',
+      prNumber: null,
+    })
+    await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
+
+    await alice.send({
+      type: 'usage.report',
+      inputTokens: 1200,
+      outputTokens: 800,
+      cacheReadTokens: 40_000,
+      cacheCreationTokens: 500,
+      turns: 3,
+    })
+    await settle()
+
+    const recorded = alice.eventsOfType('usage.recorded').at(-1)
+    assert.equal(recorded.body.participantId, aliceId)
+    assert.equal(
+      recorded.body.ticketId,
+      ticket.id,
+      'cost lands on the ticket that caused it, not in one pile',
+    )
+
+    // A second report accumulates rather than replacing.
+    await alice.send({
+      type: 'usage.report',
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      turns: 1,
+    })
+    await settle()
+
+    const snapshot = await alice.send({
+      type: 'session.join',
+      sessionRef: 'usage-ticket',
+      githubLogin: 'alice',
+      displayName: 'Alice',
+      repoPath: '/tmp/alice/web',
+      fromSeq: null,
+    })
+    const mine = snapshot.snapshot.usage.find((u) => u.participantId === aliceId)
+    assert.equal(mine.outputTokens, 850)
+    assert.equal(mine.turns, 4)
+  })
+
+  it('records work done outside any ticket against nothing in particular', async () => {
+    const { alice } = await twoDevSession('usage-loose')
+    await alice.send({
+      type: 'usage.report',
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      turns: 1,
+    })
+    await settle()
+    assert.equal(alice.eventsOfType('usage.recorded').at(-1).body.ticketId, null)
+  })
+
+  it('ignores an empty report rather than logging noise', async () => {
+    const { alice } = await twoDevSession('usage-empty')
+    await alice.send({
+      type: 'usage.report',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      turns: 0,
+    })
+    await settle()
+    assert.equal(alice.eventsOfType('usage.recorded').length, 0)
+  })
+
+  /**
+   * Presence used to be a flag flipped by a websocket, so anyone who only ever
+   * spoke over HTTP -- every attached checkout -- stayed "connected" forever and
+   * sessions filled up with people who had walked away.
+   */
+  it('stops calling someone present when they have not been heard from', async () => {
+    const { alice, aliceId, bobId } = await twoDevSession('presence')
+    const sessionId = app.store.findSessionIdByRef('presence')
+
+    const now = app.service.snapshotOf(sessionId)
+    assert.equal(now.participants.every((p) => p.connected), true, 'both just spoke')
+
+    // Bob's last word was a while ago; Alice is mid-conversation.
+    app.service.seen(aliceId)
+    app.service.lastSeen.set(bobId, Date.now() - 60 * 60 * 1000)
+
+    const later = app.service.snapshotOf(sessionId)
+    assert.equal(later.participants.find((p) => p.id === aliceId).connected, true)
+    assert.equal(later.participants.find((p) => p.id === bobId).connected, false)
+    await alice.send({ type: 'session.sync', fromSeq: 0 })
+  })
+})

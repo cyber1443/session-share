@@ -4,6 +4,7 @@ import { readConfig, type SessionConfig } from './config.js'
 import { runCommand } from './client.js'
 import { describeDirectives, pendingDirectives } from './inbox.js'
 import { readPreferences } from './preferences.js'
+import { usageSince } from './usage.js'
 
 /**
  * Every hook the plugin installs, in one process.
@@ -23,6 +24,8 @@ const ROOM_TIMEOUT_MS = 2500
 
 interface HookInput {
   hook_event_name?: string
+  /** Written by Claude Code; every assistant message in it carries its usage. */
+  transcript_path?: string
   tool_name?: string
   tool_input?: Record<string, unknown>
   cwd?: string
@@ -132,6 +135,21 @@ export async function collectRoom(input: HookInput): Promise<string | null> {
   return describeDirectives(pending, await participantNames(config))
 }
 
+/** Sends the turn's token count, attributed by the server to whatever is held. */
+async function reportUsage(input: HookInput): Promise<void> {
+  const config = readConfig(input.cwd ?? process.cwd())
+  if (!config) return
+
+  const delta = usageSince(input.transcript_path)
+  if (delta.inputTokens + delta.outputTokens === 0) return
+
+  try {
+    await runCommand(config, { type: 'usage.report', ...delta }, ROOM_TIMEOUT_MS)
+  } catch {
+    // Accounting is never a reason to interfere with someone's session.
+  }
+}
+
 export async function route(
   input: HookInput,
 ): Promise<DenyOutput | ContextOutput | ContinueOutput | null> {
@@ -147,6 +165,8 @@ export async function route(
      * continue with the directive as its instruction.
      */
     case 'Stop': {
+      // Whose account paid for the turn that just ended, and for what.
+      await reportUsage(input)
       if (input.stop_hook_active) return null // we already spoke this turn
       const reason = await collectRoom(input)
       return reason ? { decision: 'block', reason } : null

@@ -74,8 +74,19 @@ const PALETTE_SIZE = 8
  */
 const UNANIMOUS_UP_TO = 3
 
+/**
+ * How long a participant counts as present after their last command.
+ *
+ * Presence was a flag flipped by a websocket, which meant anyone who only ever
+ * spoke over HTTP -- every attached checkout -- stayed "connected" forever, and
+ * sessions filled up with people who had long since walked away.
+ */
+const PRESENT_FOR_MS = 10 * 60 * 1000
+
 export class SessionService {
   private readonly states = new Map<SessionId, SessionState>()
+  /** Public so a test can age someone out without waiting ten minutes. */
+  readonly lastSeen = new Map<ParticipantId, number>()
 
   constructor(
     private readonly store: Store,
@@ -107,6 +118,29 @@ export class SessionService {
     return envelope
   }
 
+  /** Marks someone present now -- used when a socket opens. */
+  seen(participantId: ParticipantId): void {
+    this.lastSeen.set(participantId, Date.now())
+  }
+
+  /**
+   * The snapshot everyone actually reads, with presence resolved from when each
+   * participant was last heard from rather than from a flag nobody clears.
+   */
+  snapshotOf(sessionId: SessionId) {
+    const snapshot = this.state(sessionId).snapshot()
+    const now = Date.now()
+    return {
+      ...snapshot,
+      participants: snapshot.participants.map((participant) => ({
+        ...participant,
+        connected:
+          participant.connected &&
+          now - (this.lastSeen.get(participant.id) ?? participant.joinedAt) < PRESENT_FOR_MS,
+      })),
+    }
+  }
+
   readEvents(sessionId: SessionId, fromSeq: number, limit?: number): EventEnvelope[] {
     return this.store.readEvents(sessionId, fromSeq, limit)
   }
@@ -118,6 +152,7 @@ export class SessionService {
     ctx: CommandContext,
   ): CommandResultMap[T]
   handle(command: ClientCommand, ctx: CommandContext): unknown {
+    if (ctx.participantId) this.lastSeen.set(ctx.participantId, Date.now())
     switch (command.type) {
       case 'session.create':
         return this.createSession(command)
@@ -173,6 +208,8 @@ export class SessionService {
         return this.postChat(command, ctx)
       case 'chat.read':
         return this.readChat(command, ctx)
+      case 'usage.report':
+        return this.recordUsage(command, ctx)
       case 'activity.report':
         return this.reportActivity(command, ctx)
     }
@@ -293,7 +330,7 @@ export class SessionService {
     return {
       participantId,
       sessionId,
-      snapshot: command.fromSeq === null ? state.snapshot() : null,
+      snapshot: command.fromSeq === null ? this.snapshotOf(sessionId) : null,
     }
   }
 
@@ -1600,6 +1637,33 @@ export class SessionService {
       ? state.chat.filter((m) => m.taskRef === command.taskRef)
       : state.chat
     return { messages: filtered.slice(-command.limit) }
+  }
+
+  /**
+   * Attributed to whatever they are holding, so cost lands on the ticket that
+   * caused it rather than in one undifferentiated pile.
+   */
+  private recordUsage(
+    command: Extract<ClientCommand, { type: 'usage.report' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    if (command.inputTokens + command.outputTokens === 0) return { ok: true as const }
+
+    const held = [...state.tasks.values()].find(
+      (task) => task.ownerId === participantId && task.state !== 'merged',
+    )
+    this.emit(sessionId, participantId, {
+      type: 'usage.recorded',
+      participantId,
+      ticketId: held?.ticketId ?? null,
+      inputTokens: command.inputTokens,
+      outputTokens: command.outputTokens,
+      cacheReadTokens: command.cacheReadTokens,
+      cacheCreationTokens: command.cacheCreationTokens,
+      turns: command.turns,
+    })
+    return { ok: true as const }
   }
 
   private reportActivity(

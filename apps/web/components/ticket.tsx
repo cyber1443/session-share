@@ -1,6 +1,7 @@
 'use client'
 
 import type { Participant, SessionSnapshot, Ticket } from '@session-share/protocol'
+import { tokens } from '@/lib/tokens'
 
 const DOT = [
   'bg-emerald-400',
@@ -67,6 +68,9 @@ export function TicketPanel({
   const workers = members.filter((p) => p.repoPath)
   const mine = Boolean(meId && ticket.members.includes(meId as never))
   const merged = tasks.filter((task) => task.state === 'merged').length
+  const spend = snapshot.usage
+    .filter((entry) => entry.ticketId === ticket.id)
+    .sort((a, b) => b.outputTokens - a.outputTokens)
 
   return (
     <aside className="flex w-96 shrink-0 flex-col gap-5 overflow-y-auto border-l border-edge p-4 text-xs">
@@ -84,6 +88,30 @@ export function TicketPanel({
       </div>
 
       {ticket.body ? <p className="leading-relaxed text-neutral-400">{ticket.body}</p> : null}
+
+      {/* What this ticket has cost, and on whose account. */}
+      {spend.length > 0 ? (
+        <div>
+          <p className="text-[10px] uppercase tracking-wider text-mute">Spent on this</p>
+          <ul className="mt-1 space-y-0.5">
+            {spend.map((entry) => {
+              const who = snapshot.participants.find((p) => p.id === entry.participantId)
+              return (
+                <li key={entry.participantId} className="flex items-center gap-2 text-[10px]">
+                  <span
+                    className={`h-2 w-2 rounded-full ${who ? DOT[who.colorIndex % DOT.length] : 'bg-neutral-700'}`}
+                  />
+                  <span className="text-neutral-300">{who?.displayName ?? 'someone'}</span>
+                  <span className="ml-auto text-mute">
+                    {tokens(entry.inputTokens + entry.outputTokens)} over {entry.turns} turn
+                    {entry.turns === 1 ? '' : 's'}
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      ) : null}
 
       {/* -- who ------------------------------------------------------------ */}
       <div>

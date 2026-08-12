@@ -3,6 +3,7 @@ import type {
   Decomposition,
   Ticket,
   TicketState,
+  Usage,
   HandoffRequest,
   Lease,
   MergeQueueEntry,
@@ -44,6 +45,8 @@ export class SessionState {
   readonly leases = new Map<TaskId, Lease>()
   readonly handoffs = new Map<string, HandoffRequest>()
   readonly chat: ChatMessage[] = []
+  /** Keyed by `participant|ticket`, so both totals fall out of one map. */
+  readonly usage = new Map<string, Usage>()
   mergeQueue: MergeQueueEntry[] = []
 
   apply(envelope: EventEnvelope): void {
@@ -218,6 +221,28 @@ export class SessionState {
         this.chat.push(body.message)
         break
 
+      case 'usage.recorded': {
+        const key = `${body.participantId}|${body.ticketId ?? ''}`
+        const at = this.usage.get(key) ?? {
+          participantId: body.participantId,
+          ticketId: body.ticketId,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          turns: 0,
+        }
+        this.usage.set(key, {
+          ...at,
+          inputTokens: at.inputTokens + body.inputTokens,
+          outputTokens: at.outputTokens + body.outputTokens,
+          cacheReadTokens: at.cacheReadTokens + body.cacheReadTokens,
+          cacheCreationTokens: at.cacheCreationTokens + body.cacheCreationTokens,
+          turns: at.turns + body.turns,
+        })
+        break
+      }
+
       case 'merge.queue':
         this.mergeQueue = body.entries
         break
@@ -359,6 +384,10 @@ export class SessionState {
     for (const handoff of snapshot.handoffs) this.handoffs.set(handoff.id, handoff)
     this.chat.length = 0
     this.chat.push(...snapshot.chat)
+    this.usage.clear()
+    for (const entry of snapshot.usage ?? []) {
+      this.usage.set(`${entry.participantId}|${entry.ticketId ?? ''}`, entry)
+    }
     this.mergeQueue = snapshot.mergeQueue
     this.seq = snapshot.seq
   }
@@ -375,6 +404,7 @@ export class SessionState {
       leases: [...this.leases.values()],
       handoffs: [...this.handoffs.values()],
       chat: this.chat,
+      usage: [...this.usage.values()],
       mergeQueue: this.mergeQueue,
       seq: this.seq,
     }

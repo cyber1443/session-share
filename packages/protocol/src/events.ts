@@ -158,6 +158,17 @@ export const EventBody = z.discriminatedUnion('type', [
   z.object({ type: z.literal('chat.message'), message: ChatMessage }),
 
   // -- merge queue ----------------------------------------------------------
+  z.object({
+    type: z.literal('usage.recorded'),
+    participantId: ParticipantId,
+    ticketId: TicketId.nullable(),
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    cacheReadTokens: z.number().int().nonnegative(),
+    cacheCreationTokens: z.number().int().nonnegative(),
+    turns: z.number().int().nonnegative(),
+  }),
+
   z.object({ type: z.literal('merge.queue'), entries: z.array(MergeQueueEntry) }),
   z.object({
     type: z.literal('merge.conflict'),

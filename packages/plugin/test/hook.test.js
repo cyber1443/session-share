@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -425,5 +425,57 @@ describe('directives from the room', () => {
     assert.equal(await stop(orphan), null)
     assert.equal(await stop(orphan), null)
     rmSync(orphan, { recursive: true, force: true })
+  })
+})
+
+/**
+ * Nobody proxies inference here, so "who is this costing" cannot be answered
+ * from the inside -- except that Claude Code hands the Stop hook the transcript
+ * it just wrote, and every assistant message in it carries its own usage.
+ */
+describe('reading what a turn cost', () => {
+  const line = (usage) => `${JSON.stringify({ type: 'assistant', message: { usage } })}\n`
+
+  it('sums usage and never counts the same bytes twice', async () => {
+    const { usageSince } = await import('../dist/usage.js')
+    process.env.SESSION_SHARE_HOME = stateDir
+    const transcript = join(stateDir, 'transcript.jsonl')
+
+    writeFileSync(
+      transcript,
+      line({ input_tokens: 10, output_tokens: 100, cache_read_input_tokens: 5000 }) +
+        line({ input_tokens: 2, output_tokens: 40, cache_creation_input_tokens: 300 }),
+    )
+
+    const first = usageSince(transcript)
+    assert.equal(first.outputTokens, 140)
+    assert.equal(first.cacheReadTokens, 5000)
+    assert.equal(first.turns, 2)
+
+    assert.equal(usageSince(transcript).outputTokens, 0, 'a re-read must report nothing new')
+
+    appendFileSync(transcript, line({ input_tokens: 1, output_tokens: 9 }))
+    const second = usageSince(transcript)
+    assert.equal(second.outputTokens, 9, 'only what was appended since')
+    assert.equal(second.turns, 1)
+  })
+
+  it('starts over if the transcript was replaced underneath it', async () => {
+    const { usageSince } = await import('../dist/usage.js')
+    const transcript = join(stateDir, 'replaced.jsonl')
+    writeFileSync(transcript, line({ input_tokens: 1, output_tokens: 500 }))
+    usageSince(transcript)
+
+    writeFileSync(transcript, line({ input_tokens: 1, output_tokens: 7 }))
+    assert.equal(usageSince(transcript).outputTokens, 7)
+  })
+
+  it('survives a half-written line and a file that is not there', async () => {
+    const { usageSince } = await import('../dist/usage.js')
+    const transcript = join(stateDir, 'partial.jsonl')
+    writeFileSync(transcript, line({ input_tokens: 1, output_tokens: 3 }) + '{"type":"assis')
+    assert.equal(usageSince(transcript).outputTokens, 3)
+    assert.equal(usageSince(join(stateDir, 'nope.jsonl')).turns, 0)
+    assert.equal(usageSince(undefined).turns, 0)
   })
 })

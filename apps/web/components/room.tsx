@@ -276,6 +276,8 @@ function describe(envelope: EventEnvelope): string {
       return body.granted ? 'granted a handoff' : 'refused a handoff'
     case 'chat.message':
       return `${body.message.directive ? 'sent the agents' : 'said'}: ${body.message.body.slice(0, 80)}`
+    case 'usage.recorded':
+      return `${body.outputTokens} tokens out over ${body.turns} turn(s)`
     case 'merge.queue':
       return `merge queue: ${body.entries.length} waiting`
     case 'merge.conflict':
