@@ -133,6 +133,8 @@ export class SessionService {
         return this.leaveTicket(command, ctx)
       case 'ticket.start':
         return this.startTicket(command, ctx)
+      case 'ticket.approve':
+        return this.approveTicket(command, ctx)
       case 'ticket.shipped':
         return this.shipTicket(command, ctx)
       case 'plan.request':
@@ -328,6 +330,7 @@ export class SessionService {
     }
     this.emit(sessionId, participantId, { type: 'ticket.created', ticket })
 
+    let plannerId: ParticipantId | null = null
     const others = [...state.participants.values()].filter((p) => p.id !== participantId)
     const author = state.participants.get(participantId)?.displayName ?? 'Someone'
     if (others.length > 0) {
@@ -339,10 +342,10 @@ export class SessionService {
       )
     } else {
       // Nobody to wait for. Start splitting it immediately.
-      this.beginSplit(sessionId, participantId, state, ticket)
+      plannerId = this.beginSplit(sessionId, participantId, state, ticket)
     }
 
-    return { ticket: state.tickets.get(ticket.id)! }
+    return { ticket: state.tickets.get(ticket.id)!, plannerId }
   }
 
   /**
@@ -364,16 +367,17 @@ export class SessionService {
       })
     }
 
+    let plannerId: ParticipantId | null = null
     const joined = this.requireTicket(state, command.ticketId)
     if (joined.state === 'plan') {
       // Somebody wants in, so there is now something to split.
-      this.beginSplit(sessionId, participantId, state, joined)
+      plannerId = this.beginSplit(sessionId, participantId, state, joined)
     } else if (joined.decompositionId) {
       // Late to a ticket already being built: fold them into the assignment.
       this.rebalanceTicket(sessionId, participantId, state, joined)
     }
 
-    return { ticket: this.requireTicket(state, command.ticketId) }
+    return { ticket: this.requireTicket(state, command.ticketId), plannerId }
   }
 
   private leaveTicket(
@@ -409,8 +413,42 @@ export class SessionService {
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
     const ticket = this.requireTicket(state, command.ticketId)
-    if (ticket.state !== 'plan') return { ticket }
-    this.beginSplit(sessionId, participantId, state, ticket)
+    if (ticket.state !== 'plan') return { ticket, plannerId: null }
+    const plannerId = this.beginSplit(sessionId, participantId, state, ticket)
+    return { ticket: this.requireTicket(state, command.ticketId), plannerId }
+  }
+
+  /**
+   * Accepting the split. This is where the work actually begins: tasks are
+   * seeded with the arrangement on screen, and every member's agent is told to
+   * get on with its own.
+   */
+  private approveTicket(
+    command: Extract<ClientCommand, { type: 'ticket.approve' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+
+    if (state.tasksOfTicket(ticket.id).length > 0) return { ticket }
+    if (!ticket.decompositionId) {
+      throw new ServiceError('not_ready', 'There is no split to start yet.')
+    }
+    if (!ticket.members.includes(participantId)) {
+      throw new ServiceError(
+        'forbidden',
+        'Join the ticket before starting it -- whoever starts it is agreeing to run it.',
+      )
+    }
+
+    this.emit(sessionId, participantId, {
+      type: 'decomposition.approval',
+      participantId,
+      approvals: ticket.members,
+      satisfied: true,
+    })
+    this.seedTasks(sessionId, participantId, state)
+    this.refreshTicketStates(sessionId, participantId)
     return { ticket: this.requireTicket(state, command.ticketId) }
   }
 
@@ -434,7 +472,7 @@ export class SessionService {
     actorId: ParticipantId,
     state: SessionState,
     ticket: Ticket,
-  ): void {
+  ): ParticipantId | null {
     const planner = ticket.members
       .map((id) => state.participants.get(id))
       .find((p) => p?.repoPath && p.connected)
@@ -448,7 +486,7 @@ export class SessionService {
         ticket.members,
         `"${ticket.title}" cannot be split yet: nobody in it has a checkout attached. Run /ss:join in a clone.`,
       )
-      return
+      return null
     }
 
     this.setTicketState(sessionId, actorId, ticket.id, 'splitting')
@@ -465,12 +503,13 @@ export class SessionService {
         'a contract of the shared types and stubs every task will import, plus tasks that own',
         'disjoint file globs and are each proved by one command.',
         '',
-        'Nobody approves this. The validator checks it and the work starts immediately, so',
-        'propose what you would be willing to have run.',
+        'The validator checks it and then it goes on the board for one of them to start,',
+        'so propose what you would be willing to have run.',
       ]
         .filter((line) => line !== '')
         .join('\n'),
     )
+    return planner.id
   }
 
   private setTicketState(
@@ -724,14 +763,19 @@ export class SessionService {
         type: 'decomposition.assigned',
         assignments: autoAssign({ tasks: command.tasks, participants: members }),
       })
-      this.emit(sessionId, participantId, {
-        type: 'decomposition.approval',
+      /**
+       * The split is shown before it runs. Joining agreed to the work, not to
+       * whatever shape an agent decided on a minute ago -- and one look at
+       * "who ends up with what" is cheap next to two agents rewriting the wrong
+       * files. It is one button, pressed by whoever is looking.
+       */
+      this.setTicketState(sessionId, participantId, ticket.id, 'proposed')
+      this.systemMessage(
+        sessionId,
         participantId,
-        approvals: ticket.members,
-        satisfied: true,
-      })
-      this.seedTasks(sessionId, participantId, state)
-      this.refreshTicketStates(sessionId, participantId)
+        ticket.members,
+        `The split for "${ticket.title}" is ready: ${command.tasks.length} task(s). Look it over on the board and press start.`,
+      )
       return { decompositionId, validation }
     }
 
@@ -778,11 +822,22 @@ export class SessionService {
     state: SessionState,
     pinned: Array<{ taskId: TaskId; participantId: ParticipantId }>,
   ) {
+    /**
+     * A ticket's work is shared among the people who joined *it*, not everyone
+     * in the session -- otherwise moving one card hands work to someone who
+     * never opted in.
+     */
+    const ticketId = state.decomposition?.ticketId ?? null
+    const ticket = ticketId ? state.tickets.get(ticketId) : null
+    const eligible = ticket
+      ? ticket.members.map((id) => state.participants.get(id))
+      : [...state.participants.values()]
+
     const assignments = autoAssign({
       tasks: state.decomposition?.tasks ?? [],
       // Board-only watchers are left out: work goes to people with a checkout.
-      participants: [...state.participants.values()]
-        .filter((p) => p.repoPath)
+      participants: eligible
+        .filter((p): p is Participant => Boolean(p?.repoPath))
         .sort((a, b) => a.joinedAt - b.joinedAt)
         .map((p) => p.id),
       pinned,

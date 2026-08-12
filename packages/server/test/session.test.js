@@ -894,12 +894,13 @@ describe('tickets', () => {
     )
   })
 
-  it('starts splitting the moment someone joins, with nothing to approve', async () => {
+  it('starts splitting the moment someone joins', async () => {
     const { alice, bob, aliceId } = await twoDevSession('ticket-join')
     const { ticket } = await open(alice, 'Add due dates')
 
     const joined = await bob.send({ type: 'ticket.join', ticketId: ticket.id })
     assert.equal(joined.ticket.members.length, 2)
+    assert.equal(joined.plannerId, aliceId, 'the caller is told who was asked to split it')
     await settle()
 
     const state = alice.eventsOfType('ticket.state').at(-1)
@@ -911,7 +912,7 @@ describe('tickets', () => {
       .findLast((m) => m.directive)
     assert.deepEqual(directive.mentions, [aliceId], 'the split goes to someone with a checkout')
     assert.match(directive.body, new RegExp(ticket.id))
-    assert.match(directive.body, /Nobody approves this/)
+    assert.match(directive.body, /goes on the board for one of them to start/)
   })
 
   it('splits alone when there is nobody else to wait for', async () => {
@@ -952,8 +953,16 @@ describe('tickets', () => {
     assert.equal(proposal.validation.ok, true)
     await settle()
 
+    // The split is shown before it runs; one member presses start.
+    const waiting = alice.eventsOfType('ticket.state').at(-1)
+    assert.equal(waiting.body.state, 'proposed', 'the split is put in front of a person first')
+    assert.equal(alice.eventsOfType('tasks.seeded').length, 0, 'and nothing runs until it is')
+
+    await bob.send({ type: 'ticket.approve', ticketId: ticket.id })
+    await settle()
+
     const seeded = alice.eventsOfType('tasks.seeded').at(-1)
-    assert.ok(seeded, 'a valid split starts immediately')
+    assert.ok(seeded, 'starting it is what seeds the work')
     assert.ok(
       seeded.body.tasks.every((task) => task.ticketId === ticket.id),
       'tasks belong to the ticket they came from',
@@ -1005,6 +1014,7 @@ describe('tickets', () => {
       issueRef: null,
       ticketId: ticket.id,
     })
+    await alice.send({ type: 'ticket.approve', ticketId: ticket.id })
     await alice.send({
       type: 'contract.committed',
       branch: 'ss/ticket-review/contract',
@@ -1044,6 +1054,7 @@ describe('tickets', () => {
       issueRef: null,
       ticketId: first.ticket.id,
     })
+    await alice.send({ type: 'ticket.approve', ticketId: first.ticket.id })
 
     const second = await open(bob, 'Something else that touches the toggle')
     await alice.send({ type: 'ticket.join', ticketId: second.ticket.id })
@@ -1074,6 +1085,77 @@ describe('tickets', () => {
     )
   })
 
+  it('lets the arrangement be changed before it runs, across the ticket only', async () => {
+    const { alice, bob, aliceId, bobId } = await twoDevSession('ticket-reassign')
+    const watcher = await new TestClient(url).connect()
+    await watcher.send({
+      type: 'session.join',
+      sessionRef: 'ticket-reassign',
+      githubLogin: 'cara',
+      displayName: 'Cara',
+      repoPath: '/tmp/cara/web',
+      fromSeq: null,
+    })
+
+    const { ticket } = await open(alice, 'Add due dates')
+    await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+    await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 2,
+      issueRef: null,
+      ticketId: ticket.id,
+    })
+
+    const moved = await bob.send({
+      type: 'task.assign',
+      taskId: 'theme-toggle',
+      participantId: bobId,
+    })
+    assert.equal(
+      moved.assignments.find((a) => a.taskId === 'theme-toggle').participantId,
+      bobId,
+      'anyone in the ticket can change who does what, before it starts',
+    )
+
+    /**
+     * Cara is in the session but not in this ticket. Rebalancing must not hand
+     * her work she never opted into.
+     */
+    const owners = new Set(moved.assignments.map((a) => a.participantId))
+    assert.deepEqual([...owners].sort(), [aliceId, bobId].sort())
+
+    await alice.send({ type: 'ticket.approve', ticketId: ticket.id })
+    await settle()
+    const seeded = alice.eventsOfType('tasks.seeded').at(-1)
+    assert.equal(
+      seeded.body.tasks.find((t) => t.id === 'theme-toggle').assigneeId,
+      bobId,
+      'and the change is what runs',
+    )
+    await watcher.close()
+  })
+
+  it('refuses to start a ticket you have not joined', async () => {
+    const { alice, bob } = await twoDevSession('ticket-outsider')
+    const { ticket } = await open(alice, 'Add due dates')
+    await alice.send({
+      type: 'decomposition.propose',
+      contract,
+      tasks,
+      participantCount: 1,
+      issueRef: null,
+      ticketId: ticket.id,
+    })
+
+    const error = await expectError(
+      bob.send({ type: 'ticket.approve', ticketId: ticket.id }),
+      'forbidden',
+    )
+    assert.match(error.message, /Join the ticket/)
+  })
+
   it('closes the card when the PR is recorded', async () => {
     const { alice, bob } = await twoDevSession('ticket-done')
     const { ticket } = await open(alice, 'Add due dates')
@@ -1100,6 +1182,7 @@ describe('tickets', () => {
       issueRef: null,
       ticketId: ticket.id,
     })
+    await alice.send({ type: 'ticket.approve', ticketId: ticket.id })
     await alice.send({
       type: 'contract.committed',
       branch: 'ss/ticket-leave/contract',
