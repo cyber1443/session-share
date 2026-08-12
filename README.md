@@ -226,7 +226,7 @@ pnpm install
 pnpm e2e         # the whole product, through the real MCP tools, hook and HTTP
 pnpm peer-demo   # host + guest + a real daemon, no accounts anywhere
 pnpm demo        # the same flow through the hosted (OAuth) path
-pnpm test        # 167 tests
+pnpm test        # 173 tests
 ```
 
 `pnpm e2e` is the one that matters. It hosts, joins, plans from the board, moves
