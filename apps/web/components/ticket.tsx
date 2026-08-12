@@ -402,9 +402,11 @@ export function TicketPanel({
             <p className="leading-relaxed text-neutral-300">
               Delete &ldquo;{ticket.title}&rdquo;
               {tasks.length > 0 ? ` and its ${tasks.length} task${tasks.length === 1 ? '' : 's'}` : ''}?
-              {landed > 0
-                ? ` ${landed} of them already landed — that work stays on the branch, it just stops having a card.`
-                : ''}{' '}
+              {landed === 0
+                ? ''
+                : landed === tasks.length
+                  ? ' All of it has already landed — that work stays on the branch, it just stops having a card.'
+                  : ` ${landed} of them already landed — that work stays on the branch, it just stops having a card.`}{' '}
               Nothing in git is touched, and this cannot be undone here.
             </p>
             <div className="flex gap-2">

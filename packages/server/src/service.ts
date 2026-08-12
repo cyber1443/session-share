@@ -496,7 +496,13 @@ export class SessionService {
       [
         `${by} deleted "${ticket.title}".`,
         tasks.length > 0
-          ? ` ${tasks.length} task(s) went with it${landed > 0 ? `, ${landed} of which had already landed -- that work is still on the branch, it just has no card any more` : ''}.`
+          ? ` ${tasks.length} task(s) went with it${
+              landed === 0
+                ? ''
+                : landed === tasks.length
+                  ? ', all of them already landed -- that work is still on the branch, it just has no card any more'
+                  : `, ${landed} of which had already landed -- that work is still on the branch, it just has no card any more`
+            }.`
           : '',
       ].join(''),
     )

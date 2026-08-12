@@ -64650,7 +64650,16 @@ var SessionState = class {
     return {
       session: { ...this.session, phase: this.phaseNow() },
       participants: [...this.participants.values()],
-      tickets: [...this.tickets.values()],
+      /**
+       * Served with the state the work says they are in, not the last one
+       * anybody wrote down. The stored field is only ever an echo of this, and
+       * an echo can lag -- a card sitting in Splitting with a claimed task
+       * under it is the board lying about the one thing it exists to show.
+       */
+      tickets: [...this.tickets.values()].map((ticket) => ({
+        ...ticket,
+        state: this.ticketStateFor(ticket.id)
+      })),
       decomposition: this.decomposition,
       validation: this.validation,
       tasks: [...this.tasks.values()],
@@ -65391,7 +65400,7 @@ var SessionService = class {
       [],
       [
         `${by} deleted "${ticket.title}".`,
-        tasks.length > 0 ? ` ${tasks.length} task(s) went with it${landed > 0 ? `, ${landed} of which had already landed -- that work is still on the branch, it just has no card any more` : ""}.` : ""
+        tasks.length > 0 ? ` ${tasks.length} task(s) went with it${landed === 0 ? "" : landed === tasks.length ? ", all of them already landed -- that work is still on the branch, it just has no card any more" : `, ${landed} of which had already landed -- that work is still on the branch, it just has no card any more`}.` : ""
       ].join("")
     );
     const working = ticket.members.filter(
