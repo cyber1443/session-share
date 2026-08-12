@@ -226,7 +226,7 @@ pnpm install
 pnpm e2e         # the whole product, through the real MCP tools, hook and HTTP
 pnpm peer-demo   # host + guest + a real daemon, no accounts anywhere
 pnpm demo        # the same flow through the hosted (OAuth) path
-pnpm test        # 154 tests
+pnpm test        # 156 tests
 ```
 
 `pnpm e2e` is the one that matters. It hosts, joins, plans from the board, moves
@@ -254,103 +254,10 @@ Open <http://localhost:3000>. Everything the browser touches is proxied to the
 coordination server, so it is one origin — no CORS, and the OAuth callback lands
 where it should.
 
-The board shows the same tasks two ways:
-
-- **Topics** — a force-directed knowledge graph. A hub per area of the codebase,
-  tasks orbiting the hub they belong to, and the contract files in the middle
-  with dotted links to every task that assumes them, so the seam is visibly the
-  centre of the work. Hovering isolates a neighbourhood; nodes drag, the canvas
-  pans and zooms. Ring colour is the topic, fill is the task state.
-- **Order** — the dependency DAG, left to right by depth, which answers the
-  different question of what unblocks what.
-
-Topics are derived from the paths a task owns rather than from labels anyone has
-to maintain: tasks are cut as vertical slices, so the folder structure already
-says what they are about.
-
-### The board
-
-Five columns. Only the first is writable:
-
-| | |
-|---|---|
-| **plan** | you write a ticket here — a title, optionally a line or two of brief |
-| **splitting** | a member's agent is reading the repo and proposing the split |
-| **building** | tasks are live, assigned, and being worked |
-| **review** | everything landed on the contract branch; the PR is next |
-| **done** | shipped, with its number on the card |
-
-Writing a ticket notifies everyone else *as a message, not a directive* — joining
-is a person's decision, and hijacking someone's agent to make it is not an offer.
-Joining starts the split, and from there it runs itself: the split is validated,
-assigned across whoever joined, and each agent is told to claim, work, test and
-land its own tasks without waiting to be asked. When the last one lands, the
-author is asked to open the pull request.
-
-**The one thing that is not automatic.** Claude Code cannot be pushed into from
-outside, so work reaches an agent when its *turn ends* — via the `Stop` hook. An
-agent that is turning picks up everything by itself, indefinitely. An agent
-sitting idle with nobody at the keyboard has no turn ending, so a ticket you join
-while your teammate is away will sit in **splitting** until something wakes their
-session. The card says so, by name. `/ss:go` in that terminal is the wake, and
-typing anything at all works too.
-
-**What is still gated.** The validator. Skipping approval is not the same as
-skipping the check that stops two agents editing one file — and now that several
-tickets run at once, a split is also rejected when it collides with another live
-ticket's files. Leases still apply inside a ticket, so an agent that wanders
-outside its own task is still refused.
-
-### Planning on the board
-
-The browser cannot read a repository or run a model, and this never proxies
-inference — so the board does not pretend to plan. It does the halves it is good
-at, and hands the middle to an agent:
-
-1. **The brief.** Type what you are building and press *plan it*. It is delivered
-   into a participant's Claude Code — theirs, not a server's — which reads the
-   repo and answers with a contract plus tasks. Their agent picks it up when its
-   current turn ends.
-2. **The arrangement.** The server balances the tasks across everyone with a
-   checkout the moment a split validates: no two simultaneously-runnable tasks on
-   one person, load balanced by the planner's own minute estimates, and each
-   person kept inside one area of the tree. Change any of it from the dropdown on
-   the card — your choice is pinned and the rest rebalances around it.
-3. **The agreement.** Approve, and the plan becomes work: tasks are seeded with
-   their assignee, and each person's agent is told what it owns in its own
-   session. Nobody has to be chased.
-
-Assignment is a plan; a claim is a fact. `/ss:next` hands you your own tasks
-first, falls back to unassigned ones, and takes someone else's only rather than
-leave you idle.
-
-### Two credentials, one board
-
-A peer board can hold two things that name different sessions: an invite in the
-URL, and a participant token in local storage from whatever it opened last. The
-invite wins — it is the more recent and more deliberate of the two. Preferring
-the stored token is how a board ends up showing a *previous* session, with its
-chat and its participants, while ignoring the link you just followed.
-
-### After a plugin update
-
-The coordination server outlives the Claude Code that started it — that is what
-lets a session survive closing a terminal — so it also outlives an update. A
-daemon started before you updated keeps running the old code *and serving the old
-board*, which looks exactly like the update having done nothing.
-
-So it is replaced rather than remembered: the server publishes the build it is
-running, hosting again notices a mismatch and restarts it, and `/ss:doctor` says
-so outright. `/ss:stop` if you want it gone now. The event log survives a
-restart; hosting the same title brings the session back with its history.
-
-### Several plans at once
-
-Sessions are already independent — the constraint is that one Claude Code lives
-in one directory. `/ss:worktree <title>` makes a second working tree of the same
-clone (shared history, shared remote, shared object store) and tells you where to
-open the second Claude Code. Both sessions run against the one coordination
-server on your machine.
+Everything about a ticket lives on its card: click it and the panel shows the
+split, who has which task, what each agent is doing right now, test results,
+branches and blockers. There is no separate graph or DAG view — they answered
+questions the panel answers in the place you were already looking.
 
 ### The room is a terminal
 
@@ -439,7 +346,7 @@ and once the split is approved and the contract has landed, on every machine:
 | `/ss:board` | reopen the live board |
 | `/ss:worktree` | a second working tree, so this repo can be in two sessions at once |
 | `/ss:tickets` | what is on the board and what is yours |
-| `/ss:go` | pick up whatever the session queued for you and do it |
+| `/ss:go` | pick up queued work when a terminal has been sitting idle |
 | `/ss:stop` | stop the coordination server on this machine |
 
 ### MCP tools
