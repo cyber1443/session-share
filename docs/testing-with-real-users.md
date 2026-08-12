@@ -416,5 +416,6 @@ Be prepared for these, so they read as known gaps rather than bugs:
 | "It is not the server that minted this invite" | You reached a different session-share — usually your own, because the invite carried a loopback address. The host must re-host so the invite names their network address. Not a bad token; re-minting will not help. |
 | "Nothing answered at http://…" | Firewall, sleeping host, or you are not on the same network. `/ss:doctor` on the host says what to dial. |
 | "Port 4310 is already serving a different session-share" | Another server holds the port. Stop it, or set `SESSION_SHARE_PORT`. |
+| A ticket sits in "splitting" and no terminal is doing anything | Nothing is broken: the agent it was handed to is idle, and an idle Claude Code has no turn ending to deliver on. Run `/ss:go` there — or type anything. |
 | A run-mode message never arrives | The recipient's agent has not finished a turn since it was sent, or `acceptDirectives` is off there (`/ss:setup`). |
 | The board asks for a handle | It was opened without the `as=` the plugin adds — a hand-copied URL. Harmless: type your handle, or reopen with `/ss:board`. |

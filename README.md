@@ -226,7 +226,7 @@ pnpm install
 pnpm e2e         # the whole product, through the real MCP tools, hook and HTTP
 pnpm peer-demo   # host + guest + a real daemon, no accounts anywhere
 pnpm demo        # the same flow through the hosted (OAuth) path
-pnpm test        # 153 tests
+pnpm test        # 154 tests
 ```
 
 `pnpm e2e` is the one that matters. It hosts, joins, plans from the board, moves
@@ -286,6 +286,14 @@ Joining starts the split, and from there it runs itself: the split is validated,
 assigned across whoever joined, and each agent is told to claim, work, test and
 land its own tasks without waiting to be asked. When the last one lands, the
 author is asked to open the pull request.
+
+**The one thing that is not automatic.** Claude Code cannot be pushed into from
+outside, so work reaches an agent when its *turn ends* — via the `Stop` hook. An
+agent that is turning picks up everything by itself, indefinitely. An agent
+sitting idle with nobody at the keyboard has no turn ending, so a ticket you join
+while your teammate is away will sit in **splitting** until something wakes their
+session. The card says so, by name. `/ss:go` in that terminal is the wake, and
+typing anything at all works too.
 
 **What is still gated.** The validator. Skipping approval is not the same as
 skipping the check that stops two agents editing one file — and now that several
@@ -431,6 +439,7 @@ and once the split is approved and the contract has landed, on every machine:
 | `/ss:board` | reopen the live board |
 | `/ss:worktree` | a second working tree, so this repo can be in two sessions at once |
 | `/ss:tickets` | what is on the board and what is yours |
+| `/ss:go` | pick up whatever the session queued for you and do it |
 | `/ss:stop` | stop the coordination server on this machine |
 
 ### MCP tools
