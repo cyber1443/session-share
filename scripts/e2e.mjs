@@ -358,109 +358,53 @@ try {
   const briefed = await turnEnds(aliceRepo, aliceHome)
   check(/ss_claim -> do the work/.test(briefed ?? ''), "Alice's agent was told to run the whole loop")
 
-  // -- the older session-wide flow still works ------------------------------
-  say('Bob types the brief on the board and presses plan')
-  const requested = await bobBoard.command({
-    type: 'plan.request',
-    goal: 'Add due dates to todos, with overdue ones marked in the list.',
-    issueRef: null,
-    plannerId: null,
+  say('Both finish their tasks; the ticket asks to be run for real')
+  // Its tasks only become claimable once the seam is on a branch.
+  await bob.call('ss_land_contract')
+  for (const spec of TAG_TASKS) {
+    const who = afterSplit.tasks.find((t) => t.id === spec.id)?.assigneeId
+    const hand = who === seen.participants.find((p) => p.githubLogin === 'bob').id ? bobBoard : aliceBoardEarly
+    await hand.command({ type: 'task.claim', taskId: spec.id })
+    await hand.command({ type: 'task.merged', taskId: spec.id })
+  }
+
+  const assembled = await bobBoard.snapshot()
+  check(
+    assembled.tickets.find((t) => t.id === opened.ticket.id)?.state === 'verify',
+    'landing every task is not the same as it working, so it goes to verify',
+  )
+
+  const toRun = await turnEnds(bobRepo, bobHome)
+  check(/exercise the feature end to end/.test(toRun ?? ''), 'and someone is asked to run it')
+  check(!/ss_ship/.test(toRun ?? ''), 'with no mention of a PR yet')
+
+  say('It is broken, so it goes back to the people who built it')
+  await bobBoard.command({
+    type: 'ticket.verified',
+    ticketId: opened.ticket.id,
+    passed: false,
+    how: 'node --test plus a run of the CLI',
+    summary: 'Filtering by a tag returns nothing once more than one tag is set.',
   })
-  const planner = seen.participants.find((p) => p.id === requested.plannerId)
-  check(planner?.displayName === 'Alice', 'it went to the lead, who has a checkout')
+  const broken = await turnEnds(aliceRepo, aliceHome)
+  check(/returns nothing once more than one tag/.test(broken ?? ''), 'with what was actually seen')
 
-  const briefing = await turnEnds(aliceRepo, aliceHome)
-  check(
-    briefing?.includes('Add due dates to todos'),
-    "and arrived inside Alice's Claude Code as work to do",
-  )
-
-  // -- 5 ---------------------------------------------------------------------
-  say("Alice's agent reads the repo and proposes a split")
-  const proposed = JSON.parse(await alice.call('ss_propose', { contract: CONTRACT, tasks: TASKS }))
-  check(proposed.accepted === true, `the validator accepted it (${TASKS.length} tasks)`)
-  check(
-    proposed.assigned?.length === TASKS.length,
-    'and it came back already split between the two of them',
-  )
-  for (const line of proposed.assigned ?? []) note(`${line.task} → ${line.to}`)
-
-  const afterPropose = await bobBoard.snapshot()
-  const first = new Map(afterPropose.decomposition.assignments.map((a) => [a.taskId, a.participantId]))
-  check(
-    first.get('due-storage') !== first.get('due-render'),
-    'the two tasks that can run at once went to different people',
-  )
-
-  // -- 6 ---------------------------------------------------------------------
-  say('Bob drags a card to himself on the board')
-  const target = 'due-storage'
-  const moved = await bobBoard.command({
-    type: 'task.assign',
-    taskId: target,
-    participantId: me.user.id === null ? null : seen.participants.find((p) => p.githubLogin === 'bob').id,
+  say('Fixed and re-run, it reaches review')
+  const verified = await bobBoard.command({
+    type: 'ticket.verified',
+    ticketId: opened.ticket.id,
+    passed: true,
+    how: 'node --test plus a run of the CLI',
+    summary: 'Filters correctly with several tags.',
   })
-  const pin = moved.assignments.find((a) => a.taskId === target)
-  check(pin.manual === true, `${target} is now pinned to Bob`)
+  check(verified.ticket.state === 'review', 'only a passing run moves it on')
 
-  const rebalanced = new Map(moved.assignments.map((a) => [a.taskId, a.participantId]))
-  check(
-    rebalanced.get('due-render') !== rebalanced.get(target),
-    'and the rest rebalanced around it rather than piling up',
-  )
+  /**
+   * The session-wide plan-and-approve flow that tickets replaced still exists
+   * in the server and has its own tests; it is not exercised here because it is
+   * not what anyone does any more.
+   */
 
-  // -- 7 ---------------------------------------------------------------------
-  say('Both approve on the board')
-  const aliceBoard = board(aliceRepo)
-  const decompositionId = afterPropose.decomposition.id
-  const one = await aliceBoard.command({ type: 'decomposition.approve', decompositionId })
-  check(one.satisfied === false, 'one approval is not enough with two people')
-  const two = await bobBoard.command({ type: 'decomposition.approve', decompositionId })
-  check(two.satisfied === true, 'the second one settles it')
-
-  const live = await bobBoard.snapshot()
-  // Only this decomposition's tasks; the ticket above has its own.
-  const sessionTasks = live.tasks.filter((task) => task.ticketId === null)
-  check(
-    sessionTasks.length === TASKS.length && sessionTasks.every((t) => t.assigneeId),
-    'tasks are live and every one knows whose it is',
-  )
-
-  // -- 8 ---------------------------------------------------------------------
-  say('Each agent is told what it owns, without anyone saying so')
-  const aliceBrief = await turnEnds(aliceRepo, aliceHome)
-  const bobBrief = await turnEnds(bobRepo, bobHome)
-  check(/The split was approved/.test(aliceBrief ?? ''), 'Alice got her list')
-  check(/The split was approved/.test(bobBrief ?? ''), 'Bob got his')
-  check(
-    (bobBrief ?? '').includes(target),
-    `and Bob's names ${target}, the card he moved to himself`,
-  )
-
-  // -- 9 ---------------------------------------------------------------------
-  say('Alice lands the contract; the others hear that they can start')
-  await alice.call('ss_land_contract')
-  const built = await bobBoard.snapshot()
-  check(built.session.phase === 'build', 'the session is in build')
-  const wake = await turnEnds(bobRepo, bobHome)
-  check(/claimable now/.test(wake ?? ''), 'Bob was told to stop waiting')
-
-  // -- 10 --------------------------------------------------------------------
-  say('Each runs /ss:next and gets their own work')
-  const bobTask = await bob.call('ss_claim', {})
-  const aliceTask = await alice.call('ss_claim', {})
-  check(bobTask.includes(target), `Bob got ${target}, the one assigned to him`)
-  check(aliceTask.includes('due-render'), 'Alice got the other one')
-
-  const claimed = await bobBoard.snapshot()
-  const held = claimed.tasks.filter((t) => t.ownerId)
-  check(held.length === 2, 'both are held')
-  check(
-    held.every((task) => task.ownerId === task.assigneeId),
-    'and everyone is working on what they were given',
-  )
-
-  // -- 11 --------------------------------------------------------------------
   say('A second plan runs at the same time, in a worktree')
   const worktree = await alice.call('ss_worktree', { title: 'Add tags' })
   const path = worktree.match(/at (\/\S+) on/)?.[1] ?? worktree.match(/^(\/\S+) already/m)?.[1]
@@ -474,13 +418,16 @@ try {
   check(/Hosting "Add tags"/.test(secondHost), 'and it hosts its own session on the same daemon')
 
   const sessions = await (
-    await fetch(new URL('/api/sessions', aliceBoard.config.serverUrl), {
-      headers: { authorization: `Bearer ${aliceBoard.config.participantToken}` },
+    await fetch(new URL('/api/sessions', aliceBoardEarly.config.serverUrl), {
+      headers: { authorization: `Bearer ${aliceBoardEarly.config.participantToken}` },
     })
   ).json()
   check(sessions.sessions.length >= 1, 'the first session is untouched by the second')
-  const stillBuilding = await aliceBoard.snapshot()
-  check(stillBuilding.session.phase === 'build', 'still in build, with its tasks held')
+  const stillBuilding = await aliceBoardEarly.snapshot()
+  check(
+    stillBuilding.tickets.some((t) => t.state === 'review'),
+    'the first session still has its verified ticket waiting to ship',
+  )
 } catch (error) {
   bad(`threw: ${error.message}`)
   if (process.env.SESSION_SHARE_E2E_STACK) console.error(error)
