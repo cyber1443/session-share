@@ -352,7 +352,21 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
        * either when tracked files outside the task are modified. Better to say
        * so before anything moves than to leave someone stranded mid-way.
        */
-      const foreign = await foreignChanges(root, task.ownedPaths, OWN_ARTIFACTS)
+      /**
+       * A granted handoff is a file someone else holds that this task was
+       * allowed to edit. Its change is part of this task's work, so it is
+       * committed with it rather than counted against it.
+       */
+      const granted = (state.handoffs ?? [])
+        .filter(
+          (handoff) =>
+            handoff.status === 'granted' &&
+            handoff.requesterId === config.participantId &&
+            (handoff.requesterTaskId === null || handoff.requesterTaskId === taskId),
+        )
+        .map((handoff) => handoff.path)
+      const paths = [...task.ownedPaths, ...granted]
+      const foreign = await foreignChanges(root, paths, OWN_ARTIFACTS)
       if (foreign.length > 0) {
         return ctx.text(
           [
@@ -365,7 +379,7 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       }
 
       await checkoutBranch(root, branch, contract)
-      const sha = await commit(root, task.ownedPaths, `${taskId}: ${summary}`)
+      const sha = await commit(root, paths, `${taskId}: ${summary}`)
 
       const pushed = preferences.push ? await push(root, branch) : false
       let prNumber: number | null = null
@@ -462,7 +476,7 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       } as const
       const here = await currentBranch(root)
       const hint =
-        outcome === 'updated' && here !== contract
+        outcome === 'updated' && here !== contract && here !== 'HEAD'
           ? `\nYou are still on ${here}. Run \`git merge ${contract}\` there if you need what landed.`
           : ''
       return ctx.text(`${messages[outcome]}${hint}`)

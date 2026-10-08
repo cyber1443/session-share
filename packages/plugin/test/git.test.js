@@ -249,6 +249,73 @@ describe('syncing and shipping', () => {
   })
 })
 
+describe('worktrees and handoffs', () => {
+  it('fast-forwards a branch checked out in another worktree in place, not under it', async () => {
+    const { dir, clone } = fresh('worktree')
+    const alice = clone('a')
+    const two = snapshot({ tasks: [task(), task({ id: 't2', ownedPaths: ['src/t2/**'] })] })
+    await tools(alice, two).ss_land_contract({})
+    const bob = clone('b')
+    const hb = tools(bob, two)
+    await hb.ss_start_task({ taskId: 't2' })
+    const side = join(dir, 'b-contract')
+    sh(bob, `git worktree add -q ${side} ss/sx/contract`)
+
+    const ha = tools(alice, two)
+    await ha.ss_start_task({ taskId: 't1' })
+    write(alice, 'src/t1/x.ts')
+    await ha.ss_done({ taskId: 't1', summary: 's', force: false })
+
+    assert.match(await hb.ss_sync({}), /now matches origin/)
+    assert.equal(sh(side, 'git status --porcelain'), '', 'no staged reversal of what landed')
+    assert.equal(existsSync(join(side, 'src/t1/x.ts')), true)
+  })
+
+  it('says why a fast-forward failed instead of calling it divergence', async () => {
+    const { clone } = fresh('dirty-ff')
+    const alice = clone('a')
+    const two = snapshot({ tasks: [task(), task({ id: 't2', ownedPaths: ['src/t2/**'] })] })
+    await tools(alice, two).ss_land_contract({})
+    const bob = clone('b')
+    const hb = tools(bob, two)
+    await hb.ss_land_contract({}) // bob is on the contract branch
+    sh(bob, 'git checkout -q main')
+
+    const ha = tools(alice, two)
+    await ha.ss_start_task({ taskId: 't1' })
+    write(alice, 'src/t1/x.ts', 'from alice')
+    await ha.ss_done({ taskId: 't1', summary: 's', force: false })
+
+    sh(bob, 'git checkout -q ss/sx/contract')
+    write(bob, 'src/t1/x.ts', 'bob was here, uncommitted')
+    await assert.rejects(hb.ss_sync({}), (error) => /overwritten|untracked/.test(error.message) && !/diverged/.test(error.message))
+  })
+
+  it('commits a file a handoff opened as part of the task', async () => {
+    const { clone } = fresh('handoff')
+    const work = clone('a')
+    const state = snapshot({
+      handoffs: [
+        { id: 'h1', path: 'src/shared/x.ts', requesterId: 'me', holderId: 'bob', heldByTaskId: 't9', requesterTaskId: 't1', reason: 'r', status: 'granted', createdAt: 0 },
+      ],
+    })
+    write(work, 'src/shared/x.ts', 'original\n')
+    sh(work, 'git add . && git commit -qm shared && git push -q')
+    const h = tools(work, state)
+    await h.ss_land_contract({})
+    await h.ss_start_task({ taskId: 't1' })
+    write(work, 'src/t1/x.ts')
+    write(work, 'src/shared/x.ts', 'changed under a handoff\n')
+
+    const done = await h.ss_done({ taskId: 't1', summary: 's', force: false })
+    assert.match(done, /merged/)
+    assert.deepEqual(
+      sh(work, 'git show --name-only --format= ss/sx/t1').split('\n').sort(),
+      ['src/shared/x.ts', 'src/t1/x.ts'],
+    )
+  })
+})
+
 describe('landing a contract', () => {
   it('refuses a contract file that would land outside the repository', async () => {
     const { dir, clone } = fresh('escape')
@@ -264,5 +331,24 @@ describe('landing a contract', () => {
     )
     await assert.rejects(h.ss_land_contract({}), /outside the repository/)
     assert.equal(existsSync(join(dir, 'escaped.txt')), false)
+  })
+
+  it('refuses a contract file aimed into .git, whatever its case', async () => {
+    const { clone } = fresh('dotgit')
+    const work = clone('a')
+    const before = sh(work, 'git config --list --local')
+    for (const path of ['.GIT/config', 'sub/../.Git/config', 'nested/.git/hooks/pre-commit']) {
+      const h = tools(
+        work,
+        snapshot({
+          decomposition: {
+            status: 'approved',
+            contract: { summary: 'c', files: [{ path, contents: '[core]\n\tfsmonitor = touch pwned\n' }] },
+          },
+        }),
+      )
+      await assert.rejects(h.ss_land_contract({}), /\.git/, path)
+    }
+    assert.equal(sh(work, 'git config --list --local'), before)
   })
 })
