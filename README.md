@@ -183,9 +183,11 @@ copy it leaves in your shell history is inert. What it exchanges for — a
 long-lived participant token — is written to `.session-share/session.json` and
 never passes through a terminal.
 
-A participant is a person, not a checkout. You can watch, chat and approve from
-the board with nothing attached; attaching is what turns the lease gate on for a
-particular working tree.
+A participant is a person in one checkout. Leases belong to participants, so
+two clones of yours are two participants -- otherwise either could edit what the
+other had leased. The board still lists them under one name. You can watch,
+chat and approve from the board with nothing attached; attaching is what turns
+the lease gate on for a particular working tree.
 
 For a real run with two GitHub accounts and two Claude subscriptions, follow
 [docs/testing-with-real-users.md](docs/testing-with-real-users.md).
@@ -312,7 +314,7 @@ Each participant needs **their own clone or `git worktree`**. Two Claude Codes i
 Install the plugin (from `packages/plugin`), then in each checkout:
 
 ```
-/ss:join <session-slug> [server-url]
+/ss:join ssx_…            # the invite the host sent; add a server URL to dial a different address
 ```
 
 Then, on one machine:
@@ -380,9 +382,12 @@ anything. That is a deliberate trade for two people who can hand each other a
 link. Do not put a peer server on a public address.
 
 **Hosting exposes a port on your network.** `/ss:host` binds `0.0.0.0` by
-default so a teammate can reach you. Invites are signed, session creation is
-restricted to the hosting machine by socket address, and reading anything needs
-a token — but the port is open. Use `expose: "loopback"` plus a tunnel on an
+default so a teammate can reach you. Invites are signed, opening a session or
+minting an invite needs either a seat in it or a host-only credential the
+plugin reads from `~/.session-share` (not the socket address, which a tunnel
+makes loopback for everyone), and reading anything needs a token — but the port
+is open. Behind a tunnel or on Tailscale, pass `publicUrl` to `/ss:host` (or set
+`SESSION_SHARE_PUBLIC_URL`) so the invite carries an address guests can dial. Use `expose: "loopback"` plus a tunnel on an
 untrusted network.
 
 **The lease gate fails open.** If the coordination server is unreachable, edits
@@ -408,4 +413,6 @@ only, and never gains write access to a repository.
 - The WebRTC mesh (P4). Agent activity lines already stream over `ws-fanout`, and they are ephemeral by design — reload the board and they are gone until the next one arrives.
 - Authorization is coarse: any signed-in user can read and join any session. Authentication is real; per-session membership rules are not.
 - Assignment is not enforced. `/ss:next` prefers your own tasks, but someone can still claim a task assigned to another person rather than sit idle. That is deliberate; if it turns out to be wrong, the fix is a rule, not a lock.
+- Taking a task back from someone who has gone is agent-side only: `ss_release` with `abandoned: true` returns it to ready once the holder has not been heard from for ten minutes, for the lead or anyone on the ticket. There is no board button for it yet, and presence is in-memory, so a server restart starts that clock again for everyone.
+- **Bash writes are not gated.** The lease gate sees Edit, Write, MultiEdit and NotebookEdit. An agent that writes with `sed -i`, `>` or `mv` goes around it. Telling a shell write from a read reliably is not possible from a command string, and a gate that guesses wrong blocks people, so this is left to the agent's instructions and to `/ss:done`, which commits only the task's own paths.
 - Room directives are delivered on a hook, not pushed: they land when the recipient's agent finishes a turn. An agent sitting idle with nobody typing will not pick one up until something else wakes it.
