@@ -79,6 +79,12 @@ export const Participant = z.object({
    * that join.
    */
   repoPath: z.string().min(1).nullable(),
+  /**
+   * Which machine that checkout is on. The same absolute path on two laptops is
+   * two working trees, not one, so the path alone cannot say whether two agents
+   * would collide. Absent on records written before it existed.
+   */
+  machineId: z.string().min(1).nullish(),
   connected: z.boolean(),
   activity: ParticipantActivity,
   joinedAt: Timestamp,
@@ -240,6 +246,13 @@ export const Decomposition = z.object({
    * final arrangement into tasks.
    */
   assignments: z.array(Assignment).default([]),
+  /**
+   * The commit this split's contract landed in, once it has. Per split rather
+   * than per session: every ticket brings its own seam, and a second ticket's
+   * tasks are not claimable just because somebody else's contract is on the
+   * branch -- the files they import would not be there.
+   */
+  contractCommit: z.string().nullable().default(null),
   createdAt: Timestamp,
 })
 export type Decomposition = z.infer<typeof Decomposition>
@@ -250,6 +263,8 @@ export type Decomposition = z.infer<typeof Decomposition>
 
 export const ValidationCode = z.enum([
   'overlapping_paths',
+  'duplicate_task_id',
+  'task_id_taken',
   'dependency_cycle',
   'unknown_dependency',
   'missing_acceptance',
@@ -350,6 +365,12 @@ export const HandoffRequest = z.object({
   requesterId: ParticipantId,
   holderId: ParticipantId,
   heldByTaskId: TaskId,
+  /**
+   * The task the requester was holding when they asked. A grant opens a path
+   * for that piece of work, not for the person forever after: it lapses when
+   * either lease goes. Null in requests logged before this was recorded.
+   */
+  requesterTaskId: TaskId.nullable().default(null),
   reason: z.string().max(280),
   status: HandoffStatus,
   createdAt: Timestamp,
@@ -430,8 +451,22 @@ export const SessionSnapshot = z.object({
   session: Session,
   participants: z.array(Participant),
   tickets: z.array(Ticket).default([]),
+  /**
+   * One split, for clients written when a session had only one. With several
+   * tickets this is the split most likely to be acted on next: the newest one
+   * approved but not yet landed, or failing that the newest proposal. Anything
+   * that knows which ticket it means should read `decompositions` instead.
+   */
   decomposition: Decomposition.nullable(),
   validation: ValidationReport.nullable(),
+  /**
+   * Every split still worth knowing about, keyed by its id: each ticket's
+   * current one (`ticket.decompositionId`), its newest proposal even when that
+   * failed validation -- the repair round needs to see what was wrong -- and
+   * any that were approved, whose contract files stay frozen.
+   */
+  decompositions: z.record(z.string(), Decomposition).default({}),
+  validations: z.record(z.string(), ValidationReport).default({}),
   tasks: z.array(Task),
   leases: z.array(Lease),
   handoffs: z.array(HandoffRequest),

@@ -15,7 +15,7 @@ import {
   TestResult,
   ValidationReport,
 } from './domain.js'
-import { DecompositionId, ParticipantId, SessionId, Seq, TaskId, TicketId } from './ids.js'
+import { DecompositionId, MessageId, ParticipantId, SessionId, Seq, TaskId, TicketId } from './ids.js'
 
 /**
  * Client -> server. Every command is request/response (an `ack` carrying the
@@ -34,8 +34,8 @@ export const ClientCommand = z.discriminatedUnion('type', [
     /** Either works; the plugin has the slug, the board has the id. */
     sessionRef: z.string().min(1),
     /**
-     * Only used when the caller is unauthenticated. An authenticated join takes
-     * its identity from the credential, so the board sends neither.
+     * Ignored. Identity always comes from the credential the caller presented;
+     * kept so older clients that still send it are not rejected.
      */
     githubLogin: z.string().min(1).nullish().default(null),
     displayName: z.string().min(1).nullish().default(null),
@@ -44,6 +44,12 @@ export const ClientCommand = z.discriminatedUnion('type', [
      * checkout. Rejected if another connected participant reports the same path.
      */
     repoPath: z.string().min(1).nullable().default(null),
+    /**
+     * Which machine `repoPath` is on. A checkout is a path on a machine, and
+     * each checkout is its own participant -- that is what gives two clones of
+     * one person separate leases.
+     */
+    machineId: z.string().min(1).nullable().default(null),
     /** Replay from here instead of receiving a full snapshot. */
     fromSeq: Seq.nullable().default(null),
   }),
@@ -127,11 +133,24 @@ export const ClientCommand = z.discriminatedUnion('type', [
     branch: z.string().min(1),
     commitSha: z.string().min(1),
     prNumber: z.number().int().nullable().default(null),
+    /**
+     * Whose contract this is. Left out, the server takes the split the snapshot
+     * offers as `decomposition` -- the newest one approved and not yet landed --
+     * which is the one a client that does not know about tickets just wrote.
+     */
+    ticketId: TicketId.nullish(),
   }),
 
   /** Omit taskId to be handed the best ready task by affinity. */
   z.object({ type: z.literal('task.claim'), taskId: TaskId.nullable().default(null) }),
   z.object({ type: z.literal('task.release'), taskId: TaskId }),
+  /**
+   * Take a task back from someone who has gone. Only while the holder has not
+   * been heard from for a while, and only by the lead or someone on the
+   * ticket -- otherwise a laptop closing mid-task strands its files behind a
+   * lease nobody can lift.
+   */
+  z.object({ type: z.literal('task.forceRelease'), taskId: TaskId }),
   z.object({
     type: z.literal('task.progress'),
     taskId: TaskId,
@@ -178,6 +197,12 @@ export const ClientCommand = z.discriminatedUnion('type', [
     limit: z.number().int().min(1).max(200).default(50),
     beforeSeq: Seq.nullable().default(null),
     taskRef: TaskId.nullable().default(null),
+    /**
+     * Only messages posted after this one, oldest first. This is how an inbox
+     * pages through the room in the server's own order, rather than comparing
+     * its clock to the server's.
+     */
+    afterId: MessageId.nullable().default(null),
   }),
 
   /**
@@ -263,6 +288,7 @@ export interface CommandResultMap {
   'contract.committed': { ok: true }
   'task.claim': ClaimResult
   'task.release': { ok: true }
+  'task.forceRelease': { ok: true; holderId: ParticipantId }
   'task.progress': { ok: true }
   'task.testResult': { ok: true }
   'task.branch': { ok: true }
@@ -271,7 +297,11 @@ export interface CommandResultMap {
   'handoff.request': { request: HandoffRequest }
   'handoff.resolve': { ok: true }
   'chat.post': { message: ChatMessage }
-  'chat.read': { messages: ChatMessage[] }
+  /**
+   * `latestId` is the newest message in the room regardless of filters, so a
+   * reader can draw a line at "now" in the server's terms.
+   */
+  'chat.read': { messages: ChatMessage[]; latestId: MessageId | null; cursorFound: boolean }
   'usage.report': { ok: true }
   'activity.report': { ok: true }
 }

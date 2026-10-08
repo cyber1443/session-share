@@ -82,6 +82,28 @@ export function validateDecomposition(input: {
   const issues: ValidationIssue[] = []
   const analysis = analyzeDag(tasks)
 
+  /**
+   * Two tasks under one id are one task as far as everything downstream is
+   * concerned: the DAG keys on it, the lease keys on it, and seeding writes the
+   * second over the first. Whichever survives, half the split vanishes without
+   * anyone having decided it should.
+   */
+  const seen = new Set<string>()
+  const duplicated = new Set<string>()
+  for (const task of tasks) {
+    if (seen.has(task.id)) duplicated.add(task.id)
+    seen.add(task.id)
+  }
+  for (const id of duplicated) {
+    issues.push({
+      code: 'duplicate_task_id',
+      severity: 'error',
+      message: `More than one task is called "${id}".`,
+      taskIds: [id as TaskId],
+      repairHint: `Give each task its own id; rename all but one "${id}" and update any dependsOn that meant it.`,
+    })
+  }
+
   for (const { taskId, missing } of analysis.unknownDeps) {
     issues.push({
       code: 'unknown_dependency',
@@ -125,6 +147,26 @@ export function validateDecomposition(input: {
           : 'No action needed; the later task will see the earlier task merged.',
       })
     }
+  }
+
+  for (const file of contract.files) {
+    const normalized = normalizeGlob(file.path)
+    const segments = normalized.split('/')
+    if (
+      !/^[a-zA-Z]:/.test(file.path) &&
+      !normalized.startsWith('/') &&
+      !segments.includes('..') &&
+      segments[0] !== '.git'
+    ) {
+      continue
+    }
+    issues.push({
+      code: 'path_escapes_repo',
+      severity: 'error',
+      message: `Contract file "${file.path}" points outside the repository.`,
+      taskIds: [],
+      repairHint: 'Contract files are written on whoever lands the contract; give each a repo-relative path with no leading slash and no "..".',
+    })
   }
 
   const contractPaths = contract.files.map((f) => normalizeGlob(f.path))

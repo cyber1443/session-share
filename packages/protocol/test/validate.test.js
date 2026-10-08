@@ -185,3 +185,33 @@ describe('validateDecomposition', () => {
     assert.ok(codesIn(report).includes('warning:oversized_task'))
   })
 })
+
+describe('validateDecomposition: ids and case', () => {
+  it('rejects two tasks sharing an id', () => {
+    const report = validateDecomposition({
+      contract,
+      tasks: [task('dup'), task('dup', { ownedPaths: ['src/other/**'] })],
+      participantCount: 1,
+    })
+    assert.equal(report.ok, false)
+    assert.ok(codesIn(report).includes('error:duplicate_task_id'), codesIn(report).join(', '))
+  })
+
+  it('treats paths that differ only in case as the same file', () => {
+    const report = validateDecomposition({
+      contract,
+      tasks: [task('a', { ownedPaths: ['src/Theme.ts'] }), task('b', { ownedPaths: ['src/theme.ts'] })],
+      participantCount: 2,
+    })
+    assert.ok(codesIn(report).includes('error:overlapping_paths'), codesIn(report).join(', '))
+  })
+
+  it('catches a task owning a contract file spelled in another case', () => {
+    const report = validateDecomposition({
+      contract,
+      tasks: [task('a', { ownedPaths: ['SRC/lib/**'] })],
+      participantCount: 1,
+    })
+    assert.ok(codesIn(report).includes('error:contract_path_owned_by_task'), codesIn(report).join(', '))
+  })
+})

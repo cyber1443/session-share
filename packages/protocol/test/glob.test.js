@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
-import { expandBraces, globsIntersect, pathMatchesAny } from '../dist/index.js'
+import { expandBraces, globsIntersect, pathMatchesAny, samePath } from '../dist/index.js'
 
 describe('expandBraces', () => {
   it('expands a single group', () => {
@@ -83,5 +83,26 @@ describe('pathMatchesAny', () => {
 
   it('does not let * cross a directory boundary', () => {
     assert.equal(pathMatchesAny('src/theme/deep/toggle.tsx', ['src/theme/*.tsx']), false)
+  })
+})
+
+describe('case and dot segments', () => {
+  it('overlaps globs that differ only in case', () => {
+    assert.equal(globsIntersect('src/Theme/**', 'src/theme/toggle.ts'), true)
+  })
+
+  it('matches a path typed in another case', () => {
+    assert.equal(pathMatchesAny('SRC/a/x/g.ts', ['src/a/x/**']), true)
+  })
+
+  it('resolves . and .. before matching', () => {
+    assert.equal(pathMatchesAny('src/./a/x/g.ts', ['src/a/x/**']), true)
+    assert.equal(pathMatchesAny('src/b/../a/x/g.ts', ['src/a/x/**']), true)
+    assert.equal(pathMatchesAny('src/a/../b/g.ts', ['src/a/**']), false)
+  })
+
+  it('compares concrete paths the same way', () => {
+    assert.equal(samePath('src/Lib/types.ts', './src/lib/./types.ts'), true)
+    assert.equal(samePath('src/lib/types.ts', 'src/lib/other.ts'), false)
   })
 })

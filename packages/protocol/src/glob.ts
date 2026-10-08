@@ -165,10 +165,21 @@ function segmentListsIntersect(a: string[], b: string[]): boolean {
   return walk(0, 0)
 }
 
+/**
+ * Paths are compared without regard to case. The default filesystem on macOS
+ * (and Windows) treats `src/Theme.ts` and `src/theme.ts` as one file, so two
+ * leases that differ only in case are two agents writing the same bytes. On a
+ * case-sensitive filesystem this over-reports, which is the safe direction --
+ * the same trade the rest of this file makes.
+ */
+function foldCase(pattern: string): string {
+  return pattern.toLowerCase()
+}
+
 /** True if any file could be matched by both patterns. */
 export function globsIntersect(a: string, b: string): boolean {
-  const aVariants = expandBraces(a).map(toSegments)
-  const bVariants = expandBraces(b).map(toSegments)
+  const aVariants = expandBraces(foldCase(a)).map(toSegments)
+  const bVariants = expandBraces(foldCase(b)).map(toSegments)
   return aVariants.some((av) => bVariants.some((bv) => segmentListsIntersect(av, bv)))
 }
 
@@ -184,11 +195,13 @@ export function globSetsIntersect(a: string[], b: string[]): string[] | null {
 
 /** Does a concrete file path fall under any of these globs? Used by the lease gate. */
 export function pathMatchesAny(filePath: string, patterns: string[]): boolean {
-  const target = normalizeGlob(filePath)
-    .split('/')
-    .filter((s) => s.length > 0)
+  const target = resolveDots(
+    normalizeGlob(foldCase(filePath))
+      .split('/')
+      .filter((s) => s.length > 0),
+  )
   return patterns.some((pattern) =>
-    expandBraces(pattern).some((variant) => pathMatchesSegments(target, toSegments(variant))),
+    expandBraces(foldCase(pattern)).some((variant) => pathMatchesSegments(target, toSegments(variant))),
   )
 }
 
@@ -212,4 +225,28 @@ function matchesSegment(name: string, pattern: string): boolean {
     `^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`,
   )
   return regex.test(name)
+}
+
+/**
+ * `src/./a` and `src/b/../a` are `src/a`. A concrete path is checked against a
+ * lease segment by segment, so leaving these in let an edit walk around one.
+ */
+function resolveDots(segments: string[]): string[] {
+  const resolved: string[] = []
+  for (const segment of segments) {
+    if (segment === '.') continue
+    if (segment === '..' && resolved.length > 0 && resolved[resolved.length - 1] !== '..') {
+      resolved.pop()
+      continue
+    }
+    resolved.push(segment)
+  }
+  return resolved
+}
+
+/** Are these two concrete paths the same file, as a case-folding filesystem sees it? */
+export function samePath(a: string, b: string): boolean {
+  const canonical = (path: string) =>
+    resolveDots(normalizeGlob(foldCase(path)).split('/').filter((s) => s.length > 0)).join('/')
+  return canonical(a) === canonical(b)
 }

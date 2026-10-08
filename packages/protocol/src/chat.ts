@@ -18,11 +18,23 @@ export function parseTaskRefs(body: string, knownTaskIds: Iterable<string>): Tas
   return found
 }
 
-export function parseMentions(body: string, loginToId: Map<string, string>): string[] {
+/**
+ * `@login` names a person, and a person can hold several seats -- one per
+ * checkout, plus the board. A mention reaches all of them, so an instruction
+ * aimed at someone lands in whichever of their Claude Codes is listening.
+ * Logins are matched without regard to case, as GitHub matches them.
+ */
+export function parseMentions(body: string, loginToIds: Map<string, string[]>): string[] {
+  const byLogin = new Map<string, string[]>()
+  for (const [login, ids] of loginToIds) {
+    const key = login.toLowerCase()
+    byLogin.set(key, [...(byLogin.get(key) ?? []), ...ids])
+  }
   const found: string[] = []
   for (const match of body.matchAll(MENTION)) {
-    const id = loginToId.get(match[1]!)
-    if (id && !found.includes(id)) found.push(id)
+    for (const id of byLogin.get(match[1]!.toLowerCase()) ?? []) {
+      if (!found.includes(id)) found.push(id)
+    }
   }
   return found
 }

@@ -15,7 +15,7 @@ import type {
   ValidationReport,
 } from './domain.js'
 import type { EventEnvelope } from './events.js'
-import type { ParticipantId, TaskId, TicketId } from './ids.js'
+import type { DecompositionId, ParticipantId, TaskId, TicketId } from './ids.js'
 import { pathMatchesAny } from './glob.js'
 
 /**
@@ -39,8 +39,19 @@ export class SessionState {
   readonly participants = new Map<ParticipantId, Participant>()
   /** Insertion-ordered, which is the order the board's Plan column shows. */
   readonly tickets = new Map<TicketId, Ticket>()
-  decomposition: Decomposition | null = null
-  validation: ValidationReport | null = null
+  /**
+   * Splits, keyed by id, in the order they were proposed.
+   *
+   * This was one session-wide `decomposition`, overwritten by every proposal.
+   * With several tickets that meant starting ticket A seeded whichever split
+   * had arrived last -- quite possibly ticket B's -- and only the newest
+   * contract was ever frozen. Each ticket now points at its own split through
+   * `ticket.decompositionId`, and everything that acts on one looks it up.
+   */
+  readonly decompositions = new Map<DecompositionId, Decomposition>()
+  readonly validations = new Map<DecompositionId, ValidationReport>()
+  /** The newest proposal: what an event that names no split has always meant. */
+  latestDecompositionId: DecompositionId | null = null
   readonly tasks = new Map<TaskId, Task>()
   /** Keyed by task: a lease exists exactly as long as its task is held. */
   readonly leases = new Map<TaskId, Lease>()
@@ -91,7 +102,11 @@ export class SessionState {
       case 'participant.attached': {
         const participant = this.participants.get(body.participantId)
         if (participant) {
-          this.participants.set(body.participantId, { ...participant, repoPath: body.repoPath })
+          this.participants.set(body.participantId, {
+            ...participant,
+            repoPath: body.repoPath,
+            machineId: body.machineId ?? participant.machineId ?? null,
+          })
         }
         break
       }
@@ -140,10 +155,13 @@ export class SessionState {
           if (task.ticketId !== body.ticketId) continue
           this.tasks.delete(task.id)
           this.leases.delete(task.id)
+          this.expireHandoffs(task.id)
         }
-        if (this.decomposition?.ticketId === body.ticketId) {
-          this.decomposition = null
-          this.validation = null
+        for (const split of [...this.decompositions.values()]) {
+          if (split.ticketId !== body.ticketId) continue
+          this.decompositions.delete(split.id)
+          this.validations.delete(split.id)
+          if (this.latestDecompositionId === split.id) this.latestDecompositionId = null
         }
         break
       }
@@ -152,36 +170,75 @@ export class SessionState {
         if (this.session) this.session = { ...this.session, goal: body.goal, issueRef: body.issueRef }
         break
       case 'decomposition.proposed': {
-        this.decomposition = body.decomposition
-        this.validation = body.validation
-        const ticket = body.decomposition.ticketId
-          ? this.tickets.get(body.decomposition.ticketId)
-          : null
-        if (ticket) {
-          this.tickets.set(ticket.id, { ...ticket, decompositionId: body.decomposition.id })
+        const split: Decomposition = {
+          ...body.decomposition,
+          contractCommit: body.decomposition.contractCommit ?? null,
+        }
+        this.decompositions.set(split.id, split)
+        this.validations.set(split.id, body.validation)
+        this.latestDecompositionId = split.id
+
+        const ticket = split.ticketId ? this.tickets.get(split.ticketId) : null
+        /**
+         * Only a split that passed validation becomes the ticket's split, and
+         * only while nothing has been seeded from an earlier one. A failed
+         * proposal pointing the ticket at itself made the card read "proposed"
+         * with nothing startable on it; a re-proposal over running work cut the
+         * ticket loose from the contract its tasks were planned against.
+         */
+        if (ticket && this.tasksOfTicket(ticket.id).length === 0) {
+          this.tickets.set(ticket.id, {
+            ...ticket,
+            decompositionId: body.validation.ok ? split.id : null,
+          })
+        }
+
+        /**
+         * Older proposals for the same ticket are dropped once superseded, so
+         * the snapshot does not carry every repair round forever. An approved
+         * one stays: its contract is, or is about to be, frozen on the branch.
+         */
+        const current = split.ticketId ? this.tickets.get(split.ticketId)?.decompositionId : null
+        for (const older of [...this.decompositions.values()]) {
+          if (older.id === split.id || older.id === current) continue
+          if (older.ticketId !== split.ticketId || older.status === 'approved') continue
+          this.decompositions.delete(older.id)
+          this.validations.delete(older.id)
         }
         break
       }
       case 'decomposition.assigned':
-        if (this.decomposition) {
-          this.decomposition = { ...this.decomposition, assignments: body.assignments }
-        }
+        this.updateSplit(body.decompositionId, (split) => ({
+          ...split,
+          assignments: body.assignments,
+        }))
         break
       case 'decomposition.approval':
-        if (this.decomposition) {
-          this.decomposition = {
-            ...this.decomposition,
-            approvals: body.approvals,
-            status: body.satisfied ? 'approved' : this.decomposition.status,
-          }
-        }
+        this.updateSplit(body.decompositionId, (split) => ({
+          ...split,
+          approvals: body.approvals,
+          status: body.satisfied ? 'approved' : split.status,
+        }))
         break
       case 'decomposition.rejected':
-        if (this.decomposition) this.decomposition = { ...this.decomposition, status: 'rejected' }
+        this.updateSplit(body.decompositionId, (split) => ({ ...split, status: 'rejected' }))
         break
-      case 'contract.committed':
+      case 'contract.committed': {
         if (this.session) this.session = { ...this.session, contractBranch: body.branch }
+        const named = body.decompositionId ?? null
+        for (const split of [...this.decompositions.values()]) {
+          /**
+           * A landing that names no split comes from a log written when one
+           * landing made every task claimable. Folding it onto every approved
+           * split keeps those sessions working exactly as they did.
+           */
+          const lands = named
+            ? split.id === named
+            : split.status === 'approved' && split.contractCommit === null
+          if (lands) this.decompositions.set(split.id, { ...split, contractCommit: body.commitSha })
+        }
         break
+      }
 
       case 'tasks.seeded':
         for (const task of body.tasks) this.tasks.set(task.id, task)
@@ -220,6 +277,7 @@ export class SessionState {
         break
       case 'lease.released':
         this.leases.delete(body.taskId)
+        this.expireHandoffs(body.taskId)
         break
       case 'lease.denied':
         break // observability only; the deny already happened client-side
@@ -272,7 +330,86 @@ export class SessionState {
     }
   }
 
+  /** Applies a change to the split an event names, or the newest one if it names none. */
+  private updateSplit(
+    id: DecompositionId | null | undefined,
+    change: (split: Decomposition) => Decomposition,
+  ): void {
+    const key = id ?? this.latestDecompositionId
+    const split = key ? this.decompositions.get(key) : undefined
+    if (split) this.decompositions.set(split.id, change(split))
+  }
+
+  /**
+   * A handoff opens a path for one piece of work. When the lease it was carved
+   * out of goes, or the requester's own task does, the grant goes with it --
+   * otherwise a yes given for one afternoon's fix is a key that never expires.
+   */
+  private expireHandoffs(taskId: TaskId): void {
+    for (const request of this.handoffs.values()) {
+      if (request.status !== 'pending' && request.status !== 'granted') continue
+      if (request.heldByTaskId !== taskId && request.requesterTaskId !== taskId) continue
+      this.handoffs.set(request.id, { ...request, status: 'expired' })
+    }
+  }
+
   // -- derived -------------------------------------------------------------
+
+  /**
+   * The one split a client that predates tickets should see. The newest split
+   * that has been approved and not yet landed comes first, because that is the
+   * one somebody is about to write onto the branch; otherwise the newest
+   * proposal, which is what this field always meant.
+   */
+  get decomposition(): Decomposition | null {
+    const awaiting = [...this.decompositions.values()].filter(
+      (split) => split.status === 'approved' && split.contractCommit === null,
+    )
+    const latest = this.latestDecompositionId
+      ? this.decompositions.get(this.latestDecompositionId)
+      : undefined
+    return awaiting.at(-1) ?? latest ?? null
+  }
+
+  get validation(): ValidationReport | null {
+    const split = this.decomposition
+    return split ? (this.validations.get(split.id) ?? null) : null
+  }
+
+  /** The split a ticket is running, or is about to. */
+  splitOfTicket(ticketId: TicketId): Decomposition | null {
+    const id = this.tickets.get(ticketId)?.decompositionId
+    return id ? (this.decompositions.get(id) ?? null) : null
+  }
+
+  /** The split a live task was seeded from. */
+  splitOfTask(task: Task): Decomposition | null {
+    if (task.ticketId) return this.splitOfTicket(task.ticketId)
+    // A task from before tickets came from the session's one split.
+    const legacy = [...this.decompositions.values()].filter((split) => split.ticketId === null)
+    return legacy.findLast((split) => split.tasks.some((spec) => spec.id === task.id)) ?? null
+  }
+
+  /**
+   * Whether the seam this task was planned against is on the branch yet. Per
+   * task rather than per session: one ticket landing its contract says nothing
+   * about the files another ticket's tasks are going to import.
+   */
+  contractLanded(task: Task): boolean {
+    const split = this.splitOfTask(task)
+    if (split) return split.contractCommit !== null
+    return Boolean(this.session?.contractBranch)
+  }
+
+  /** Every contract file that has landed. All of them stay frozen, not just the newest. */
+  frozenContractPaths(): string[] {
+    const paths: string[] = []
+    for (const split of this.decompositions.values()) {
+      if (split.contractCommit === null) continue
+      for (const file of split.contract.files) paths.push(file.path)
+    }
+    return paths
+  }
 
   /**
    * Which lease, if any, covers this file. This is the whole lease gate: the
@@ -324,7 +461,8 @@ export class SessionState {
     const rank = (task: Task) =>
       task.assigneeId === participantId ? 0 : task.assigneeId === null ? 1 : 2
 
-    const scored = this.readyTasks().map((task) => {
+    const claimable = this.readyTasks().filter((task) => this.contractLanded(task))
+    const scored = claimable.map((task) => {
       const affinity = task.ownedPaths.some((glob) => touched.has(topLevel(glob))) ? 1 : 0
       const unblocks = [...this.tasks.values()].filter((t) =>
         t.dependsOn.includes(task.id),
@@ -425,8 +563,31 @@ export class SessionState {
     // Snapshots cross version boundaries -- an older server has no tickets at
     // all -- and hydrating is the one place a client cannot afford to throw.
     for (const ticket of snapshot.tickets ?? []) this.tickets.set(ticket.id, ticket)
-    this.decomposition = snapshot.decomposition
-    this.validation = snapshot.validation
+    this.decompositions.clear()
+    this.validations.clear()
+    /**
+     * An older server sends only the one split. Taking it as the whole map is
+     * what that server meant by it.
+     */
+    const splits = { ...(snapshot.decompositions ?? {}) }
+    const reports = { ...(snapshot.validations ?? {}) }
+    const legacy = snapshot.decomposition
+    if (Object.keys(splits).length === 0 && legacy) {
+      // Back then a landed branch meant this split had landed.
+      const landed = legacy.status === 'approved' && snapshot.session.contractBranch
+      splits[legacy.id] = { ...legacy, contractCommit: legacy.contractCommit ?? (landed ? 'landed' : null) }
+      if (snapshot.validation) reports[legacy.id] = snapshot.validation
+    }
+    for (const [id, split] of Object.entries(splits)) {
+      this.decompositions.set(id as DecompositionId, {
+        ...split,
+        contractCommit: split.contractCommit ?? null,
+      })
+    }
+    for (const [id, report] of Object.entries(reports)) {
+      this.validations.set(id as DecompositionId, report)
+    }
+    this.latestDecompositionId = [...this.decompositions.keys()].at(-1) ?? null
     this.tasks.clear()
     for (const task of snapshot.tasks) this.tasks.set(task.id, task)
     this.leases.clear()
@@ -460,6 +621,8 @@ export class SessionState {
       })),
       decomposition: this.decomposition,
       validation: this.validation,
+      decompositions: Object.fromEntries(this.decompositions),
+      validations: Object.fromEntries(this.validations),
       tasks: [...this.tasks.values()],
       leases: [...this.leases.values()],
       handoffs: [...this.handoffs.values()],

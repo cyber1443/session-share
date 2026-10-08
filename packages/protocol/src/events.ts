@@ -18,7 +18,22 @@ import {
   TestResult,
   ValidationReport,
 } from './domain.js'
-import { ParticipantId, SessionId, Seq, TaskId, TicketId, Timestamp } from './ids.js'
+import {
+  DecompositionId,
+  ParticipantId,
+  SessionId,
+  Seq,
+  TaskId,
+  TicketId,
+  Timestamp,
+} from './ids.js'
+
+/**
+ * Which split a decomposition event is about. Logs written while a session had
+ * a single split leave it out, and those events still mean what they meant
+ * then: the most recent proposal.
+ */
+const SplitRef = DecompositionId.nullable().default(null)
 
 /**
  * Every mutation to durable session state is one of these events, appended to a
@@ -52,6 +67,7 @@ export const EventBody = z.discriminatedUnion('type', [
     type: z.literal('participant.attached'),
     participantId: ParticipantId,
     repoPath: z.string().min(1),
+    machineId: z.string().min(1).nullish(),
   }),
 
   // -- tickets --------------------------------------------------------------
@@ -90,6 +106,7 @@ export const EventBody = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('decomposition.approval'),
+    decompositionId: SplitRef,
     participantId: ParticipantId,
     approvals: z.array(ParticipantId),
     /** True once the approval rule is satisfied: unanimous at <=3, lead above. */
@@ -102,15 +119,22 @@ export const EventBody = z.discriminatedUnion('type', [
    */
   z.object({
     type: z.literal('decomposition.assigned'),
+    decompositionId: SplitRef,
     assignments: z.array(Assignment),
   }),
   z.object({
     type: z.literal('decomposition.rejected'),
+    decompositionId: SplitRef,
     participantId: ParticipantId,
     reason: z.string().max(500),
   }),
   z.object({
     type: z.literal('contract.committed'),
+    /**
+     * The split whose contract this is. Left out by logs from before each
+     * ticket landed its own seam, when one landing made everything claimable.
+     */
+    decompositionId: SplitRef,
     branch: z.string().min(1),
     commitSha: z.string().min(1),
     prNumber: z.number().int().nullable(),

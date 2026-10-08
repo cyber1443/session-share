@@ -262,3 +262,141 @@ describe('SessionState.snapshot', () => {
     assert.equal(state.snapshot().tickets[0].state, 'building', 'what a client is told')
   })
 })
+
+const spec = (id, ownedPaths) => ({
+  id,
+  title: id,
+  intent: id,
+  ownedPaths,
+  dependsOn: [],
+  assumes: [],
+  acceptance: { testCommand: 't', testFiles: ['x.test.ts'], manualChecks: [] },
+  estimateMinutes: 30,
+})
+
+const split = (id, ticketId, contractPath, tasks) => ({
+  id,
+  sessionId: 's1',
+  ticketId,
+  issueRef: null,
+  contract: { summary: id, files: [{ path: contractPath, purpose: 'p', contents: '' }] },
+  tasks,
+  participantCount: 1,
+  proposedBy: 'p1',
+  status: 'proposed',
+  approvals: [],
+  assignments: [],
+  createdAt: 0,
+})
+
+const ok = { ok: true, issues: [], frontierByDepth: [1], maxFrontier: 1 }
+const failed = { ...ok, ok: false }
+
+const ticket = (id) => ({
+  id,
+  sessionId: 's1',
+  title: id,
+  body: '',
+  authorId: 'p1',
+  members: ['p1'],
+  state: 'plan',
+  verification: null,
+  decompositionId: null,
+  prNumber: null,
+  createdAt: 0,
+})
+
+const seeded = (taskSpec, ticketId) => ({
+  ...taskSpec,
+  sessionId: 's1',
+  ticketId,
+  state: 'ready',
+  assigneeId: null,
+  ownerId: null,
+  branch: null,
+  prNumber: null,
+  lastTest: null,
+  activityLine: null,
+  depth: 0,
+})
+
+describe('SessionState: one split per ticket', () => {
+  it('keeps each ticket on its own split, whichever was proposed last', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: { ...SESSION, contractBranch: null } }))
+    state.apply(envelope(1, { type: 'ticket.created', ticket: ticket('A') }))
+    state.apply(envelope(2, { type: 'ticket.created', ticket: ticket('B') }))
+    state.apply(envelope(3, { type: 'decomposition.proposed', decomposition: split('dA', 'A', 'src/a/c.ts', [spec('a1', ['src/a/x/**'])]), validation: ok }))
+    state.apply(envelope(4, { type: 'decomposition.proposed', decomposition: split('dB', 'B', 'src/b/c.ts', [spec('b1', ['src/b/x/**'])]), validation: ok }))
+
+    assert.equal(state.splitOfTicket('A').id, 'dA')
+    assert.equal(state.splitOfTicket('B').id, 'dB')
+    const snapshot = state.snapshot()
+    assert.deepEqual(Object.keys(snapshot.decompositions).sort(), ['dA', 'dB'])
+    assert.equal(snapshot.decomposition.id, 'dB', 'the single field is still the newest proposal')
+  })
+
+  it('does not make a failed proposal the ticket split', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: SESSION }))
+    state.apply(envelope(1, { type: 'ticket.created', ticket: ticket('A') }))
+    state.apply(envelope(2, { type: 'decomposition.proposed', decomposition: split('bad', 'A', 'src/a/c.ts', [spec('a1', ['src/**'])]), validation: failed }))
+    assert.equal(state.tickets.get('A').decompositionId, null)
+    assert.ok(state.decompositions.has('bad'), 'but it is kept, so the repair round can see it')
+  })
+
+  it('lands only the contract it names, and freezes every landed one', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: { ...SESSION, contractBranch: null } }))
+    state.apply(envelope(1, { type: 'ticket.created', ticket: ticket('A') }))
+    state.apply(envelope(2, { type: 'ticket.created', ticket: ticket('B') }))
+    state.apply(envelope(3, { type: 'decomposition.proposed', decomposition: split('dA', 'A', 'src/a/c.ts', [spec('a1', ['src/a/x/**'])]), validation: ok }))
+    state.apply(envelope(4, { type: 'decomposition.proposed', decomposition: split('dB', 'B', 'src/b/c.ts', [spec('b1', ['src/b/x/**'])]), validation: ok }))
+    state.apply(envelope(5, { type: 'decomposition.approval', decompositionId: 'dA', participantId: 'p1', approvals: ['p1'], satisfied: true }))
+    state.apply(envelope(6, { type: 'tasks.seeded', tasks: [seeded(spec('a1', ['src/a/x/**']), 'A')] }))
+    state.apply(envelope(7, { type: 'decomposition.approval', decompositionId: 'dB', participantId: 'p1', approvals: ['p1'], satisfied: true }))
+    state.apply(envelope(8, { type: 'tasks.seeded', tasks: [seeded(spec('b1', ['src/b/x/**']), 'B')] }))
+    state.apply(envelope(9, { type: 'contract.committed', decompositionId: 'dA', branch: 'c', commitSha: 'x', prNumber: null }))
+
+    assert.equal(state.contractLanded(state.tasks.get('a1')), true)
+    assert.equal(state.contractLanded(state.tasks.get('b1')), false, "B's seam is not on the branch yet")
+    assert.deepEqual(state.frozenContractPaths(), ['src/a/c.ts'])
+
+    state.apply(envelope(10, { type: 'contract.committed', decompositionId: 'dB', branch: 'c', commitSha: 'y', prNumber: null }))
+    assert.deepEqual(state.frozenContractPaths().sort(), ['src/a/c.ts', 'src/b/c.ts'])
+  })
+
+  it('folds a log written before splits were named', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: { ...SESSION, contractBranch: null } }))
+    state.apply(envelope(1, { type: 'ticket.created', ticket: ticket('A') }))
+    state.apply(envelope(2, { type: 'decomposition.proposed', decomposition: split('dA', 'A', 'src/a/c.ts', [spec('a1', ['src/a/x/**'])]), validation: ok }))
+    // No decompositionId anywhere: these meant "the newest proposal".
+    state.apply(envelope(3, { type: 'decomposition.assigned', assignments: [{ taskId: 'a1', participantId: 'p1', manual: false }] }))
+    state.apply(envelope(4, { type: 'decomposition.approval', participantId: 'p1', approvals: ['p1'], satisfied: true }))
+    state.apply(envelope(5, { type: 'tasks.seeded', tasks: [seeded(spec('a1', ['src/a/x/**']), 'A')] }))
+    state.apply(envelope(6, { type: 'contract.committed', branch: 'c', commitSha: 'x', prNumber: null }))
+
+    const dA = state.decompositions.get('dA')
+    assert.equal(dA.status, 'approved')
+    assert.equal(dA.assignments.length, 1)
+    assert.equal(state.contractLanded(state.tasks.get('a1')), true)
+    assert.equal(state.pickTaskFor('p1')?.id, 'a1')
+  })
+
+  it('expires a handoff when either lease goes', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: SESSION }))
+    const request = (id, heldByTaskId, requesterTaskId) => ({
+      id, sessionId: 's1', path: 'src/a/f.ts', requesterId: 'p2', holderId: 'p1',
+      heldByTaskId, requesterTaskId, reason: '', status: 'pending', createdAt: 0,
+    })
+    state.apply(envelope(1, { type: 'handoff.requested', request: request('h1', 't1', 't2') }))
+    state.apply(envelope(2, { type: 'handoff.resolved', requestId: 'h1', granted: true, resolvedBy: 'p1' }))
+    state.apply(envelope(3, { type: 'handoff.requested', request: request('h2', 't3', 't4') }))
+    state.apply(envelope(4, { type: 'lease.released', taskId: 't1', holderId: 'p1' }))
+    state.apply(envelope(5, { type: 'lease.released', taskId: 't4', holderId: 'p2' }))
+    assert.equal(state.handoffs.get('h1').status, 'expired')
+    assert.equal(state.handoffs.get('h2').status, 'expired')
+  })
+})

@@ -19,9 +19,13 @@ import {
   type Ticket,
   type TicketId,
   type TicketState,
+  type ValidationIssue,
   analyzeDag,
   autoAssign,
+  globSetsIntersect,
   globsIntersect,
+  pathMatchesAny,
+  samePath,
   parseMentions,
   parseTaskRefs,
   validateDecomposition,
@@ -83,10 +87,23 @@ const UNANIMOUS_UP_TO = 3
  */
 const PRESENT_FOR_MS = 10 * 60 * 1000
 
+/** The states an agent may move its own task between by reporting progress. */
+const PROGRESS_STATES = new Set(['claimed', 'running', 'testing'])
+
+/** How many events a rebuild reads at a time. */
+const REBUILD_PAGE = 5000
+
 export class SessionService {
   private readonly states = new Map<SessionId, SessionState>()
   /** Public so a test can age someone out without waiting ten minutes. */
   readonly lastSeen = new Map<ParticipantId, number>()
+  /**
+   * `lastSeen` lives in memory, so a restart forgets everyone at once. Counting
+   * from the restart rather than from when they joined keeps a server that has
+   * just come back from declaring the whole room gone -- which would let anyone
+   * take anyone's task the moment it restarted.
+   */
+  private readonly startedAt = Date.now()
 
   constructor(
     private readonly store: Store,
@@ -101,8 +118,18 @@ export class SessionService {
     const existing = this.states.get(sessionId)
     if (existing) return existing
 
+    /**
+     * Paged, because the store caps a read. Folding only the first page used to
+     * be invisible until a session outgrew it, and then a restart silently
+     * rebuilt it as it stood thousands of events ago.
+     */
     const state = new SessionState()
-    for (const envelope of this.store.readEvents(sessionId, 0)) state.apply(envelope)
+    for (let from = 0; ; ) {
+      const page = this.store.readEvents(sessionId, from, REBUILD_PAGE)
+      for (const envelope of page) state.apply(envelope)
+      if (page.length < REBUILD_PAGE) break
+      from = page[page.length - 1]!.seq + 1
+    }
     this.states.set(sessionId, state)
     return state
   }
@@ -124,6 +151,18 @@ export class SessionService {
   }
 
   /**
+   * Whether someone has been heard from recently. The `connected` flag says
+   * whether a socket is open, which is not the same question: an attached
+   * checkout speaks over HTTP and never holds one, and a closed board tab says
+   * nothing about whether its owner's agent is still working.
+   */
+  isPresent(participant: Participant, now = Date.now()): boolean {
+    const last =
+      this.lastSeen.get(participant.id) ?? Math.max(participant.joinedAt, this.startedAt)
+    return now - last < PRESENT_FOR_MS
+  }
+
+  /**
    * The snapshot everyone actually reads, with presence resolved from when each
    * participant was last heard from rather than from a flag nobody clears.
    */
@@ -134,9 +173,9 @@ export class SessionService {
       ...snapshot,
       participants: snapshot.participants.map((participant) => ({
         ...participant,
-        connected:
-          participant.connected &&
-          now - (this.lastSeen.get(participant.id) ?? participant.joinedAt) < PRESENT_FOR_MS,
+        // The flag alone used to be ANDed in, so one closed board tab marked an
+        // agent that was still working over HTTP as gone, permanently.
+        connected: this.isPresent(participant, now),
       })),
     }
   }
@@ -192,6 +231,8 @@ export class SessionService {
         return this.claim(command, ctx)
       case 'task.release':
         return this.release(command, ctx)
+      case 'task.forceRelease':
+        return this.forceRelease(command, ctx)
       case 'task.progress':
         return this.progress(command, ctx)
       case 'task.testResult':
@@ -245,47 +286,77 @@ export class SessionService {
   }
 
   private join(command: Extract<ClientCommand, { type: 'session.join' }>, ctx: CommandContext) {
+    /**
+     * Identity comes from the credential and nowhere else. The command still
+     * carries a githubLogin field for older clients, and honouring it for an
+     * unauthenticated caller is what let a bare websocket join any session as
+     * any name it chose -- including the host's.
+     */
+    const user = ctx.user
+    if (!user) {
+      throw new ServiceError('unauthorized', 'Sign in, or attach this checkout with /ss:join <code>.')
+    }
+
     const sessionId = this.store.findSessionIdByRef(command.sessionRef)
     if (!sessionId) throw new ServiceError('not_found', `No session "${command.sessionRef}".`)
 
     const state = this.state(sessionId)
-
-    // An authenticated identity always wins over what the client says it is.
-    const githubLogin = ctx.user?.githubLogin ?? command.githubLogin
-    if (!githubLogin) {
-      throw new ServiceError('unauthorized', 'Sign in, or attach this checkout with /ss:join <code>.')
-    }
-
     const identity = {
-      userId: ctx.user?.id ?? null,
-      githubLogin,
-      displayName: ctx.user?.displayName ?? command.displayName ?? githubLogin,
-      avatarUrl: ctx.user?.avatarUrl ?? null,
+      userId: user.id,
+      githubLogin: user.githubLogin,
+      displayName: user.displayName,
+      avatarUrl: user.avatarUrl,
     }
+    const repoPath = command.repoPath
+    const machineId = command.machineId ?? null
+
+    /**
+     * A checkout is a path on a machine. `/workspaces/app` on two laptops is
+     * two working trees that cannot touch each other, so a matching path only
+     * means "the same checkout" when the machines match too -- or when one side
+     * predates machine ids and there is nothing better to go on.
+     */
+    const sameCheckout = (p: Participant) =>
+      p.repoPath === repoPath && (!p.machineId || !machineId || p.machineId === machineId)
+    const isMe = (p: Participant) => p.userId === identity.userId
 
     /**
      * Two Claude Codes in one working tree corrupt each other's edits, and no
      * lease can prevent it because both are the same filesystem. Rejecting the
      * join is the only place this can be caught.
      */
-    const clash = command.repoPath
+    const clash = repoPath
       ? [...state.participants.values()].find(
-          (p) =>
-            p.connected &&
-            p.repoPath === command.repoPath &&
-            p.githubLogin !== identity.githubLogin,
+          (p) => this.isPresent(p) && sameCheckout(p) && !isMe(p),
         )
       : undefined
     if (clash) {
       throw new ServiceError(
         'conflict',
-        `${clash.displayName} is already working in ${command.repoPath}. Use a separate clone or git worktree -- two agents in one checkout will corrupt each other.`,
+        `${clash.displayName} is already working in ${repoPath}. Use a separate clone or git worktree -- two agents in one checkout will corrupt each other.`,
       )
     }
 
-    const returning = [...state.participants.values()].find((p) =>
-      identity.userId ? p.userId === identity.userId : p.githubLogin === identity.githubLogin,
-    )
+    /**
+     * Which seat this is. A participant is a person *in one checkout*: leases
+     * are held by participants, so two clones of one person sharing a seat
+     * meant either clone could edit what the other had leased, and the gate
+     * between them was decoration. So:
+     *
+     * - a credential that already names a seat (a board's ticket) keeps it;
+     * - a checkout gets the seat it had before, or else adopts a seat this
+     *   person has only been watching from, or else a new one;
+     * - a browser with no checkout sits in whichever seat the person has.
+     *
+     * The board still groups seats by login, so one person reads as one person.
+     */
+    const mine = [...state.participants.values()].filter(isMe)
+    const bound = ctx.participantId ? state.participants.get(ctx.participantId) : undefined
+    const returning =
+      (bound && isMe(bound) && (!repoPath || !bound.repoPath || sameCheckout(bound)) ? bound : undefined) ??
+      (repoPath
+        ? (mine.find(sameCheckout) ?? mine.find((p) => p.repoPath === null))
+        : mine[0])
 
     let participantId: ParticipantId
     if (returning) {
@@ -296,11 +367,15 @@ export class SessionService {
         connected: true,
       })
       // Someone who was watching from the board has now paired a checkout.
-      if (command.repoPath && command.repoPath !== returning.repoPath) {
+      const moved =
+        repoPath &&
+        (repoPath !== returning.repoPath || (machineId !== null && machineId !== returning.machineId))
+      if (moved) {
         this.emit(sessionId, participantId, {
           type: 'participant.attached',
           participantId,
-          repoPath: command.repoPath,
+          repoPath,
+          machineId,
         })
       }
     } else {
@@ -313,13 +388,15 @@ export class SessionService {
         displayName: identity.displayName,
         avatarUrl: identity.avatarUrl,
         colorIndex: state.participants.size % PALETTE_SIZE,
-        repoPath: command.repoPath,
+        repoPath,
+        machineId,
         connected: true,
         activity: { state: 'idle', detail: 'joined', taskId: null, updatedAt: Date.now() },
         joinedAt: Date.now(),
       }
       this.emit(sessionId, participantId, { type: 'participant.joined', participant })
     }
+    this.seen(participantId)
 
     // First one in leads, so /ss:plan always has an owner.
     if (state.session && state.session.leadId === null) {
@@ -539,7 +616,14 @@ export class SessionService {
      * repository, the button appears to work, and no work exists. Asking again
      * re-sends the request, which is what someone pressing it means.
      */
-    if (ticket.decompositionId) return { ticket, plannerId: null }
+    /**
+     * Only a split that can actually be started counts as one. A failed
+     * proposal never becomes the ticket's split, but a log can predate that
+     * rule -- and either way, a ticket whose only split is broken needs asking
+     * again, not a polite no-op.
+     */
+    const current = ticket.decompositionId
+    if (current && state.validations.get(current)?.ok) return { ticket, plannerId: null }
     const plannerId = this.beginSplit(sessionId, participantId, state, ticket)
     return { ticket: this.requireTicket(state, command.ticketId), plannerId }
   }
@@ -557,8 +641,20 @@ export class SessionService {
     const ticket = this.requireTicket(state, command.ticketId)
 
     if (state.tasksOfTicket(ticket.id).length > 0) return { ticket }
-    if (!ticket.decompositionId) {
+    const split = state.splitOfTicket(ticket.id)
+    if (!split) {
       throw new ServiceError('not_ready', 'There is no split to start yet.')
+    }
+    /**
+     * Joining consented to the work, not to a split the validator refused.
+     * Starting one anyway is how two agents end up in the same file with
+     * everybody's blessing.
+     */
+    if (!state.validations.get(split.id)?.ok || split.status !== 'proposed') {
+      throw new ServiceError(
+        'not_ready',
+        `This split cannot be started (${split.status === 'proposed' ? 'it failed validation' : `it is already ${split.status}`}). Ask for a new one with ss_ticket_start.`,
+      )
     }
     if (!ticket.members.includes(participantId)) {
       throw new ServiceError(
@@ -569,11 +665,12 @@ export class SessionService {
 
     this.emit(sessionId, participantId, {
       type: 'decomposition.approval',
+      decompositionId: split.id,
       participantId,
       approvals: ticket.members,
       satisfied: true,
     })
-    this.seedTasks(sessionId, participantId, state)
+    this.seedTasks(sessionId, participantId, state, split.id)
     this.refreshTicketStates(sessionId, participantId)
     return { ticket: this.requireTicket(state, command.ticketId) }
   }
@@ -643,6 +740,36 @@ export class SessionService {
     const ticketTasks = state.tasksOfTicket(ticket.id)
 
     /**
+     * A verdict only means something about the assembled thing, which exists
+     * once every task has landed. Accepted earlier, a pass sent a half-built
+     * ticket to review, and a failure "reopened" tasks somebody was still
+     * holding -- handing them out as ready while their lease went on denying
+     * edits to whoever claimed them next.
+     */
+    const column = state.ticketStateFor(ticket.id)
+    if (column !== 'verify') {
+      throw new ServiceError(
+        'not_ready',
+        column === 'review'
+          ? `"${ticket.title}" has already passed. Open the pull request with ss_ship.`
+          : `"${ticket.title}" is not ready to be run yet: it is in ${column}, and a run only means something once every task has landed.`,
+      )
+    }
+
+    /**
+     * Ids that are not this ticket's tasks are refused outright. Ignoring them
+     * meant a report naming only a typo reopened nothing at all, and the
+     * ticket sat in verify with the bug described and no work to fix it.
+     */
+    const unknown = command.broke.filter((id) => !ticketTasks.some((task) => task.id === id))
+    if (unknown.length > 0) {
+      throw new ServiceError(
+        'bad_request',
+        `Not tasks on "${ticket.title}": ${unknown.join(', ')}. Its tasks are ${ticketTasks.map((task) => task.id).join(', ')}.`,
+      )
+    }
+
+    /**
      * A failure names tasks or it means all of them. Either way something has
      * to reopen: every task of a ticket in verify is already merged, so with
      * nothing put back the report lands on a board where there is nothing left
@@ -668,6 +795,19 @@ export class SessionService {
     })
 
     for (const task of reopened) {
+      /**
+       * In verify every task has merged, and merging released its lease. If a
+       * log ever says otherwise, the lease goes before the task reopens: a
+       * ready task behind someone else's lease is a trap for whoever claims it.
+       */
+      const lease = state.leases.get(task.id)
+      if (lease) {
+        this.emit(sessionId, participantId, {
+          type: 'lease.released',
+          taskId: task.id,
+          holderId: lease.holderId,
+        })
+      }
       this.emit(sessionId, participantId, {
         type: 'task.state',
         taskId: task.id,
@@ -733,6 +873,17 @@ export class SessionService {
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
     const ticket = this.requireTicket(state, command.ticketId)
+    /**
+     * A pull request is for something that was run and worked. Recording one
+     * earlier parked the card in review for good -- a PR number outranks
+     * everything else in where a card sits -- with tasks still unbuilt under it.
+     */
+    if (state.ticketStateFor(ticket.id) !== 'review' || !ticket.verification?.passed) {
+      throw new ServiceError(
+        'not_ready',
+        `"${ticket.title}" has not passed a run of the assembled thing yet, so there is nothing to open a pull request for.`,
+      )
+    }
     this.emit(sessionId, participantId, {
       type: 'ticket.shipped',
       ticketId: ticket.id,
@@ -750,7 +901,7 @@ export class SessionService {
   ): ParticipantId | null {
     const planner = ticket.members
       .map((id) => state.participants.get(id))
-      .find((p) => p?.repoPath && p.connected)
+      .find((p) => p?.repoPath && this.isPresent(p))
 
     if (!planner) {
       // Nobody in it can read the repo, so it stays where it is rather than
@@ -877,7 +1028,9 @@ export class SessionService {
      * no repo attached cannot do it, and silently picking them would look like
      * the request vanished.
      */
-    const candidates = [...state.participants.values()].filter((p) => p.repoPath && p.connected)
+    const candidates = [...state.participants.values()].filter(
+      (p) => p.repoPath && this.isPresent(p),
+    )
     const requested = command.plannerId ? state.participants.get(command.plannerId) : null
     if (command.plannerId && !requested) {
       throw new ServiceError('not_found', 'That participant is not in this session.')
@@ -962,6 +1115,22 @@ export class SessionService {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
 
     /**
+     * A ticket whose work is already running keeps the split it started with.
+     * Its tasks were planned against that contract, and the contract may be on
+     * the branch already; swapping the split underneath them would leave the
+     * running work pointing at a seam nobody is looking at any more.
+     */
+    if (command.ticketId) {
+      const ticket = this.requireTicket(state, command.ticketId)
+      if (state.tasksOfTicket(ticket.id).length > 0) {
+        throw new ServiceError(
+          'conflict',
+          `"${ticket.title}" is already being built from its split. Delete the ticket and open a new one to start over.`,
+        )
+      }
+    }
+
+    /**
      * No phase gate here. A session hosts tickets for as long as the repo is
      * worked on, and each one plans, builds and ships on its own clock -- so
      * there is no session-wide moment after which planning is over. Whether a
@@ -981,7 +1150,10 @@ export class SessionService {
      * someone tried to claim, by which point the split has been agreed and the
      * work handed out. Cheaper to say so now, while it is still a proposal.
      */
-    for (const issue of this.crossTicketOverlaps(state, command.tasks, command.ticketId)) {
+    for (const issue of [
+      ...this.takenTaskIds(state, command.tasks, command.ticketId),
+      ...this.crossTicketOverlaps(state, command.tasks, command.contract, command.ticketId),
+    ]) {
       validation.issues.push(issue)
       validation.ok = false
     }
@@ -1006,6 +1178,7 @@ export class SessionService {
         status: 'proposed',
         approvals: [],
         assignments: [],
+        contractCommit: null,
         createdAt: Date.now(),
       },
       validation,
@@ -1018,7 +1191,17 @@ export class SessionService {
      * proposal like everything else here, so it can be dragged around before
      * anyone approves.
      */
-    if (!validation.ok) return { decompositionId, validation }
+    if (!validation.ok) {
+      /**
+       * A ticket whose proposal failed is back to being split: the planner has
+       * a repair round to do, and the card should say so rather than offer a
+       * split nobody can start.
+       */
+      if (command.ticketId) {
+        this.setTicketState(sessionId, participantId, command.ticketId, 'splitting')
+      }
+      return { decompositionId, validation }
+    }
 
     /**
      * A ticket's split needs no approval: joining the ticket was the consent,
@@ -1037,6 +1220,7 @@ export class SessionService {
 
       this.emit(sessionId, participantId, {
         type: 'decomposition.assigned',
+        decompositionId,
         assignments: autoAssign({ tasks: command.tasks, participants: members }),
       })
       /**
@@ -1066,37 +1250,146 @@ export class SessionService {
       return { decompositionId, validation }
     }
 
-    this.rebalance(sessionId, participantId, state, [])
+    this.rebalance(sessionId, participantId, state, decompositionId, [])
     return { decompositionId, validation }
   }
 
-  /** Paths already spoken for by another ticket's unfinished work. */
-  private crossTicketOverlaps(
+  /**
+   * Task ids are the session's, not the ticket's: tasks, leases and the DAG all
+   * key on them. Two tickets both proposing `api` meant seeding the second
+   * wrote over the first -- a running task, its owner and its state replaced
+   * by somebody else's card.
+   */
+  private takenTaskIds(
     state: SessionState,
-    proposed: Array<{ id: TaskId; ownedPaths: string[] }>,
+    proposed: Array<{ id: TaskId }>,
     ticketId: TicketId | null,
   ) {
     const issues = []
-    const live = [...state.tasks.values()].filter(
-      (task) => task.state !== 'merged' && task.ticketId && task.ticketId !== ticketId,
+    const pending = this.otherSplits(state, ticketId).filter((split) => split.status === 'proposed')
+    for (const spec of proposed) {
+      const live = state.tasks.get(spec.id)
+      const elsewhere = live && live.ticketId !== ticketId
+      const queued = pending.find((split) => split.tasks.some((other) => other.id === spec.id))
+      if (!elsewhere && !queued) continue
+
+      const owner = (elsewhere ? live.ticketId : queued?.ticketId) ?? null
+      const title = owner ? (state.tickets.get(owner)?.title ?? owner) : 'an earlier split'
+      issues.push({
+        code: 'task_id_taken' as const,
+        severity: 'error' as const,
+        message: `There is already a task called "${spec.id}", on "${title}".`,
+        taskIds: [spec.id],
+        repairHint: `Task ids are shared by every ticket in the session. Rename "${spec.id}" -- prefixing it with something from this ticket is enough.`,
+      })
+    }
+    return issues
+  }
+
+  /**
+   * The splits other tickets are running or are about to: each ticket's
+   * current one, plus an approved split from before tickets existed, whose
+   * contract is just as frozen.
+   */
+  private otherSplits(state: SessionState, ticketId: TicketId | null) {
+    return [...state.decompositions.values()].filter((split) => {
+      if (split.ticketId === ticketId || split.status === 'rejected') return false
+      if (split.ticketId === null) return split.status === 'approved'
+      return state.tickets.get(split.ticketId)?.decompositionId === split.id
+    })
+  }
+
+  /**
+   * Paths already spoken for by another ticket: its unfinished tasks, the
+   * tasks of a split waiting to be started, and its contract files, which are
+   * frozen from the moment they land.
+   */
+  private crossTicketOverlaps(
+    state: SessionState,
+    proposed: Array<{ id: TaskId; ownedPaths: string[] }>,
+    contract: { files: Array<{ path: string; contents: string }> },
+    ticketId: TicketId | null,
+  ) {
+    const issues: ValidationIssue[] = []
+    const titleOf = (id: TicketId | null) =>
+      id ? (state.tickets.get(id)?.title ?? id) : 'an earlier split'
+
+    /**
+     * Who owns what elsewhere. A split nobody has started yet counts: two
+     * proposals that each pass alone would otherwise both be started, and the
+     * second one to claim would find the first one's lease in its way.
+     */
+    const owners: Array<{ id: TaskId; ticketId: TicketId | null; ownedPaths: string[]; live: boolean }> = [
+      ...[...state.tasks.values()]
+        .filter((task) => task.state !== 'merged' && task.ticketId && task.ticketId !== ticketId)
+        .map((task) => ({ id: task.id, ticketId: task.ticketId, ownedPaths: task.ownedPaths, live: true })),
+      ...this.otherSplits(state, ticketId)
+        .filter((split) => split.status === 'proposed')
+        .flatMap((split) =>
+          split.tasks.map((spec) => ({
+            id: spec.id,
+            ticketId: split.ticketId,
+            ownedPaths: spec.ownedPaths,
+            live: false,
+          })),
+        ),
+    ]
+    const frozen = this.otherSplits(state, ticketId).flatMap((split) =>
+      split.contract.files.map((file) => ({ ...file, ticketId: split.ticketId })),
     )
 
     for (const spec of proposed) {
-      for (const held of live) {
-        const collision = spec.ownedPaths.find((glob) =>
-          held.ownedPaths.some((other) => globsIntersect(glob, other)),
-        )
-        if (!collision) continue
-
-        const ticket = held.ticketId ? state.tickets.get(held.ticketId) : null
+      const owner = owners.find((other) => globSetsIntersect(spec.ownedPaths, other.ownedPaths))
+      if (owner) {
+        const [collision] = globSetsIntersect(spec.ownedPaths, owner.ownedPaths)!
         issues.push({
-          code: 'overlaps_other_ticket' as const,
-          severity: 'error' as const,
-          message: `"${spec.id}" owns ${collision}, which "${held.id}" already owns on the ticket "${ticket?.title ?? held.ticketId}".`,
+          code: 'overlaps_other_ticket',
+          severity: 'error',
+          message: `"${spec.id}" owns ${collision}, which "${owner.id}" ${owner.live ? 'already owns' : 'is proposed to own'} on the ticket "${titleOf(owner.ticketId)}".`,
           taskIds: [spec.id],
-          repairHint: `Scope this ticket away from ${collision}, or wait for "${ticket?.title ?? 'that ticket'}" to land. Two tickets editing one file is the collision the whole split exists to prevent.`,
+          repairHint: `Scope this ticket away from ${collision}, or wait for "${titleOf(owner.ticketId)}" to land. Two tickets editing one file is the collision the whole split exists to prevent.`,
         })
-        break
+        continue
+      }
+
+      const file = frozen.find((other) => pathMatchesAny(other.path, spec.ownedPaths))
+      if (file) {
+        issues.push({
+          code: 'overlaps_other_ticket',
+          severity: 'error',
+          message: `"${spec.id}" owns ${file.path}, which is a contract file of the ticket "${titleOf(file.ticketId)}".`,
+          taskIds: [spec.id],
+          repairHint: `Contract files are frozen once they land, for every ticket. Narrow "${spec.id}" to leave ${file.path} alone, and import from it instead.`,
+        })
+      }
+    }
+
+    for (const file of contract.files) {
+      const owner = owners.find((other) => pathMatchesAny(file.path, other.ownedPaths))
+      if (owner) {
+        issues.push({
+          code: 'overlaps_other_ticket',
+          severity: 'error',
+          message: `The contract writes ${file.path}, which "${owner.id}" ${owner.live ? 'owns' : 'is proposed to own'} on the ticket "${titleOf(owner.ticketId)}".`,
+          taskIds: [],
+          repairHint: `Landing this contract would write into another ticket's work. Put the shared piece in a file of its own, or wait for "${titleOf(owner.ticketId)}" to land.`,
+        })
+        continue
+      }
+      /**
+       * The same file in two contracts is fine when it says the same thing --
+       * landing it twice commits nothing. Different contents means the second
+       * landing rewrites a seam the first ticket's tasks are built on.
+       */
+      const clash = frozen.find((other) => samePath(other.path, file.path) && other.contents !== file.contents)
+      if (clash) {
+        issues.push({
+          code: 'overlaps_other_ticket',
+          severity: 'error',
+          message: `The contract rewrites ${file.path}, which is already a contract file of the ticket "${titleOf(clash.ticketId)}" with different contents.`,
+          taskIds: [],
+          repairHint: `Import the existing ${file.path} as it is, or put this ticket's additions in a new contract file.`,
+        })
       }
     }
     return issues
@@ -1107,21 +1400,23 @@ export class SessionService {
     sessionId: SessionId,
     actorId: ParticipantId,
     state: SessionState,
+    decompositionId: DecompositionId,
     pinned: Array<{ taskId: TaskId; participantId: ParticipantId }>,
   ) {
+    const split = state.decompositions.get(decompositionId)
     /**
      * A ticket's work is shared among the people who joined *it*, not everyone
      * in the session -- otherwise moving one card hands work to someone who
      * never opted in.
      */
-    const ticketId = state.decomposition?.ticketId ?? null
+    const ticketId = split?.ticketId ?? null
     const ticket = ticketId ? state.tickets.get(ticketId) : null
     const eligible = ticket
       ? ticket.members.map((id) => state.participants.get(id))
       : [...state.participants.values()]
 
     const assignments = autoAssign({
-      tasks: state.decomposition?.tasks ?? [],
+      tasks: split?.tasks ?? [],
       // Board-only watchers are left out: work goes to people with a checkout.
       participants: eligible
         .filter((p): p is Participant => Boolean(p?.repoPath))
@@ -1129,7 +1424,7 @@ export class SessionService {
         .map((p) => p.id),
       pinned,
     })
-    this.emit(sessionId, actorId, { type: 'decomposition.assigned', assignments })
+    this.emit(sessionId, actorId, { type: 'decomposition.assigned', decompositionId, assignments })
     return assignments
   }
 
@@ -1165,8 +1460,21 @@ export class SessionService {
       }
     }
 
-    const decomposition = state.decomposition
-    if (!decomposition?.tasks.some((task) => task.id === command.taskId)) {
+    /**
+     * The split this card belongs to, of all the ones waiting to be started.
+     * Moving a card used to edit whichever split had been proposed last, so
+     * rearranging one ticket could quietly rewrite another's assignment.
+     */
+    const decomposition = [...state.decompositions.values()]
+      .reverse()
+      .find(
+        (split) =>
+          split.status === 'proposed' &&
+          (split.ticketId === null ||
+            state.tickets.get(split.ticketId)?.decompositionId === split.id) &&
+          split.tasks.some((task) => task.id === command.taskId),
+      )
+    if (!decomposition) {
       throw new ServiceError('not_found', `No task "${command.taskId}" in this session.`)
     }
 
@@ -1183,7 +1491,9 @@ export class SessionService {
           : [],
       )
 
-    return { assignments: this.rebalance(sessionId, participantId, state, pinned) }
+    return {
+      assignments: this.rebalance(sessionId, participantId, state, decomposition.id, pinned),
+    }
   }
 
   private approve(
@@ -1191,14 +1501,23 @@ export class SessionService {
     ctx: CommandContext,
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
-    const decomposition = state.decomposition
-    if (!decomposition || decomposition.id !== command.decompositionId) {
+    const decomposition = state.decompositions.get(command.decompositionId)
+    const current =
+      decomposition &&
+      (decomposition.ticketId
+        ? state.tickets.get(decomposition.ticketId)?.decompositionId === decomposition.id
+        : [...state.decompositions.values()].findLast((split) => split.ticketId === null) ===
+          decomposition)
+    if (!decomposition || !current) {
       throw new ServiceError('conflict', 'That decomposition is no longer the current proposal.')
     }
     if (decomposition.status !== 'proposed') {
       throw new ServiceError('not_ready', `Decomposition is already ${decomposition.status}.`)
     }
-    if (!state.validation?.ok) {
+    if (decomposition.ticketId && state.tasksOfTicket(decomposition.ticketId).length > 0) {
+      throw new ServiceError('not_ready', 'That ticket is already being built.')
+    }
+    if (!state.validations.get(decomposition.id)?.ok) {
       throw new ServiceError(
         'not_ready',
         'Decomposition has blocking validation errors; the planner must repair it first.',
@@ -1209,15 +1528,17 @@ export class SessionService {
       ? decomposition.approvals
       : [...decomposition.approvals, participantId]
 
+    this.ensurePresentLead(sessionId, participantId, state)
     const satisfied = this.approvalSatisfied(state, approvals, participantId)
     this.emit(sessionId, participantId, {
       type: 'decomposition.approval',
+      decompositionId: decomposition.id,
       participantId,
       approvals,
       satisfied,
     })
 
-    if (satisfied) this.seedTasks(sessionId, participantId, state)
+    if (satisfied) this.seedTasks(sessionId, participantId, state, decomposition.id)
     return { approvals, satisfied }
   }
 
@@ -1226,7 +1547,8 @@ export class SessionService {
     approvals: ParticipantId[],
     approver: ParticipantId,
   ): boolean {
-    const voters = [...state.participants.values()].filter((p) => p.connected)
+    // Whoever has gone quiet does not get a veto by never answering.
+    const voters = [...state.participants.values()].filter((p) => this.isPresent(p))
     if (voters.length > UNANIMOUS_UP_TO) return state.session?.leadId === approver
     return voters.every((p) => approvals.includes(p.id))
   }
@@ -1236,17 +1558,21 @@ export class SessionService {
    * can lay out left-to-right, and anything with an unmerged dependency starts
    * blocked rather than claimable.
    */
-  private seedTasks(sessionId: SessionId, actorId: ParticipantId, state: SessionState): void {
-    const specs = state.decomposition?.tasks ?? []
+  private seedTasks(
+    sessionId: SessionId,
+    actorId: ParticipantId,
+    state: SessionState,
+    decompositionId: DecompositionId,
+  ): void {
+    const split = state.decompositions.get(decompositionId)
+    const specs = split?.tasks ?? []
     const { depthByTask } = analyzeDag(specs)
-    const assignedTo = new Map(
-      (state.decomposition?.assignments ?? []).map((a) => [a.taskId, a.participantId]),
-    )
+    const assignedTo = new Map((split?.assignments ?? []).map((a) => [a.taskId, a.participantId]))
 
     const tasks: Task[] = specs.map((spec) => ({
       ...spec,
       sessionId,
-      ticketId: state.decomposition?.ticketId ?? null,
+      ticketId: split?.ticketId ?? null,
       state: spec.dependsOn.length === 0 ? 'ready' : 'blocked',
       assigneeId: assignedTo.get(spec.id) ?? null,
       ownerId: null,
@@ -1340,11 +1666,12 @@ export class SessionService {
     ctx: CommandContext,
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
-    if (state.decomposition?.id !== command.decompositionId) {
+    if (!state.decompositions.has(command.decompositionId)) {
       throw new ServiceError('conflict', 'That decomposition is no longer the current proposal.')
     }
     this.emit(sessionId, participantId, {
       type: 'decomposition.rejected',
+      decompositionId: command.decompositionId,
       participantId,
       reason: command.reason,
     })
@@ -1356,11 +1683,20 @@ export class SessionService {
     ctx: CommandContext,
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
-    if (state.decomposition?.status !== 'approved') {
+    /**
+     * Which split just landed. A client that names its ticket says so; one that
+     * does not wrote whatever the snapshot offered it as `decomposition`, which
+     * is the newest split approved and not yet landed -- so that is the one.
+     */
+    const split = command.ticketId
+      ? state.splitOfTicket(this.requireTicket(state, command.ticketId).id)
+      : state.decomposition
+    if (split?.status !== 'approved') {
       throw new ServiceError('not_ready', 'The contract cannot land before the split is approved.')
     }
     this.emit(sessionId, participantId, {
       type: 'contract.committed',
+      decompositionId: split.id,
       branch: command.branch,
       commitSha: command.commitSha,
       prNumber: command.prNumber,
@@ -1371,7 +1707,10 @@ export class SessionService {
      */
     for (const [assignee, theirs] of this.tasksByAssignee(state)) {
       if (assignee === participantId) continue
-      const ready = theirs.filter((task) => task.state === 'ready')
+      // Only this split's tasks: another ticket's are waiting on their own seam.
+      const ready = theirs.filter(
+        (task) => task.state === 'ready' && state.splitOfTask(task)?.id === split.id,
+      )
       if (ready.length === 0) continue
       this.systemDirective(
         sessionId,
@@ -1420,8 +1759,21 @@ export class SessionService {
         lease: null,
         reason: command.taskId
           ? `No task "${command.taskId}" in this session.`
-          : 'Nothing is ready right now -- every remaining task is waiting on a dependency.',
+          : state.readyTasks().length > 0
+            ? 'Nothing is claimable right now -- the ready tasks are waiting for their contract to land.'
+            : 'Nothing is ready right now -- every remaining task is waiting on a dependency.',
       }
+    }
+    /**
+     * Each ticket's tasks wait for that ticket's contract. Any contract on the
+     * branch used to be enough, so the second ticket's tasks were claimable
+     * before the files they import existed.
+     */
+    if (!state.contractLanded(task)) {
+      throw new ServiceError(
+        'not_ready',
+        `"${task.id}" becomes claimable once its ticket's contract has landed (ss_land_contract).`,
+      )
     }
     if (!state.isReady(task)) {
       const blockers = task.dependsOn.filter((d) => state.tasks.get(d)?.state !== 'merged')
@@ -1467,6 +1819,9 @@ export class SessionService {
   private release(command: Extract<ClientCommand, { type: 'task.release' }>, ctx: CommandContext) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
     const task = this.requireOwnedTask(state, command.taskId, participantId)
+    if (task.state === 'merged') {
+      throw new ServiceError('conflict', `"${task.id}" has already landed; there is nothing to release.`)
+    }
 
     this.emit(sessionId, participantId, {
       type: 'lease.released',
@@ -1483,12 +1838,107 @@ export class SessionService {
     return { ok: true as const }
   }
 
+  /**
+   * Taking a task back from someone who has gone.
+   *
+   * A lease only ever ended when its holder released it or landed it, so a
+   * laptop closed mid-task held its files until someone deleted the whole
+   * ticket. This is the narrow way out: only once the holder has not been
+   * heard from for as long as it takes to stop counting as present -- their
+   * hook checks a lease on every edit, so an agent that is actually working is
+   * never quiet that long -- and only by the lead or someone on the ticket.
+   */
+  private forceRelease(
+    command: Extract<ClientCommand, { type: 'task.forceRelease' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const task = state.tasks.get(command.taskId)
+    if (!task) throw new ServiceError('not_found', `No task "${command.taskId}".`)
+    const holderId = task.ownerId
+    if (!holderId || task.state === 'merged') {
+      throw new ServiceError('conflict', `Nobody is holding "${task.id}".`)
+    }
+    if (holderId === participantId) {
+      throw new ServiceError('bad_request', `You hold "${task.id}" yourself; use ss_release.`)
+    }
+
+    const holder = state.participants.get(holderId)
+    if (holder && this.isPresent(holder)) {
+      throw new ServiceError(
+        'conflict',
+        `${holder.displayName} is still around. Ask them in the room to release "${task.id}" -- it can only be taken back once they have been gone for ${PRESENT_FOR_MS / 60_000} minutes.`,
+      )
+    }
+
+    const lead = this.ensurePresentLead(sessionId, participantId, state)
+    const ticket = task.ticketId ? state.tickets.get(task.ticketId) : null
+    const allowed = lead === participantId || (ticket ? ticket.members.includes(participantId) : true)
+    if (!allowed) {
+      throw new ServiceError('forbidden', `Only the lead or someone on "${ticket?.title}" can take this back.`)
+    }
+
+    if (state.leases.has(task.id)) {
+      this.emit(sessionId, participantId, { type: 'lease.released', taskId: task.id, holderId })
+    }
+    this.emit(sessionId, participantId, {
+      type: 'task.state',
+      taskId: task.id,
+      state: state.isReady({ ...task, ownerId: null }) ? 'ready' : 'blocked',
+      ownerId: null,
+    })
+    this.refreshBlockedStates(sessionId, participantId, state)
+    this.refreshTicketStates(sessionId, participantId)
+
+    const by = state.participants.get(participantId)?.displayName ?? 'Someone'
+    this.systemMessage(
+      sessionId,
+      participantId,
+      [holderId],
+      `${by} took "${task.id}" back from ${holder?.displayName ?? 'someone'}, who had gone quiet. It is claimable again; anything they had not pushed is still on their machine.`,
+    )
+    return { ok: true as const, holderId }
+  }
+
+  /**
+   * Hands the lead on when the lead has gone. The lead lands stalled tasks and
+   * carries the vote in a big session, so a lead who has walked away used to
+   * leave both with nobody; whoever is here and asking takes it on.
+   */
+  private ensurePresentLead(
+    sessionId: SessionId,
+    actorId: ParticipantId,
+    state: SessionState,
+  ): ParticipantId | null {
+    const leadId = state.session?.leadId ?? null
+    const lead = leadId ? state.participants.get(leadId) : undefined
+    if (leadId === actorId || (lead && this.isPresent(lead))) return leadId
+    this.emit(sessionId, actorId, { type: 'session.lead', leadId: actorId })
+    return actorId
+  }
+
   private progress(
     command: Extract<ClientCommand, { type: 'task.progress' }>,
     ctx: CommandContext,
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
     const task = this.requireOwnedTask(state, command.taskId, participantId)
+
+    /**
+     * Progress is the agent saying what it is doing, not a way to move a task
+     * anywhere. `merged` from here skipped the merge -- the lease outlived the
+     * task, and nothing waiting on it was woken -- and `ready` handed out a task
+     * whose lease was still held. Those transitions have their own commands.
+     */
+    if (command.state && !PROGRESS_STATES.has(command.state)) {
+      throw new ServiceError(
+        'bad_request',
+        `Progress can only move a task between ${[...PROGRESS_STATES].join(', ')}. Use ss_report_test, ss_done or ss_release for the rest.`,
+      )
+    }
+    if (command.state && task.state === 'merged') {
+      throw new ServiceError('conflict', `"${task.id}" has already landed.`)
+    }
 
     if (command.state && command.state !== task.state) {
       this.emit(sessionId, participantId, {
@@ -1567,7 +2017,9 @@ export class SessionService {
     if (task.state === 'merged') return { unblocked: [] }
 
     // The holder merges their own work; the lead can also land a stalled task.
-    const isLead = state.session?.leadId === participantId
+    const isLead =
+      task.ownerId !== participantId &&
+      this.ensurePresentLead(sessionId, participantId, state) === participantId
     if (task.ownerId !== participantId && !isLead) {
       throw new ServiceError('forbidden', `"${command.taskId}" is held by someone else.`)
     }
@@ -1649,14 +2101,16 @@ export class SessionService {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
     const denials: LeaseDenial[] = []
     const granted = this.grantedPaths(state, participantId)
+    const frozen = state.frozenContractPaths()
 
     for (const path of command.paths) {
-      if (granted.has(path)) continue
+      if (granted.some((open) => samePath(open, path))) continue
 
       // The contract is frozen once committed: every task was planned against
-      // it, so changing it under them is how a clean split silently rots.
-      const contractFile = state.decomposition?.contract.files.find((f) => f.path === path)
-      if (contractFile && state.session?.contractBranch) {
+      // it, so changing it under them is how a clean split silently rots. Every
+      // landed contract, not just the newest -- a second ticket landing its own
+      // seam does not thaw the first one's.
+      if (frozen.some((file) => samePath(file, path))) {
         denials.push({
           path,
           heldBy: null,
@@ -1693,13 +2147,22 @@ export class SessionService {
     return { allowed: denials.length === 0, denials }
   }
 
-  /** Paths another participant has explicitly handed over, path by path. */
-  private grantedPaths(state: SessionState, participantId: ParticipantId): Set<string> {
-    const granted = new Set<string>()
+  /**
+   * Paths another participant has explicitly handed over, path by path -- and
+   * only while the grant still means something: the lease it was carved out of
+   * is still held by whoever granted it, and the requester is still holding the
+   * task they asked for it for. The projection expires grants when either lease
+   * is released; this also covers grants logged before that rule existed.
+   */
+  private grantedPaths(state: SessionState, participantId: ParticipantId): string[] {
+    const granted: string[] = []
     for (const handoff of state.handoffs.values()) {
-      if (handoff.status === 'granted' && handoff.requesterId === participantId) {
-        granted.add(handoff.path)
-      }
+      if (handoff.status !== 'granted' || handoff.requesterId !== participantId) continue
+      if (state.leases.get(handoff.heldByTaskId)?.holderId !== handoff.holderId) continue
+      const own = handoff.requesterTaskId
+        ? state.leases.get(handoff.requesterTaskId)?.holderId === participantId
+        : [...state.leases.values()].some((lease) => lease.holderId === participantId)
+      if (own) granted.push(handoff.path)
     }
     return granted
   }
@@ -1716,6 +2179,18 @@ export class SessionService {
     if (lease.holderId === participantId) {
       throw new ServiceError('bad_request', `You already hold ${command.path}.`)
     }
+    /**
+     * A handoff is for a piece of work: it lasts as long as the task it was
+     * asked for. Someone holding nothing has no task for it to belong to, and a
+     * grant with nothing to end it would never end.
+     */
+    const mine = [...state.leases.values()].find((held) => held.holderId === participantId)
+    if (!mine) {
+      throw new ServiceError(
+        'not_ready',
+        `Claim the task you need ${command.path} for first; a handoff lasts as long as that task does.`,
+      )
+    }
 
     const request = {
       id: randomUUID(),
@@ -1724,6 +2199,7 @@ export class SessionService {
       requesterId: participantId,
       holderId: lease.holderId,
       heldByTaskId: lease.taskId,
+      requesterTaskId: mine.taskId,
       reason: command.reason,
       status: 'pending' as const,
       createdAt: Date.now(),
@@ -1760,9 +2236,10 @@ export class SessionService {
   private postChat(command: Extract<ClientCommand, { type: 'chat.post' }>, ctx: CommandContext) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
 
-    const loginToId = new Map(
-      [...state.participants.values()].map((p) => [p.githubLogin, p.id as string]),
-    )
+    const loginToId = new Map<string, string[]>()
+    for (const p of state.participants.values()) {
+      loginToId.set(p.githubLogin, [...(loginToId.get(p.githubLogin) ?? []), p.id])
+    }
     const refs = parseTaskRefs(command.body, [...state.tasks.keys()])
 
     const message: ChatMessage = {
@@ -1782,10 +2259,21 @@ export class SessionService {
 
   private readChat(command: Extract<ClientCommand, { type: 'chat.read' }>, ctx: CommandContext) {
     const { state } = this.requireParticipant(ctx)
+    const latestId = state.chat.at(-1)?.id ?? null
+
+    if (command.afterId) {
+      const index = state.chat.findIndex((m) => m.id === command.afterId)
+      if (index === -1) return { messages: [], latestId, cursorFound: false }
+      const after = state.chat
+        .slice(index + 1)
+        .filter((m) => !command.taskRef || m.taskRef === command.taskRef)
+      return { messages: after.slice(0, command.limit), latestId, cursorFound: true }
+    }
+
     const filtered = command.taskRef
       ? state.chat.filter((m) => m.taskRef === command.taskRef)
       : state.chat
-    return { messages: filtered.slice(-command.limit) }
+    return { messages: filtered.slice(-command.limit), latestId, cursorFound: true }
   }
 
   /**
