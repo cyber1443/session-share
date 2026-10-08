@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { ClientCommand } from './commands.js'
 import { EventEnvelope } from './events.js'
-import { Seq } from './ids.js'
+import { ParticipantId, Seq } from './ids.js'
 import { ActivityFrame } from './transport.js'
 
 export const PROTOCOL_VERSION = 1
@@ -67,5 +67,11 @@ export const ServerMessage = z.discriminatedUnion('kind', [
   /** Relayed activity from another participant. Never persisted, never ordered. */
   z.object({ kind: z.literal('frame'), frame: ActivityFrame }),
   z.object({ kind: z.literal('pong'), ts: z.number() }),
+  /**
+   * Who has been heard from lately, sent on the heartbeat. Presence is not an
+   * event: leaving is noticed by silence, not announced, so an open board
+   * would otherwise go on showing someone long gone as here.
+   */
+  z.object({ kind: z.literal('presence'), present: z.array(ParticipantId) }),
 ])
 export type ServerMessage = z.infer<typeof ServerMessage>

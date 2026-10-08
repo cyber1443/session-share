@@ -180,6 +180,15 @@ export function useLiveSession(sessionRef: string) {
               }
               break
             }
+            case 'presence': {
+              const present = new Set<string>(message.present)
+              const participants = stateRef.current.participants
+              for (const [id, participant] of participants) {
+                participants.set(id, { ...participant, connected: present.has(id) })
+              }
+              publish()
+              break
+            }
             case 'frame': {
               // Ephemeral by design: never logged, never replayed, lost on reload.
               const frame = message.frame

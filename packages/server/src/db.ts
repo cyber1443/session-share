@@ -98,12 +98,40 @@ export class Store {
    * share one transaction, so two connections racing to append cannot be handed
    * the same seq -- ordering is what every client's reconnect logic depends on.
    */
+  /**
+   * Runs `fn` as one transaction. A command can append several events, and a
+   * failure after the first must not leave the rest of the log believing in
+   * half of it -- a lease granted with no task state behind it, say. Appends
+   * inside join it rather than committing on their own.
+   */
+  transaction<T>(fn: () => T): T {
+    if (this.depth > 0) return fn()
+    this.db.exec('BEGIN IMMEDIATE')
+    this.depth++
+    try {
+      const result = fn()
+      this.db.exec('COMMIT')
+      return result
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    } finally {
+      this.depth--
+    }
+  }
+
+  private depth = 0
+
   append(sessionId: SessionId, actorId: ParticipantId | null, body: EventBody): EventEnvelope {
+    if (this.depth > 0) return this.insert(sessionId, actorId, body)
+    return this.transaction(() => this.insert(sessionId, actorId, body))
+  }
+
+  private insert(sessionId: SessionId, actorId: ParticipantId | null, body: EventBody): EventEnvelope {
     const ts = Date.now()
     let envelope: EventEnvelope | null = null
 
-    this.db.exec('BEGIN IMMEDIATE')
-    try {
+    {
       const row = this.db
         .prepare('SELECT COALESCE(MAX(seq), -1) AS max_seq FROM events WHERE session_id = ?')
         .get(sessionId) as { max_seq: number }
@@ -112,10 +140,6 @@ export class Store {
         .prepare('INSERT INTO events (session_id, seq, ts, actor_id, body) VALUES (?, ?, ?, ?, ?)')
         .run(sessionId, seq, ts, actorId, JSON.stringify(body))
       envelope = { seq, sessionId, actorId, ts, body }
-      this.db.exec('COMMIT')
-    } catch (error) {
-      this.db.exec('ROLLBACK')
-      throw error
     }
 
     return envelope

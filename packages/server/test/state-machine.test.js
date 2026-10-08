@@ -381,3 +381,57 @@ describe('splits that collide with another ticket', () => {
     assert.ok(proposal.validation.issues.some((i) => i.code === 'overlaps_other_ticket' && /proposed to own/.test(i.message)))
   })
 })
+
+/**
+ * A command is one transaction. Claiming writes the lease and the task's new
+ * state as separate events; a failure between them used to leave a lease with
+ * no holder behind it, in the log, forever.
+ */
+describe('a command that fails halfway', () => {
+  it('leaves neither the log nor the board believing half of it', () => {
+    const s = session()
+    const a = s.join('ann')
+    const b = s.join('ben')
+    liveTicket(s, a, b, 'Atomic', 'src/atomic/types.ts', [spec('atomic-one', ['src/atomic/one/**'])])
+    const before = s.app.store.maxSeq(s.sessionId)
+
+    const append = s.app.store.append.bind(s.app.store)
+    let calls = 0
+    s.app.store.append = (...args) => {
+      if (++calls === 2) throw new Error('disk full')
+      return append(...args)
+    }
+    assert.throws(() => s.run(a, { type: 'task.claim', taskId: 'atomic-one' }), /disk full/)
+    s.app.store.append = append
+
+    assert.equal(s.app.store.maxSeq(s.sessionId), before, 'nothing of it reached the log')
+    assert.equal(s.state().leases.size, 0, 'and the live state was folded again from the log')
+    assert.equal(s.state().tasks.get('atomic-one').ownerId, null)
+
+    s.run(a, { type: 'task.claim', taskId: 'atomic-one' })
+    assert.equal(s.state().tasks.get('atomic-one').ownerId !== null, true, 'and it can be claimed after all')
+  })
+})
+
+describe('presence on an open board', () => {
+  it('names only the people heard from lately', () => {
+    const s = session()
+    const a = s.join('ann')
+    s.join('ben')
+    const ben = [...s.state().participants.values()].find((p) => p.githubLogin === 'ben')
+    s.app.service.lastSeen.set(ben.id, Date.now() - 60 * 60 * 1000)
+    const present = s.app.service.presentIn(s.sessionId)
+    assert.equal(present.includes(ben.id), false)
+    assert.equal(present.length, 1)
+    assert.ok(a)
+  })
+
+  it('carries only the recent room in a snapshot', () => {
+    const s = session()
+    const a = s.join('ann')
+    for (let i = 0; i < 520; i++) s.run(a, { type: 'chat.post', body: `m${i}`, taskRef: null, asAgent: false })
+    const chat = s.app.service.snapshotOf(s.sessionId).chat
+    assert.equal(chat.length, 500)
+    assert.equal(chat.at(-1).body, 'm519')
+  })
+})

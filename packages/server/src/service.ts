@@ -87,6 +87,9 @@ const UNANIMOUS_UP_TO = 3
  */
 const PRESENT_FOR_MS = 10 * 60 * 1000
 
+/** How much of the room a snapshot carries. */
+const SNAPSHOT_CHAT = 500
+
 /** The states an agent may move its own task between by reporting progress. */
 const PROGRESS_STATES = new Set(['claimed', 'running', 'testing'])
 
@@ -141,8 +144,34 @@ export class SessionService {
   ): EventEnvelope {
     const envelope = this.store.append(sessionId, actorId, body)
     this.state(sessionId).apply(envelope)
-    this.broadcast(sessionId, envelope)
+    if (this.unsent) this.unsent.push(envelope)
+    else this.broadcast(sessionId, envelope)
     return envelope
+  }
+
+  /** Events a command in progress has emitted, held back until it commits. */
+  private unsent: EventEnvelope[] | null = null
+
+  /**
+   * One command, one transaction. If it fails halfway, the log rolls back, the
+   * sessions it touched are folded again from the log, and nobody was ever
+   * sent the events that did not happen.
+   */
+  private atomically<T>(fn: () => T): T {
+    if (this.unsent) return fn()
+    const unsent: EventEnvelope[] = []
+    this.unsent = unsent
+    try {
+      const result = this.store.transaction(fn)
+      this.unsent = null
+      for (const envelope of unsent) this.broadcast(envelope.sessionId, envelope)
+      return result
+    } catch (error) {
+      const touched = new Set(unsent.map((envelope) => envelope.sessionId))
+      this.unsent = null
+      for (const sessionId of touched) this.states.delete(sessionId)
+      throw error
+    }
   }
 
   /** Marks someone present now -- used when a socket opens. */
@@ -162,6 +191,14 @@ export class SessionService {
     return now - last < PRESENT_FOR_MS
   }
 
+  /** Everyone in a session who has been heard from recently. */
+  presentIn(sessionId: SessionId): ParticipantId[] {
+    const now = Date.now()
+    return [...this.state(sessionId).participants.values()]
+      .filter((participant) => this.isPresent(participant, now))
+      .map((participant) => participant.id)
+  }
+
   /**
    * The snapshot everyone actually reads, with presence resolved from when each
    * participant was last heard from rather than from a flag nobody clears.
@@ -171,6 +208,12 @@ export class SessionService {
     const now = Date.now()
     return {
       ...snapshot,
+      /**
+       * The room's recent past, not all of it. A session is the whole repo and
+       * can run for months, and every board load and every hook carried the
+       * entire history; older messages are a `chat.read` away.
+       */
+      chat: snapshot.chat.slice(-SNAPSHOT_CHAT),
       participants: snapshot.participants.map((participant) => ({
         ...participant,
         // The flag alone used to be ANDed in, so one closed board tab marked an
@@ -192,6 +235,10 @@ export class SessionService {
   ): CommandResultMap[T]
   handle(command: ClientCommand, ctx: CommandContext): unknown {
     if (ctx.participantId) this.lastSeen.set(ctx.participantId, Date.now())
+    return this.atomically(() => this.route(command, ctx))
+  }
+
+  private route(command: ClientCommand, ctx: CommandContext): unknown {
     switch (command.type) {
       case 'session.create':
         return this.createSession(command)

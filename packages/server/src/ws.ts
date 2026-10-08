@@ -282,6 +282,20 @@ export class Gateway {
       connection.alive = false
       connection.socket.ping()
     }
+    this.announcePresence()
+  }
+
+  private announcePresence(): void {
+    const sessions = new Set<SessionId>()
+    for (const connection of this.connections) {
+      if (connection.ctx.sessionId) sessions.add(connection.ctx.sessionId)
+    }
+    for (const sessionId of sessions) {
+      const message: ServerMessage = { kind: 'presence', present: this.service.presentIn(sessionId) }
+      for (const connection of this.connections) {
+        if (connection.ctx.sessionId === sessionId) send(connection.socket, message)
+      }
+    }
   }
 }
 
