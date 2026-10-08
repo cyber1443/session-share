@@ -77,12 +77,13 @@ function writeCursor(key: string, value: string): void {
  */
 export async function markCaughtUp(config: SessionConfig, timeoutMs = 2500): Promise<void> {
   try {
-    const { latestId } = await runCommand(
+    const { latestId, messages } = await runCommand(
       config,
       { type: 'chat.read', limit: 1, beforeSeq: null, taskRef: null, afterId: null },
       timeoutMs,
     )
-    writeCursor(cursorKey(config), latestId ?? '')
+    // A server from before 0.10 sends no latestId; its newest message is the same line.
+    writeCursor(cursorKey(config), (latestId === undefined ? messages.at(-1)?.id : latestId) ?? '')
   } catch {
     // Retried on the next pull.
   }
@@ -124,6 +125,18 @@ export async function readInbox(config: SessionConfig, timeoutMs = 2500): Promis
       { type: 'chat.read', limit: PAGE, beforeSeq: null, taskRef: null, afterId: (cursor || null) as MessageId | null },
       remaining,
     )
+    /**
+     * A server from before 0.10 ignores `afterId` and answers with the newest
+     * page and nothing else. Find the cursor in that window by id; whatever is
+     * after it is new. Without this the cursor never moved, and every pull
+     * handed the same directives over again.
+     */
+    if (page.latestId === undefined) {
+      const window = page.messages
+      const at = cursor ? window.findIndex((message) => message.id === cursor) : -1
+      const fresh = at >= 0 ? window.slice(at + 1) : window
+      return { messages: fresh.filter(addressedTo(config)), from, to: window.at(-1)?.id ?? cursor }
+    }
     if (cursor && !page.cursorFound) {
       // The room this cursor belongs to is gone (a reset server). Start from now.
       return { messages: [], from, to: page.latestId ?? '' }
