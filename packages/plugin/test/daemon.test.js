@@ -63,6 +63,14 @@ describe('the daemon and the code it runs', () => {
     assert.equal(second.pid, first.pid, 'nothing changed, so nothing should restart')
   })
 
+  it('keeps a healthy one where it is when only the default port differs', async () => {
+    const running = await daemon.ensureDaemon({ port: PORT, expose: 'loopback' })
+    assert.notEqual(daemon.DEFAULT_PORT, PORT)
+    const again = await daemon.ensureDaemon({ expose: 'loopback' })
+    assert.equal(again.pid, running.pid, 'a shell exporting another SESSION_SHARE_PORT must not restart it')
+    assert.equal(again.port, PORT)
+  })
+
   it('replaces one that is running code the plugin no longer ships', async () => {
     const before = await daemon.ensureDaemon({ port: PORT, expose: 'loopback' })
 

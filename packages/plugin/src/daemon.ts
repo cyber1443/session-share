@@ -311,8 +311,15 @@ export async function ensureDaemon(options: StartOptions = {}): Promise<DaemonIn
       : existing?.port === candidate
         ? existing.expose
         : null
-    if (health.serverId && health.build === wanted && boundTo === expose && candidate === port) {
-      return adopt(port, expose, health, existing)
+    /**
+     * Where it runs is only a reason to move it when the caller named a port.
+     * SESSION_SHARE_PORT is read by every process that loads the plugin, so a
+     * shell that happened to export a different one used to stop the healthy,
+     * current server every teammate's invite points at, and start another.
+     */
+    const placed = candidate === port || options.port === undefined
+    if (health.serverId && health.build === wanted && boundTo === expose && placed) {
+      return adopt(candidate, expose, health, existing)
     }
 
     await stopServerAt(candidate, health)
