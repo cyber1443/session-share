@@ -53,6 +53,13 @@ export interface CommandContext {
    * claims about itself.
    */
   user?: AuthenticatedUser | null
+  /**
+   * Where the command came from. A board shares its person's seat but cannot
+   * do any of the work, so what it sends says the person is watching, not that
+   * their checkout is alive -- see `isWorking`. Unset means a checkout, which
+   * is what every caller was before boards could hold a seat.
+   */
+  via?: 'board' | 'checkout'
 }
 
 export interface AuthenticatedUser {
@@ -107,6 +114,13 @@ export class SessionService {
    * take anyone's task the moment it restarted.
    */
   private readonly startedAt = Date.now()
+  /**
+   * When each seat's checkout was last heard from: commands and reads carrying
+   * a checkout's own token, never a board. Kept apart from `lastSeen` because a
+   * board left open on a seat whose laptop has been shut kept that seat present
+   * forever, and with it every task the checkout had claimed and abandoned.
+   */
+  readonly lastWorked = new Map<ParticipantId, number>()
 
   constructor(
     private readonly store: Store,
@@ -179,6 +193,13 @@ export class SessionService {
     this.lastSeen.set(participantId, Date.now())
   }
 
+  /** Marks a seat's checkout as alive now -- it spoke with its own token. */
+  worked(participantId: ParticipantId): void {
+    const now = Date.now()
+    this.lastSeen.set(participantId, now)
+    this.lastWorked.set(participantId, now)
+  }
+
   /**
    * Whether someone has been heard from recently. The `connected` flag says
    * whether a socket is open, which is not the same question: an attached
@@ -189,6 +210,18 @@ export class SessionService {
     const last =
       this.lastSeen.get(participant.id) ?? Math.max(participant.joinedAt, this.startedAt)
     return now - last < PRESENT_FOR_MS
+  }
+
+  /**
+   * Whether a seat's checkout is still at work, which is the only presence
+   * that should keep its tasks out of anyone else's hands. Being present at
+   * all is required too, so ageing someone out of the room ages them out of
+   * their work with it.
+   */
+  isWorking(participant: Participant, now = Date.now()): boolean {
+    const last =
+      this.lastWorked.get(participant.id) ?? Math.max(participant.joinedAt, this.startedAt)
+    return this.isPresent(participant, now) && now - last < PRESENT_FOR_MS
   }
 
   /** Everyone in a session who has been heard from recently. */
@@ -234,7 +267,10 @@ export class SessionService {
     ctx: CommandContext,
   ): CommandResultMap[T]
   handle(command: ClientCommand, ctx: CommandContext): unknown {
-    if (ctx.participantId) this.lastSeen.set(ctx.participantId, Date.now())
+    if (ctx.participantId) {
+      if (ctx.via === 'board') this.seen(ctx.participantId)
+      else this.worked(ctx.participantId)
+    }
     return this.atomically(() => this.route(command, ctx))
   }
 
@@ -443,7 +479,9 @@ export class SessionService {
       }
       this.emit(sessionId, participantId, { type: 'participant.joined', participant })
     }
-    this.seen(participantId)
+    // A board sitting down in a checkout's seat is watching, not working.
+    if (repoPath && ctx.via !== 'board') this.worked(participantId)
+    else this.seen(participantId)
 
     // First one in leads, so /ss:plan always has an owner.
     if (state.session && state.session.leadId === null) {
@@ -1575,7 +1613,15 @@ export class SessionService {
       ? decomposition.approvals
       : [...decomposition.approvals, participantId]
 
-    this.ensurePresentLead(sessionId, participantId, state)
+    /**
+     * In a big room the lead's approval is the one that counts, so a lead who
+     * has walked away leaves the split with nobody able to pass it. Whoever is
+     * here approving takes the lead over -- as its own event, and only for
+     * this, the one approval that needs a lead to mean anything.
+     */
+    if (this.leadDecides(state) && !this.speaksAsLead(state, participantId)) {
+      this.takeLeadIfGone(sessionId, participantId, state)
+    }
     const satisfied = this.approvalSatisfied(state, approvals, participantId)
     this.emit(sessionId, participantId, {
       type: 'decomposition.approval',
@@ -1589,15 +1635,47 @@ export class SessionService {
     return { approvals, satisfied }
   }
 
+  /**
+   * The people in the room, not the seats. One person with two checkouts has
+   * two seats, and counting seats made them two votes: their second checkout
+   * held up a split everyone had approved, and two people with two clones
+   * each read as a room big enough for the lead to decide alone.
+   *
+   * Whoever has gone quiet does not get a veto by never answering.
+   */
+  private voters(state: SessionState): Set<string> {
+    return new Set(
+      [...state.participants.values()].filter((p) => this.isPresent(p)).map(personOf),
+    )
+  }
+
+  private leadDecides(state: SessionState): boolean {
+    return this.voters(state).size > UNANIMOUS_UP_TO
+  }
+
+  /** Whether this seat belongs to the person who leads, from whichever checkout. */
+  private speaksAsLead(state: SessionState, participantId: ParticipantId): boolean {
+    const leadId = state.session?.leadId
+    if (!leadId) return false
+    if (leadId === participantId) return true
+    const lead = state.participants.get(leadId)
+    const seat = state.participants.get(participantId)
+    return Boolean(lead && seat) && personOf(lead!) === personOf(seat!)
+  }
+
   private approvalSatisfied(
     state: SessionState,
     approvals: ParticipantId[],
     approver: ParticipantId,
   ): boolean {
-    // Whoever has gone quiet does not get a veto by never answering.
-    const voters = [...state.participants.values()].filter((p) => this.isPresent(p))
-    if (voters.length > UNANIMOUS_UP_TO) return state.session?.leadId === approver
-    return voters.every((p) => approvals.includes(p.id))
+    if (this.leadDecides(state)) return this.speaksAsLead(state, approver)
+    const approved = new Set(
+      approvals.flatMap((id) => {
+        const seat = state.participants.get(id)
+        return seat ? [personOf(seat)] : []
+      }),
+    )
+    return [...this.voters(state)].every((userId) => approved.has(userId))
   }
 
   /**
@@ -1713,8 +1791,30 @@ export class SessionService {
     ctx: CommandContext,
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
-    if (!state.decompositions.has(command.decompositionId)) {
+    const split = state.decompositions.get(command.decompositionId)
+    if (!split) {
       throw new ServiceError('conflict', 'That decomposition is no longer the current proposal.')
+    }
+    /**
+     * Only a proposal can be turned down. An approved split is a contract
+     * people are building against, and marking it rejected left its tasks
+     * running under a plan the board said had been thrown out.
+     */
+    if (split.status !== 'proposed') {
+      throw new ServiceError('not_ready', `Decomposition is already ${split.status}.`)
+    }
+    if (split.ticketId && state.tasksOfTicket(split.ticketId).length > 0) {
+      throw new ServiceError('not_ready', 'That ticket is already being built.')
+    }
+    /**
+     * And only by the people it is for. Anyone in the session could reject any
+     * ticket's split, which made every ticket one stray click from replanning.
+     */
+    const ticket = split.ticketId ? state.tickets.get(split.ticketId) : null
+    const allowed =
+      !ticket || ticket.members.includes(participantId) || state.session?.leadId === participantId
+    if (!allowed) {
+      throw new ServiceError('forbidden', `Only the lead or someone on "${ticket?.title}" can reject its split.`)
     }
     this.emit(sessionId, participantId, {
       type: 'decomposition.rejected',
@@ -1911,17 +2011,17 @@ export class SessionService {
     }
 
     const holder = state.participants.get(holderId)
-    if (holder && this.isPresent(holder)) {
+    if (holder && this.isWorking(holder)) {
       throw new ServiceError(
         'conflict',
         `${holder.displayName} is still around. Ask them in the room to release "${task.id}" -- it can only be taken back once they have been gone for ${PRESENT_FOR_MS / 60_000} minutes.`,
       )
     }
 
-    const lead = this.ensurePresentLead(sessionId, participantId, state)
     const ticket = task.ticketId ? state.tickets.get(task.ticketId) : null
-    const allowed = lead === participantId || (ticket ? ticket.members.includes(participantId) : true)
-    if (!allowed) {
+    const member = ticket ? ticket.members.includes(participantId) : true
+    // Someone off the ticket needs the lead, and may only take it over if it has gone.
+    if (!member && !this.takeLeadIfGone(sessionId, participantId, state)) {
       throw new ServiceError('forbidden', `Only the lead or someone on "${ticket?.title}" can take this back.`)
     }
 
@@ -1948,20 +2048,29 @@ export class SessionService {
   }
 
   /**
-   * Hands the lead on when the lead has gone. The lead lands stalled tasks and
-   * carries the vote in a big session, so a lead who has walked away used to
-   * leave both with nobody; whoever is here and asking takes it on.
+   * Hands the lead on when the lead has gone, and says whether `actorId` now
+   * leads. The lead lands stalled tasks and carries the vote in a big session,
+   * so a lead who has walked away used to leave both with nobody.
+   *
+   * This is a step of its own, never part of asking whether someone may do
+   * something. It used to run inside every permission check, so merely trying
+   * a lead's action while the lead was quiet made you the lead -- and the
+   * check then waved through your landing of someone else's work, live holder
+   * or not. Callers take it only for the part of a command that needs a lead,
+   * once everything else about the command has been checked, and holding the
+   * lead still grants nothing over a task whose holder is at work.
    */
-  private ensurePresentLead(
+  private takeLeadIfGone(
     sessionId: SessionId,
     actorId: ParticipantId,
     state: SessionState,
-  ): ParticipantId | null {
+  ): boolean {
     const leadId = state.session?.leadId ?? null
+    if (leadId === actorId) return true
     const lead = leadId ? state.participants.get(leadId) : undefined
-    if (leadId === actorId || (lead && this.isPresent(lead))) return leadId
+    if (lead && this.isPresent(lead)) return false
     this.emit(sessionId, actorId, { type: 'session.lead', leadId: actorId })
-    return actorId
+    return true
   }
 
   private progress(
@@ -2063,12 +2172,20 @@ export class SessionService {
     if (!task) throw new ServiceError('not_found', `No task "${command.taskId}".`)
     if (task.state === 'merged') return { unblocked: [] }
 
-    // The holder merges their own work; the lead can also land a stalled task.
-    const isLead =
-      task.ownerId !== participantId &&
-      this.ensurePresentLead(sessionId, participantId, state) === participantId
-    if (task.ownerId !== participantId && !isLead) {
-      throw new ServiceError('forbidden', `"${command.taskId}" is held by someone else.`)
+    /**
+     * The holder merges their own work. The lead can also land a task that has
+     * stalled -- but stalled means its holder has stopped working on it, the
+     * same test as taking it back. Landing a live holder's branch out from
+     * under them is not the lead's call, however present the lead is.
+     */
+    if (task.ownerId !== participantId) {
+      const holder = task.ownerId ? state.participants.get(task.ownerId) : undefined
+      if (holder && this.isWorking(holder)) {
+        throw new ServiceError('forbidden', `"${command.taskId}" is held by ${holder.displayName}, who is still working on it.`)
+      }
+      if (!this.takeLeadIfGone(sessionId, participantId, state)) {
+        throw new ServiceError('forbidden', `"${command.taskId}" is not yours; only the lead can land it.`)
+      }
     }
 
     if (state.leases.has(task.id)) {
@@ -2422,3 +2539,7 @@ export class SessionService {
   }
 }
 
+/** Who sits in a seat. A seat from before user ids were recorded is its own person. */
+function personOf(participant: Participant): string {
+  return participant.userId ?? participant.id
+}

@@ -45,10 +45,10 @@ function session(dbPath = ':memory:') {
     { sessionId: null, participantId: null },
     { type: 'session.create', slug: 'sm', title: 'State machine', repo: REPO },
   )
-  const join = (login) => {
+  const join = (login, repoPath = `/tmp/${login}`) => {
     const user = { id: login, githubLogin: login, displayName: login, avatarUrl: null }
     const ctx = { sessionId: null, participantId: null, user }
-    run(ctx, { type: 'session.join', sessionRef: 'sm', repoPath: `/tmp/${login}`, fromSeq: 0 })
+    run(ctx, { type: 'session.join', sessionRef: 'sm', repoPath, fromSeq: 0 })
     return ctx
   }
   const fails = (ctx, command, code) => {
@@ -433,5 +433,193 @@ describe('presence on an open board', () => {
     const chat = s.app.service.snapshotOf(s.sessionId).chat
     assert.equal(chat.length, 500)
     assert.equal(chat.at(-1).body, 'm519')
+  })
+})
+
+describe('the lead', () => {
+  const HOUR = 60 * 60 * 1000
+  const quiet = (s, ctx) => s.app.service.lastSeen.set(ctx.participantId, Date.now() - HOUR)
+  const leadEvents = (s) =>
+    s.app.service.readEvents(s.sessionId, 0).filter((e) => e.body.type === 'session.lead')
+
+  it('is not taken over by landing a task whose holder is still working', () => {
+    const s = session()
+    const a = s.join('alice') // lead
+    const b = s.join('bob')
+    const c = s.join('carol')
+    liveTicket(s, a, b, 'A', 'src/a/c.ts', [spec('one', ['src/a/x/**'])])
+    s.run(b, { type: 'task.claim', taskId: 'one' })
+    quiet(s, a)
+
+    s.fails(c, { type: 'task.merged', taskId: 'one', commitSha: 'zzz' }, 'forbidden')
+    assert.equal(s.state().tasks.get('one').state, 'claimed')
+    assert.equal(s.state().session.leadId, a.participantId, 'asking did not make carol the lead')
+  })
+
+  it('cannot land a task whose holder is still working, even while here', () => {
+    const s = session()
+    const a = s.join('alice') // lead
+    const b = s.join('bob')
+    liveTicket(s, a, b, 'A', 'src/a/c.ts', [spec('one', ['src/a/x/**'])])
+    s.run(b, { type: 'task.claim', taskId: 'one' })
+    s.fails(a, { type: 'task.merged', taskId: 'one', commitSha: 'zzz' }, 'forbidden')
+
+    quiet(s, b)
+    s.run(a, { type: 'task.merged', taskId: 'one', commitSha: 'zzz' })
+    assert.equal(s.state().tasks.get('one').state, 'merged')
+  })
+
+  it('passes, as its own event, to whoever lands an abandoned task once the lead has gone', () => {
+    const s = session()
+    const a = s.join('alice') // lead
+    const b = s.join('bob')
+    const c = s.join('carol')
+    liveTicket(s, a, b, 'A', 'src/a/c.ts', [spec('one', ['src/a/x/**'])])
+    s.run(b, { type: 'task.claim', taskId: 'one' })
+    quiet(s, a)
+    quiet(s, b)
+    const before = leadEvents(s).length
+
+    s.run(c, { type: 'task.merged', taskId: 'one', commitSha: 'zzz' })
+    assert.equal(s.state().session.leadId, c.participantId)
+    assert.equal(leadEvents(s).length, before + 1)
+  })
+
+  it('does not move when a command fails', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    quiet(s, a)
+    s.fails(b, { type: 'task.merged', taskId: 'nope', commitSha: 'x' }, 'not_found')
+    s.fails(b, { type: 'decomposition.approve', decompositionId: '00000000-0000-0000-0000-000000000000' }, 'conflict')
+    assert.equal(s.state().session.leadId, a.participantId)
+  })
+
+  it('does not move for an approval that needs everyone, not the lead', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const c = s.join('carol')
+    const { proposal } = ticketWithSplit(s, a, b, 'A', 'src/a/c.ts', [spec('one', ['src/a/x/**'])])
+    quiet(s, a)
+    s.run(b, { type: 'decomposition.approve', decompositionId: proposal.decompositionId })
+    s.run(c, { type: 'decomposition.approve', decompositionId: proposal.decompositionId })
+    assert.equal(s.state().session.leadId, a.participantId)
+  })
+
+  it('passes to an approver in a big room only once the lead has gone', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    s.join('carol')
+    s.join('dave')
+    s.join('erin')
+    const { proposal } = ticketWithSplit(s, a, b, 'A', 'src/a/c.ts', [spec('one', ['src/a/x/**'])])
+
+    const first = s.run(b, { type: 'decomposition.approve', decompositionId: proposal.decompositionId })
+    assert.equal(first.satisfied, false, 'the lead is here, and it is her call')
+    assert.equal(s.state().session.leadId, a.participantId)
+
+    quiet(s, a)
+    const second = s.run(b, { type: 'decomposition.approve', decompositionId: proposal.decompositionId })
+    assert.equal(second.satisfied, true)
+    assert.equal(s.state().session.leadId, b.participantId)
+  })
+})
+
+describe('approval', () => {
+  /** Legacy (ticketless) split, so nobody is required by ticket membership. */
+  const propose = (s, ctx) =>
+    s.run(ctx, {
+      type: 'decomposition.propose',
+      contract: contract('src/c.ts'),
+      tasks: [spec('task-one', ['src/x/**'])],
+      participantCount: 2,
+    })
+
+  it('counts a person once, however many checkouts they have', () => {
+    const s = session()
+    const a1 = s.join('alice', '/tmp/a1')
+    const b = s.join('bob')
+    s.join('alice', '/tmp/a2')
+    assert.equal(s.state().participants.size, 3)
+
+    const { decompositionId } = propose(s, a1)
+    s.run(b, { type: 'decomposition.approve', decompositionId })
+    const result = s.run(a1, { type: 'decomposition.approve', decompositionId })
+    assert.equal(result.satisfied, true, 'alice and bob both approved')
+  })
+
+  it('does not let extra checkouts make a small room look big', () => {
+    const s = session()
+    const a1 = s.join('alice', '/tmp/a1')
+    s.join('alice', '/tmp/a2')
+    s.join('bob', '/tmp/b1')
+    s.join('bob', '/tmp/b2')
+
+    const { decompositionId } = propose(s, a1)
+    const result = s.run(a1, { type: 'decomposition.approve', decompositionId })
+    assert.equal(result.satisfied, false, 'two people, so bob has to agree too')
+  })
+})
+
+describe('rejecting a split', () => {
+  it('only turns down a proposal, never a split being built', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const { proposal } = liveTicket(s, a, b, 'A', 'src/a/c.ts', [spec('one', ['src/a/x/**'])])
+    s.fails(b, { type: 'decomposition.reject', decompositionId: proposal.decompositionId, reason: 'no' }, 'not_ready')
+    assert.equal(s.state().decompositions.get(proposal.decompositionId).status, 'approved')
+  })
+
+  it('is for the people on the ticket, or the lead', () => {
+    const s = session()
+    const a = s.join('alice') // lead
+    const b = s.join('bob')
+    const c = s.join('carol')
+    const { ticket } = s.run(b, { type: 'ticket.create', title: 'B' })
+    const proposal = s.run(b, {
+      type: 'decomposition.propose',
+      contract: contract('src/b/c.ts'),
+      tasks: [spec('one', ['src/b/x/**'])],
+      participantCount: 1,
+      ticketId: ticket.id,
+    })
+    s.fails(c, { type: 'decomposition.reject', decompositionId: proposal.decompositionId, reason: 'no' }, 'forbidden')
+    s.run(a, { type: 'decomposition.reject', decompositionId: proposal.decompositionId, reason: 'redo' })
+    assert.equal(s.state().decompositions.get(proposal.decompositionId).status, 'rejected')
+  })
+})
+
+describe('presence that keeps a task', () => {
+  const HOUR = 60 * 60 * 1000
+
+  it('comes from the checkout, not from a board sitting in its seat', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    liveTicket(s, a, b, 'A', 'src/a/c.ts', [spec('one', ['src/a/x/**'])])
+    s.run(a, { type: 'task.claim', taskId: 'one' })
+
+    // The laptop shut an hour ago; the board tab on another screen kept pinging.
+    s.app.service.lastWorked.set(a.participantId, Date.now() - HOUR)
+    s.app.service.seen(a.participantId)
+    s.run({ ...a, via: 'board' }, { type: 'chat.read' })
+    assert.ok(s.app.service.presentIn(s.sessionId).includes(a.participantId), 'still in the room')
+
+    const result = s.run(b, { type: 'task.forceRelease', taskId: 'one' })
+    assert.equal(result.holderId, a.participantId)
+  })
+
+  it('is kept by the checkout speaking for itself', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    liveTicket(s, a, b, 'A', 'src/a/c.ts', [spec('one', ['src/a/x/**'])])
+    s.run(a, { type: 'task.claim', taskId: 'one' })
+    s.app.service.lastWorked.set(a.participantId, Date.now() - HOUR)
+    s.run(a, { type: 'lease.check', paths: ['src/a/x/f.ts'] })
+    s.fails(b, { type: 'task.forceRelease', taskId: 'one' }, 'conflict')
   })
 })

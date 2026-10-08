@@ -869,9 +869,12 @@ describe('merging', () => {
   })
 
   it('lets the session lead land a task that is stuck', async () => {
-    const { alice, bob } = await buildPhaseSession('merge-lead')
+    const { alice, bob, bobId } = await buildPhaseSession('merge-lead')
     await bob.send({ type: 'task.claim', taskId: 'theme-persist' })
-    // Alice created the session, so she is the lead.
+    // Alice created the session, so she is the lead -- but Bob is still at it.
+    await expectError(alice.send({ type: 'task.merged', taskId: 'theme-persist' }), 'forbidden')
+    // Stuck means its holder has stopped working on it.
+    app.service.lastSeen.set(bobId, Date.now() - 60 * 60 * 1000)
     const result = await alice.send({ type: 'task.merged', taskId: 'theme-persist' })
     assert.ok(result)
   })
