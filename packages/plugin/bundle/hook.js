@@ -14928,6 +14928,12 @@ var SessionSnapshot = external_exports.object({
    */
   decompositions: external_exports.record(external_exports.string(), Decomposition).default({}),
   validations: external_exports.record(external_exports.string(), ValidationReport).default({}),
+  /**
+   * The newest proposal still standing, which is what a split-less command
+   * acts on. Optional: an older server does not send it, and hydrating then
+   * falls back to the newest split in `decompositions`.
+   */
+  latestDecompositionId: DecompositionId.nullable().optional(),
   tasks: external_exports.array(Task),
   leases: external_exports.array(Lease),
   handoffs: external_exports.array(HandoffRequest),
@@ -15428,7 +15434,13 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
   }),
   /** Relayed activity from another participant. Never persisted, never ordered. */
   external_exports.object({ kind: external_exports.literal("frame"), frame: ActivityFrame }),
-  external_exports.object({ kind: external_exports.literal("pong"), ts: external_exports.number() })
+  external_exports.object({ kind: external_exports.literal("pong"), ts: external_exports.number() }),
+  /**
+   * Who has been heard from lately, sent on the heartbeat. Presence is not an
+   * event: leaving is noticed by silence, not announced, so an open board
+   * would otherwise go on showing someone long gone as here.
+   */
+  external_exports.object({ kind: external_exports.literal("presence"), present: external_exports.array(ParticipantId) })
 ]);
 
 // packages/plugin/src/daemon.ts
@@ -15442,12 +15454,16 @@ var DEFAULT_PORT = Number(process.env.SESSION_SHARE_PORT ?? 4310);
 
 // packages/plugin/src/client.ts
 var CommandError = class extends Error {
-  constructor(code, message) {
+  constructor(code, message, status = null, reason = null) {
     super(message);
     this.code = code;
+    this.status = status;
+    this.reason = reason;
     this.name = "CommandError";
   }
   code;
+  status;
+  reason;
 };
 async function runCommand(config2, command, timeoutMs = 3e3) {
   const controller = new AbortController();
@@ -15465,7 +15481,12 @@ async function runCommand(config2, command, timeoutMs = 3e3) {
     const payload = await response.json();
     if (!response.ok || "error" in payload) {
       const failure = payload;
-      throw new CommandError(failure.error, failure.message ?? failure.error);
+      throw new CommandError(
+        failure.error,
+        failure.message ?? failure.error,
+        response.status,
+        failure.reason ?? null
+      );
     }
     return payload.data;
   } finally {
@@ -15532,12 +15553,12 @@ function writeCursor(key, value) {
 }
 async function markCaughtUp(config2, timeoutMs = 2500) {
   try {
-    const { latestId } = await runCommand(
+    const { latestId, messages } = await runCommand(
       config2,
       { type: "chat.read", limit: 1, beforeSeq: null, taskRef: null, afterId: null },
       timeoutMs
     );
-    writeCursor(cursorKey(config2), latestId ?? "");
+    writeCursor(cursorKey(config2), (latestId === void 0 ? messages.at(-1)?.id : latestId) ?? "");
   } catch {
   }
 }
@@ -15559,6 +15580,12 @@ async function readInbox(config2, timeoutMs = 2500) {
       { type: "chat.read", limit: PAGE, beforeSeq: null, taskRef: null, afterId: cursor || null },
       remaining
     );
+    if (page.latestId === void 0) {
+      const window = page.messages;
+      const at = cursor ? window.findIndex((message) => message.id === cursor) : -1;
+      const fresh = at >= 0 ? window.slice(at + 1) : window;
+      return { messages: fresh.filter(addressedTo(config2)), from, to: window.at(-1)?.id ?? cursor };
+    }
     if (cursor && !page.cursorFound) {
       return { messages: [], from, to: page.latestId ?? "" };
     }

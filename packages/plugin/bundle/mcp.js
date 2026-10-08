@@ -31351,6 +31351,12 @@ var SessionSnapshot = external_exports.object({
    */
   decompositions: external_exports.record(external_exports.string(), Decomposition).default({}),
   validations: external_exports.record(external_exports.string(), ValidationReport).default({}),
+  /**
+   * The newest proposal still standing, which is what a split-less command
+   * acts on. Optional: an older server does not send it, and hydrating then
+   * falls back to the newest split in `decompositions`.
+   */
+  latestDecompositionId: DecompositionId.nullable().optional(),
   tasks: external_exports.array(Task),
   leases: external_exports.array(Lease),
   handoffs: external_exports.array(HandoffRequest),
@@ -31851,7 +31857,13 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
   }),
   /** Relayed activity from another participant. Never persisted, never ordered. */
   external_exports.object({ kind: external_exports.literal("frame"), frame: ActivityFrame }),
-  external_exports.object({ kind: external_exports.literal("pong"), ts: external_exports.number() })
+  external_exports.object({ kind: external_exports.literal("pong"), ts: external_exports.number() }),
+  /**
+   * Who has been heard from lately, sent on the heartbeat. Presence is not an
+   * event: leaving is noticed by silence, not announced, so an open board
+   * would otherwise go on showing someone long gone as here.
+   */
+  external_exports.object({ kind: external_exports.literal("presence"), present: external_exports.array(ParticipantId) })
 ]);
 
 // packages/protocol/dist/glob.js
@@ -32169,8 +32181,9 @@ It is not this machine's server, so invites from it cannot be redeemed here. Sto
       );
     }
     const boundTo = health.host ? health.host === "127.0.0.1" || health.host === "::1" ? "loopback" : "lan" : existing?.port === candidate ? existing.expose : null;
-    if (health.serverId && health.build === wanted && boundTo === expose && candidate === port) {
-      return adopt(port, expose, health, existing);
+    const placed = candidate === port || options.port === void 0;
+    if (health.serverId && health.build === wanted && boundTo === expose && placed) {
+      return adopt(candidate, expose, health, existing);
     }
     await stopServerAt(candidate, health);
   }
@@ -32266,12 +32279,16 @@ var sleep = (ms) => new Promise((resolve5) => setTimeout(resolve5, ms));
 
 // packages/plugin/src/client.ts
 var CommandError = class extends Error {
-  constructor(code, message) {
+  constructor(code, message, status = null, reason = null) {
     super(message);
     this.code = code;
+    this.status = status;
+    this.reason = reason;
     this.name = "CommandError";
   }
   code;
+  status;
+  reason;
 };
 async function peerJoin(serverUrl, invite, identity, repoPath) {
   const response = await fetch(new URL("/api/peer/join", serverUrl), {
@@ -32282,7 +32299,12 @@ async function peerJoin(serverUrl, invite, identity, repoPath) {
   });
   const payload = await response.json();
   if (!response.ok) {
-    throw new CommandError(payload.error ?? "internal", payload.message ?? "join failed");
+    throw new CommandError(
+      payload.error ?? "internal",
+      payload.message ?? "join failed",
+      response.status,
+      payload.reason ?? null
+    );
   }
   return payload;
 }
@@ -32293,7 +32315,14 @@ async function pair(serverUrl, token, repoPath) {
     body: JSON.stringify({ token, repoPath, machineId: machineId() })
   });
   const payload = await response.json();
-  if (!response.ok) throw new CommandError(payload.error ?? "internal", payload.message ?? "join failed");
+  if (!response.ok) {
+    throw new CommandError(
+      payload.error ?? "internal",
+      payload.message ?? "join failed",
+      response.status,
+      payload.reason ?? null
+    );
+  }
   return payload;
 }
 async function runCommand(config3, command, timeoutMs = 3e3) {
@@ -32312,7 +32341,12 @@ async function runCommand(config3, command, timeoutMs = 3e3) {
     const payload = await response.json();
     if (!response.ok || "error" in payload) {
       const failure = payload;
-      throw new CommandError(failure.error, failure.message ?? failure.error);
+      throw new CommandError(
+        failure.error,
+        failure.message ?? failure.error,
+        response.status,
+        failure.reason ?? null
+      );
     }
     return payload.data;
   } finally {
@@ -32417,12 +32451,12 @@ function writeCursor(key, value) {
 }
 async function markCaughtUp(config3, timeoutMs = 2500) {
   try {
-    const { latestId } = await runCommand(
+    const { latestId, messages } = await runCommand(
       config3,
       { type: "chat.read", limit: 1, beforeSeq: null, taskRef: null, afterId: null },
       timeoutMs
     );
-    writeCursor(cursorKey(config3), latestId ?? "");
+    writeCursor(cursorKey(config3), (latestId === void 0 ? messages.at(-1)?.id : latestId) ?? "");
   } catch {
   }
 }
@@ -32444,6 +32478,12 @@ async function readInbox(config3, timeoutMs = 2500) {
       { type: "chat.read", limit: PAGE, beforeSeq: null, taskRef: null, afterId: cursor || null },
       remaining
     );
+    if (page.latestId === void 0) {
+      const window = page.messages;
+      const at = cursor ? window.findIndex((message) => message.id === cursor) : -1;
+      const fresh = at >= 0 ? window.slice(at + 1) : window;
+      return { messages: fresh.filter(addressedTo(config3)), from, to: window.at(-1)?.id ?? cursor };
+    }
     if (cursor && !page.cursorFound) {
       return { messages: [], from, to: page.latestId ?? "" };
     }
@@ -32855,6 +32895,16 @@ async function hasRemote(cwd) {
 async function currentBranch(cwd) {
   return git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
 }
+async function baseBranch(cwd) {
+  const here = await currentBranch(cwd);
+  if (here !== "HEAD") return here;
+  try {
+    const ref = await git(cwd, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+    return ref.replace(/^origin\//, "");
+  } catch {
+    return "main";
+  }
+}
 async function dirtyFiles(cwd) {
   const output = await git(cwd, ["status", "--porcelain"]);
   return output ? output.split("\n").map((line) => line.trim()) : [];
@@ -32897,14 +32947,18 @@ async function fastForward(cwd, branch) {
   if (!await hasRemote(cwd)) return;
   await fetch2(cwd);
   if (!await remoteRefExists(cwd, branch)) return;
-  try {
-    await git(cwd, ["merge", "--ff-only", `origin/${branch}`]);
-  } catch {
+  const [local, upstream] = await Promise.all([
+    git(cwd, ["rev-parse", "HEAD"]),
+    git(cwd, ["rev-parse", `origin/${branch}`])
+  ]);
+  if (await isAncestor(cwd, upstream, local)) return;
+  if (!await isAncestor(cwd, local, upstream)) {
     throw new GitError(
       `${branch} has diverged from origin/${branch}. Merge or rebase it by hand, then try again.`,
       ""
     );
   }
+  await git(cwd, ["merge", "--ff-only", `origin/${branch}`]);
 }
 async function remoteRefExists(cwd, branch) {
   try {
@@ -32924,13 +32978,14 @@ async function updateLocalBranch(cwd, branch) {
     return "updated";
   }
   if (await currentBranch(cwd) === branch) {
-    const before = await git(cwd, ["rev-parse", "HEAD"]);
-    try {
-      await git(cwd, ["merge", "--ff-only", remote]);
-    } catch {
-      return "diverged";
-    }
-    return before === await git(cwd, ["rev-parse", "HEAD"]) ? "unchanged" : "updated";
+    const [head, upstream2] = await Promise.all([
+      git(cwd, ["rev-parse", "HEAD"]),
+      git(cwd, ["rev-parse", remote])
+    ]);
+    if (await isAncestor(cwd, upstream2, head)) return "unchanged";
+    if (!await isAncestor(cwd, head, upstream2)) return "diverged";
+    await git(cwd, ["merge", "--ff-only", remote]);
+    return "updated";
   }
   const [local, upstream] = await Promise.all([
     git(cwd, ["rev-parse", branch]),
@@ -32939,6 +32994,21 @@ async function updateLocalBranch(cwd, branch) {
   if (local === upstream) return "unchanged";
   if (await isAncestor(cwd, upstream, local)) return "unchanged";
   if (!await isAncestor(cwd, local, upstream)) return "diverged";
+  const here = resolve3(await git(cwd, ["rev-parse", "--show-toplevel"]));
+  const elsewhere = (await listWorktrees(cwd)).find(
+    (tree) => tree.branch === branch && resolve3(tree.path) !== here
+  );
+  if (elsewhere) {
+    try {
+      await git(elsewhere.path, ["merge", "--ff-only", remote]);
+      return "updated";
+    } catch (error51) {
+      throw new GitError(
+        `${branch} is checked out at ${elsewhere.path} and could not be fast-forwarded there: ${error51.message}`,
+        ""
+      );
+    }
+  }
   await git(cwd, ["update-ref", `refs/heads/${branch}`, upstream, local]);
   return "updated";
 }
@@ -32957,7 +33027,9 @@ function insideRepo(cwd, path) {
   if (isAbsolute2(path) || rel === "" || rel.startsWith("..") || isAbsolute2(rel)) {
     throw new Error(`Refusing to write "${path}": it is outside the repository.`);
   }
-  if (rel.split(/[\\/]/)[0] === ".git") throw new Error(`Refusing to write "${path}" inside .git.`);
+  if (rel.split(/[\\/]/).some((segment) => segment.toLowerCase() === ".git")) {
+    throw new Error(`Refusing to write "${path}" inside a .git directory.`);
+  }
   return absolute;
 }
 async function writeFiles(cwd, files) {
@@ -33060,6 +33132,21 @@ async function addWorktree(cwd, path, branch, from) {
   await git(cwd, args);
   return "created";
 }
+async function listWorktrees(cwd) {
+  const output = await git(cwd, ["worktree", "list", "--porcelain"]);
+  const trees = [];
+  let current = {};
+  for (const line of output.split("\n")) {
+    if (line.startsWith("worktree ")) current = { path: line.slice("worktree ".length) };
+    else if (line.startsWith("branch ")) current.branch = line.slice("branch refs/heads/".length);
+    else if (line === "" && current.path) {
+      trees.push({ path: current.path, branch: current.branch ?? null });
+      current = {};
+    }
+  }
+  if (current.path) trees.push({ path: current.path, branch: current.branch ?? null });
+  return trees;
+}
 async function canPush(cwd) {
   try {
     await git(cwd, ["ls-remote", "--exit-code", "origin", "HEAD"]);
@@ -33133,17 +33220,6 @@ async function repoRemote(cwd) {
     return { owner: match[1], name: match[2], remoteUrl };
   } catch {
     return null;
-  }
-}
-async function currentBranch2(cwd) {
-  try {
-    const { stdout } = await run2("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-      cwd,
-      timeout: 3e3
-    });
-    return stdout.trim() || "main";
-  } catch {
-    return "main";
   }
 }
 function titleCase(value) {
@@ -33224,6 +33300,7 @@ Stored in ${PREFERENCES_FILE}.${preferences.configured ? "" : "\n\nThese are def
       try {
         const config3 = ctx.config();
         attached = true;
+        await runCommand(config3, { type: "session.sync", fromSeq: 0 });
         const state = await ctx.snapshot(config3);
         const mine = state.participants.find((p) => p.id === config3.participantId);
         lines.push(`session    "${state.session.title}" \u2014 phase ${state.session.phase}`);
@@ -33233,9 +33310,11 @@ Stored in ${PREFERENCES_FILE}.${preferences.configured ? "" : "\n\nThese are def
         lines.push(`server url ${config3.serverUrl} \u2014 reachable`);
       } catch (error51) {
         const message = error51 instanceof Error ? error51.message : String(error51);
-        const status = Number(message.match(/\b(401|403|404)\b/)?.[1] ?? 0);
+        const refusal = error51;
+        const status = typeof refusal.status === "number" ? refusal.status : 0;
+        const reason = refusal.reason ?? null;
         lines.push(
-          !attached ? "session    this checkout is not attached \u2014 run /ss:host or /ss:join" : status === 401 ? "session    attached, but the server does not accept this checkout's token \u2014 it was minted by a different server or a different secret. Join again with a fresh invite" : status === 403 ? "session    attached, but the token is for a different session than the one configured here. Join again with a fresh invite" : status === 404 ? "session    the server answered but has no such session \u2014 it was hosted on another server, or its database was reset. Ask for a fresh invite" : `session    attached, but the server did not answer: ${message}`
+          !attached ? "session    this checkout is not attached \u2014 run /ss:host or /ss:join" : reason === "seat_gone" ? "session    the session is there, but this checkout's seat has left it. Join again with the invite" : reason === "session_gone" || status === 404 ? "session    the server answered but has no such session \u2014 it was hosted on another server, or its database was reset. Ask for a fresh invite" : reason === "other_session" || status === 403 ? "session    attached, but the token is for a different session than the one configured here. Join again with a fresh invite" : reason === "token_invalid" || status === 401 ? "session    attached, but the server does not accept this checkout's token \u2014 it was minted by a different server or a different secret. Join again with a fresh invite" : `session    attached, but the server did not answer: ${message}`
         );
       }
       lines.push("");
@@ -33369,7 +33448,11 @@ Tasks land on this branch as they finish.`,
       }
       const branch = taskBranch(state.session.slug, taskId);
       const contract = contractBranch(state.session.slug);
-      const foreign = await foreignChanges(root, task.ownedPaths, OWN_ARTIFACTS);
+      const granted = (state.handoffs ?? []).filter(
+        (handoff) => handoff.status === "granted" && handoff.requesterId === config3.participantId && (handoff.requesterTaskId === null || handoff.requesterTaskId === taskId)
+      ).map((handoff) => handoff.path);
+      const paths = [...task.ownedPaths, ...granted];
+      const foreign = await foreignChanges(root, paths, OWN_ARTIFACTS);
       if (foreign.length > 0) {
         return ctx.text(
           [
@@ -33381,7 +33464,7 @@ Tasks land on this branch as they finish.`,
         );
       }
       await checkoutBranch(root, branch, contract);
-      const sha = await commit(root, task.ownedPaths, `${taskId}: ${summary}`);
+      const sha = await commit(root, paths, `${taskId}: ${summary}`);
       const pushed = preferences.push ? await push(root, branch) : false;
       let prNumber = null;
       if (preferences.openPullRequests && pushed) {
@@ -33459,7 +33542,7 @@ Proven by \`${task.acceptance.testCommand}\`.`
         diverged: `${contract} has commits origin does not, and origin has commits it does not. Merge origin/${contract} into it by hand.`
       };
       const here = await currentBranch(root);
-      const hint = outcome === "updated" && here !== contract ? `
+      const hint = outcome === "updated" && here !== contract && here !== "HEAD" ? `
 You are still on ${here}. Run \`git merge ${contract}\` there if you need what landed.` : "";
       return ctx.text(`${messages[outcome]}${hint}`);
     }
@@ -33638,7 +33721,7 @@ function createServer() {
       const repo = {
         owner: remote?.owner ?? "local",
         name: remote?.name ?? basename(root),
-        baseBranch: await currentBranch2(root),
+        baseBranch: await baseBranch(root),
         remoteUrl: remote?.remoteUrl ?? root
       };
       const slug = given?.trim() ? slugify2(title) : remote ? slugify2(`${remote.owner}-${remote.name}`) : `${slugify2(basename(root)).slice(0, 33)}-${shortHash(root)}`;
@@ -33658,7 +33741,17 @@ function createServer() {
           return sameRepo(existing.repo) ? { invite: existing.invite, resumed: true, slug: candidate } : null;
         }
       };
-      const created = await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? null;
+      const resume = async (candidate) => {
+        if (!candidate) return null;
+        try {
+          const existing = await mintInvite(loopback, candidate);
+          return sameRepo(existing.repo) ? { invite: existing.invite, resumed: true, slug: candidate } : null;
+        } catch {
+          return null;
+        }
+      };
+      const attached = readConfig(root);
+      const created = (given?.trim() ? null : await resume(attached?.sessionRef)) ?? (given?.trim() ? null : await resume(slugify2(basename(root)))) ?? await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? null;
       if (!created) {
         throw new Error(
           `Sessions named "${slug}" on this server belong to other repositories. Pass a title to name this one.`
@@ -33799,7 +33892,7 @@ function createServer() {
       const slug = slugify2(title);
       const path = resolve4(root, "..", `${basename(root)}-${slug}`);
       const branch = `ss/${slug}/work`;
-      const created = await addWorktree(root, path, branch, await currentBranch2(root));
+      const created = await addWorktree(root, path, branch, await baseBranch(root));
       return text(
         [
           created === "existing" ? `${path} already exists -- reusing it.` : `Created a worktree at ${path} on ${branch}.`,

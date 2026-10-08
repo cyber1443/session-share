@@ -63451,6 +63451,12 @@ var SessionSnapshot = external_exports.object({
    */
   decompositions: external_exports.record(external_exports.string(), Decomposition).default({}),
   validations: external_exports.record(external_exports.string(), ValidationReport).default({}),
+  /**
+   * The newest proposal still standing, which is what a split-less command
+   * acts on. Optional: an older server does not send it, and hydrating then
+   * falls back to the newest split in `decompositions`.
+   */
+  latestDecompositionId: DecompositionId.nullable().optional(),
   tasks: external_exports.array(Task),
   leases: external_exports.array(Lease),
   handoffs: external_exports.array(HandoffRequest),
@@ -63951,7 +63957,13 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
   }),
   /** Relayed activity from another participant. Never persisted, never ordered. */
   external_exports.object({ kind: external_exports.literal("frame"), frame: ActivityFrame }),
-  external_exports.object({ kind: external_exports.literal("pong"), ts: external_exports.number() })
+  external_exports.object({ kind: external_exports.literal("pong"), ts: external_exports.number() }),
+  /**
+   * Who has been heard from lately, sent on the heartbeat. Presence is not an
+   * event: leaving is noticed by silence, not announced, so an open board
+   * would otherwise go on showing someone long gone as here.
+   */
+  external_exports.object({ kind: external_exports.literal("presence"), present: external_exports.array(ParticipantId) })
 ]);
 
 // packages/protocol/dist/glob.js
@@ -64260,13 +64272,13 @@ function validateDecomposition(input) {
   for (const file2 of contract.files) {
     const normalized = normalizeGlob(file2.path);
     const segments = normalized.split("/");
-    if (!/^[a-zA-Z]:/.test(file2.path) && !normalized.startsWith("/") && !segments.includes("..") && segments[0] !== ".git") {
+    if (!/^[a-zA-Z]:/.test(file2.path) && !normalized.startsWith("/") && !segments.includes("..") && !segments.some((segment) => segment.toLowerCase() === ".git")) {
       continue;
     }
     issues.push({
       code: "path_escapes_repo",
       severity: "error",
-      message: `Contract file "${file2.path}" points outside the repository.`,
+      message: `Contract file "${file2.path}" points outside the repository or into .git.`,
       taskIds: [],
       repairHint: 'Contract files are written on whoever lands the contract; give each a repo-relative path with no leading slash and no "..".'
     });
@@ -64286,8 +64298,10 @@ function validateDecomposition(input) {
     }
     for (const glob of task.ownedPaths) {
       const normalized = normalizeGlob(glob);
-      if (!normalized.startsWith("/") && !normalized.split("/").includes(".."))
+      const parts = normalized.split("/");
+      if (!normalized.startsWith("/") && !parts.includes("..") && !parts.some((part) => part.toLowerCase() === ".git")) {
         continue;
+      }
       issues.push({
         code: "path_escapes_repo",
         severity: "error",
@@ -64878,7 +64892,7 @@ var SessionState = class {
     for (const [id, report] of Object.entries(reports)) {
       this.validations.set(id, report);
     }
-    this.latestDecompositionId = [...this.decompositions.keys()].at(-1) ?? null;
+    this.latestDecompositionId = snapshot.latestDecompositionId !== void 0 ? snapshot.latestDecompositionId : [...this.decompositions.keys()].at(-1) ?? null;
     this.tasks.clear();
     for (const task of snapshot.tasks)
       this.tasks.set(task.id, task);
@@ -64917,6 +64931,7 @@ var SessionState = class {
       validation: this.validation,
       decompositions: Object.fromEntries(this.decompositions),
       validations: Object.fromEntries(this.validations),
+      latestDecompositionId: this.latestDecompositionId,
       tasks: [...this.tasks.values()],
       leases: [...this.leases.values()],
       handoffs: [...this.handoffs.values()],
@@ -65062,6 +65077,15 @@ function readInvite(config2, invite) {
 }
 function peerUserId(githubLogin) {
   return `peer:${githubLogin}`;
+}
+function upsertPeerUser(store, profile) {
+  const githubId = peerUserId(profile.githubLogin);
+  if (!store.findUserByGithubId(githubId)) {
+    const folded = peerUserId(profile.githubLogin.toLowerCase());
+    const legacy = folded === githubId ? null : store.findUserByGithubId(folded);
+    if (legacy && legacy.githubLogin === profile.githubLogin) store.rekeyUser(legacy.id, githubId);
+  }
+  return upsertUser(store, { ...profile, githubId });
 }
 var HOST_HEADER = "x-session-share-host";
 function hostCredential(config2) {
@@ -65254,19 +65278,40 @@ var Store = class {
    * share one transaction, so two connections racing to append cannot be handed
    * the same seq -- ordering is what every client's reconnect logic depends on.
    */
+  /**
+   * Runs `fn` as one transaction. A command can append several events, and a
+   * failure after the first must not leave the rest of the log believing in
+   * half of it -- a lease granted with no task state behind it, say. Appends
+   * inside join it rather than committing on their own.
+   */
+  transaction(fn) {
+    if (this.depth > 0) return fn();
+    this.db.exec("BEGIN IMMEDIATE");
+    this.depth++;
+    try {
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error51) {
+      this.db.exec("ROLLBACK");
+      throw error51;
+    } finally {
+      this.depth--;
+    }
+  }
+  depth = 0;
   append(sessionId, actorId, body) {
+    if (this.depth > 0) return this.insert(sessionId, actorId, body);
+    return this.transaction(() => this.insert(sessionId, actorId, body));
+  }
+  insert(sessionId, actorId, body) {
     const ts = Date.now();
     let envelope = null;
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    {
       const row = this.db.prepare("SELECT COALESCE(MAX(seq), -1) AS max_seq FROM events WHERE session_id = ?").get(sessionId);
       const seq = row.max_seq + 1;
       this.db.prepare("INSERT INTO events (session_id, seq, ts, actor_id, body) VALUES (?, ?, ?, ?, ?)").run(sessionId, seq, ts, actorId, JSON.stringify(body));
       envelope = { seq, sessionId, actorId, ts, body };
-      this.db.exec("COMMIT");
-    } catch (error51) {
-      this.db.exec("ROLLBACK");
-      throw error51;
     }
     return envelope;
   }
@@ -65290,6 +65335,10 @@ var Store = class {
            display_name = excluded.display_name,
            avatar_url = excluded.avatar_url`
     ).run(user.id, user.githubId, user.githubLogin, user.displayName, user.avatarUrl);
+  }
+  /** Moves a user to a new identity key, keeping their id and so every seat they hold. */
+  rekeyUser(id, githubId) {
+    this.db.prepare("UPDATE users SET github_id = ? WHERE id = ?").run(githubId, id);
   }
   findUserByGithubId(githubId) {
     const row = this.db.prepare("SELECT * FROM users WHERE github_id = ?").get(githubId);
@@ -65366,6 +65415,7 @@ var ServiceError = class extends Error {
 var PALETTE_SIZE = 8;
 var UNANIMOUS_UP_TO = 3;
 var PRESENT_FOR_MS = 10 * 60 * 1e3;
+var SNAPSHOT_CHAT = 500;
 var PROGRESS_STATES = /* @__PURE__ */ new Set(["claimed", "running", "testing"]);
 var REBUILD_PAGE = 5e3;
 var SessionService = class {
@@ -65387,6 +65437,13 @@ var SessionService = class {
    * take anyone's task the moment it restarted.
    */
   startedAt = Date.now();
+  /**
+   * When each seat's checkout was last heard from: commands and reads carrying
+   * a checkout's own token, never a board. Kept apart from `lastSeen` because a
+   * board left open on a seat whose laptop has been shut kept that seat present
+   * forever, and with it every task the checkout had claimed and abandoned.
+   */
+  lastWorked = /* @__PURE__ */ new Map();
   // -- state access --------------------------------------------------------
   /** Folds the log on first touch; afterwards the map is the live projection. */
   state(sessionId) {
@@ -65405,12 +65462,42 @@ var SessionService = class {
   emit(sessionId, actorId, body) {
     const envelope = this.store.append(sessionId, actorId, body);
     this.state(sessionId).apply(envelope);
-    this.broadcast(sessionId, envelope);
+    if (this.unsent) this.unsent.push(envelope);
+    else this.broadcast(sessionId, envelope);
     return envelope;
+  }
+  /** Events a command in progress has emitted, held back until it commits. */
+  unsent = null;
+  /**
+   * One command, one transaction. If it fails halfway, the log rolls back, the
+   * sessions it touched are folded again from the log, and nobody was ever
+   * sent the events that did not happen.
+   */
+  atomically(fn) {
+    if (this.unsent) return fn();
+    const unsent = [];
+    this.unsent = unsent;
+    try {
+      const result = this.store.transaction(fn);
+      this.unsent = null;
+      for (const envelope of unsent) this.broadcast(envelope.sessionId, envelope);
+      return result;
+    } catch (error51) {
+      const touched = new Set(unsent.map((envelope) => envelope.sessionId));
+      this.unsent = null;
+      for (const sessionId of touched) this.states.delete(sessionId);
+      throw error51;
+    }
   }
   /** Marks someone present now -- used when a socket opens. */
   seen(participantId) {
     this.lastSeen.set(participantId, Date.now());
+  }
+  /** Marks a seat's checkout as alive now -- it spoke with its own token. */
+  worked(participantId) {
+    const now = Date.now();
+    this.lastSeen.set(participantId, now);
+    this.lastWorked.set(participantId, now);
   }
   /**
    * Whether someone has been heard from recently. The `connected` flag says
@@ -65423,6 +65510,21 @@ var SessionService = class {
     return now - last < PRESENT_FOR_MS;
   }
   /**
+   * Whether a seat's checkout is still at work, which is the only presence
+   * that should keep its tasks out of anyone else's hands. Being present at
+   * all is required too, so ageing someone out of the room ages them out of
+   * their work with it.
+   */
+  isWorking(participant, now = Date.now()) {
+    const last = this.lastWorked.get(participant.id) ?? Math.max(participant.joinedAt, this.startedAt);
+    return this.isPresent(participant, now) && now - last < PRESENT_FOR_MS;
+  }
+  /** Everyone in a session who has been heard from recently. */
+  presentIn(sessionId) {
+    const now = Date.now();
+    return [...this.state(sessionId).participants.values()].filter((participant) => this.isPresent(participant, now)).map((participant) => participant.id);
+  }
+  /**
    * The snapshot everyone actually reads, with presence resolved from when each
    * participant was last heard from rather than from a flag nobody clears.
    */
@@ -65431,6 +65533,12 @@ var SessionService = class {
     const now = Date.now();
     return {
       ...snapshot,
+      /**
+       * The room's recent past, not all of it. A session is the whole repo and
+       * can run for months, and every board load and every hook carried the
+       * entire history; older messages are a `chat.read` away.
+       */
+      chat: snapshot.chat.slice(-SNAPSHOT_CHAT),
       participants: snapshot.participants.map((participant) => ({
         ...participant,
         // The flag alone used to be ANDed in, so one closed board tab marked an
@@ -65443,7 +65551,13 @@ var SessionService = class {
     return this.store.readEvents(sessionId, fromSeq, limit);
   }
   handle(command, ctx) {
-    if (ctx.participantId) this.lastSeen.set(ctx.participantId, Date.now());
+    if (ctx.participantId) {
+      if (ctx.via === "board") this.seen(ctx.participantId);
+      else this.worked(ctx.participantId);
+    }
+    return this.atomically(() => this.route(command, ctx));
+  }
+  route(command, ctx) {
     switch (command.type) {
       case "session.create":
         return this.createSession(command);
@@ -65597,7 +65711,8 @@ var SessionService = class {
       };
       this.emit(sessionId, participantId, { type: "participant.joined", participant });
     }
-    this.seen(participantId);
+    if (repoPath && ctx.via !== "board") this.worked(participantId);
+    else this.seen(participantId);
     if (state.session && state.session.leadId === null) {
       this.emit(sessionId, participantId, { type: "session.lead", leadId: participantId });
     }
@@ -66341,7 +66456,9 @@ Issue: ${command.issueRef}` : "",
       );
     }
     const approvals = decomposition.approvals.includes(participantId) ? decomposition.approvals : [...decomposition.approvals, participantId];
-    this.ensurePresentLead(sessionId, participantId, state);
+    if (this.leadDecides(state) && !this.speaksAsLead(state, participantId)) {
+      this.takeLeadIfGone(sessionId, participantId, state);
+    }
     const satisfied = this.approvalSatisfied(state, approvals, participantId);
     this.emit(sessionId, participantId, {
       type: "decomposition.approval",
@@ -66353,10 +66470,40 @@ Issue: ${command.issueRef}` : "",
     if (satisfied) this.seedTasks(sessionId, participantId, state, decomposition.id);
     return { approvals, satisfied };
   }
+  /**
+   * The people in the room, not the seats. One person with two checkouts has
+   * two seats, and counting seats made them two votes: their second checkout
+   * held up a split everyone had approved, and two people with two clones
+   * each read as a room big enough for the lead to decide alone.
+   *
+   * Whoever has gone quiet does not get a veto by never answering.
+   */
+  voters(state) {
+    return new Set(
+      [...state.participants.values()].filter((p) => this.isPresent(p)).map(personOf)
+    );
+  }
+  leadDecides(state) {
+    return this.voters(state).size > UNANIMOUS_UP_TO;
+  }
+  /** Whether this seat belongs to the person who leads, from whichever checkout. */
+  speaksAsLead(state, participantId) {
+    const leadId = state.session?.leadId;
+    if (!leadId) return false;
+    if (leadId === participantId) return true;
+    const lead = state.participants.get(leadId);
+    const seat = state.participants.get(participantId);
+    return Boolean(lead && seat) && personOf(lead) === personOf(seat);
+  }
   approvalSatisfied(state, approvals, approver) {
-    const voters = [...state.participants.values()].filter((p) => this.isPresent(p));
-    if (voters.length > UNANIMOUS_UP_TO) return state.session?.leadId === approver;
-    return voters.every((p) => approvals.includes(p.id));
+    if (this.leadDecides(state)) return this.speaksAsLead(state, approver);
+    const approved = new Set(
+      approvals.flatMap((id) => {
+        const seat = state.participants.get(id);
+        return seat ? [personOf(seat)] : [];
+      })
+    );
+    return [...this.voters(state)].every((userId) => approved.has(userId));
   }
   /**
    * Turns approved specs into live tasks. Depth comes from the DAG so the board
@@ -66425,8 +66572,20 @@ Issue: ${command.issueRef}` : "",
   }
   reject(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
-    if (!state.decompositions.has(command.decompositionId)) {
+    const split = state.decompositions.get(command.decompositionId);
+    if (!split) {
       throw new ServiceError("conflict", "That decomposition is no longer the current proposal.");
+    }
+    if (split.status !== "proposed") {
+      throw new ServiceError("not_ready", `Decomposition is already ${split.status}.`);
+    }
+    if (split.ticketId && state.tasksOfTicket(split.ticketId).length > 0) {
+      throw new ServiceError("not_ready", "That ticket is already being built.");
+    }
+    const ticket = split.ticketId ? state.tickets.get(split.ticketId) : null;
+    const allowed = !ticket || ticket.members.includes(participantId) || state.session?.leadId === participantId;
+    if (!allowed) {
+      throw new ServiceError("forbidden", `Only the lead or someone on "${ticket?.title}" can reject its split.`);
     }
     this.emit(sessionId, participantId, {
       type: "decomposition.rejected",
@@ -66575,16 +66734,15 @@ Issue: ${command.issueRef}` : "",
       throw new ServiceError("bad_request", `You hold "${task.id}" yourself; use ss_release.`);
     }
     const holder = state.participants.get(holderId);
-    if (holder && this.isPresent(holder)) {
+    if (holder && this.isWorking(holder)) {
       throw new ServiceError(
         "conflict",
         `${holder.displayName} is still around. Ask them in the room to release "${task.id}" -- it can only be taken back once they have been gone for ${PRESENT_FOR_MS / 6e4} minutes.`
       );
     }
-    const lead = this.ensurePresentLead(sessionId, participantId, state);
     const ticket = task.ticketId ? state.tickets.get(task.ticketId) : null;
-    const allowed = lead === participantId || (ticket ? ticket.members.includes(participantId) : true);
-    if (!allowed) {
+    const member = ticket ? ticket.members.includes(participantId) : true;
+    if (!member && !this.takeLeadIfGone(sessionId, participantId, state)) {
       throw new ServiceError("forbidden", `Only the lead or someone on "${ticket?.title}" can take this back.`);
     }
     if (state.leases.has(task.id)) {
@@ -66608,16 +66766,25 @@ Issue: ${command.issueRef}` : "",
     return { ok: true, holderId };
   }
   /**
-   * Hands the lead on when the lead has gone. The lead lands stalled tasks and
-   * carries the vote in a big session, so a lead who has walked away used to
-   * leave both with nobody; whoever is here and asking takes it on.
+   * Hands the lead on when the lead has gone, and says whether `actorId` now
+   * leads. The lead lands stalled tasks and carries the vote in a big session,
+   * so a lead who has walked away used to leave both with nobody.
+   *
+   * This is a step of its own, never part of asking whether someone may do
+   * something. It used to run inside every permission check, so merely trying
+   * a lead's action while the lead was quiet made you the lead -- and the
+   * check then waved through your landing of someone else's work, live holder
+   * or not. Callers take it only for the part of a command that needs a lead,
+   * once everything else about the command has been checked, and holding the
+   * lead still grants nothing over a task whose holder is at work.
    */
-  ensurePresentLead(sessionId, actorId, state) {
+  takeLeadIfGone(sessionId, actorId, state) {
     const leadId = state.session?.leadId ?? null;
+    if (leadId === actorId) return true;
     const lead = leadId ? state.participants.get(leadId) : void 0;
-    if (leadId === actorId || lead && this.isPresent(lead)) return leadId;
+    if (lead && this.isPresent(lead)) return false;
     this.emit(sessionId, actorId, { type: "session.lead", leadId: actorId });
-    return actorId;
+    return true;
   }
   progress(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
@@ -66689,9 +66856,14 @@ Issue: ${command.issueRef}` : "",
     const task = state.tasks.get(command.taskId);
     if (!task) throw new ServiceError("not_found", `No task "${command.taskId}".`);
     if (task.state === "merged") return { unblocked: [] };
-    const isLead = task.ownerId !== participantId && this.ensurePresentLead(sessionId, participantId, state) === participantId;
-    if (task.ownerId !== participantId && !isLead) {
-      throw new ServiceError("forbidden", `"${command.taskId}" is held by someone else.`);
+    if (task.ownerId !== participantId) {
+      const holder = task.ownerId ? state.participants.get(task.ownerId) : void 0;
+      if (holder && this.isWorking(holder)) {
+        throw new ServiceError("forbidden", `"${command.taskId}" is held by ${holder.displayName}, who is still working on it.`);
+      }
+      if (!this.takeLeadIfGone(sessionId, participantId, state)) {
+        throw new ServiceError("forbidden", `"${command.taskId}" is not yours; only the lead can land it.`);
+      }
     }
     if (state.leases.has(task.id)) {
       this.emit(sessionId, participantId, {
@@ -66945,6 +67117,9 @@ Issue: ${command.issueRef}` : "",
     return task;
   }
 };
+function personOf(participant) {
+  return participant.userId ?? participant.id;
+}
 
 // node_modules/.pnpm/ws@8.21.3/node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
@@ -67027,7 +67202,9 @@ var Gateway = class {
           githubLogin: user.githubLogin,
           displayName: user.displayName,
           avatarUrl: user.avatarUrl
-        } : null
+        } : null,
+        // Only a browser holds a socket; checkouts speak over HTTP.
+        via: "board"
       },
       alive: true,
       bound: claims?.sessionId ? { sessionId: claims.sessionId, participantId: claims.participantId ?? null } : null,
@@ -67166,6 +67343,19 @@ var Gateway = class {
       connection.alive = false;
       connection.socket.ping();
     }
+    this.announcePresence();
+  }
+  announcePresence() {
+    const sessions = /* @__PURE__ */ new Set();
+    for (const connection of this.connections) {
+      if (connection.ctx.sessionId) sessions.add(connection.ctx.sessionId);
+    }
+    for (const sessionId of sessions) {
+      const message = { kind: "presence", present: this.service.presentIn(sessionId) };
+      for (const connection of this.connections) {
+        if (connection.ctx.sessionId === sessionId) send(connection.socket, message);
+      }
+    }
   }
 };
 function reqIdOf(raw) {
@@ -67190,6 +67380,31 @@ var STATUS = {
   conflict: 409,
   not_ready: 409,
   internal: 500
+};
+var TOKEN_REFUSALS = {
+  token_invalid: {
+    status: 401,
+    error: "unauthorized",
+    reason: "token_invalid",
+    message: "That token was not signed by this server -- it came from another server, or this one restarted with a new secret. Join again with a fresh invite."
+  },
+  session_gone: {
+    status: 404,
+    error: "not_found",
+    reason: "session_gone",
+    message: "This server has no such session -- it was hosted somewhere else, or its database was reset. Ask for a fresh invite."
+  },
+  seat_gone: {
+    status: 404,
+    error: "not_found",
+    reason: "seat_gone",
+    message: "The seat this token was for is no longer in the session. Join again with the invite."
+  }
+};
+var OTHER_SESSION = {
+  error: "forbidden",
+  reason: "other_session",
+  message: "That token is for another session."
 };
 var OneShotRequest = external_exports.object({
   /** Only needed when authenticating by cookie; a participant token carries it. */
@@ -67256,12 +67471,28 @@ function createApp(options = {}) {
     }
     return user;
   };
-  const bearerClaims = (request) => {
-    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-    const claims = bearer ? readParticipantToken(auth, bearer) : null;
-    if (!claims) return null;
-    return service.state(claims.sessionId).participants.has(claims.participantId) ? claims : null;
+  const bearer = (request) => {
+    const presented = request.headers.authorization?.replace(/^Bearer\s+/i, "");
+    if (!presented) return null;
+    const claims = readParticipantToken(auth, presented);
+    if (!claims) return { ok: false, ...TOKEN_REFUSALS.token_invalid };
+    const state = service.state(claims.sessionId);
+    if (!state.session) return { ok: false, ...TOKEN_REFUSALS.session_gone };
+    if (!state.participants.has(claims.participantId)) return { ok: false, ...TOKEN_REFUSALS.seat_gone };
+    return { ok: true, claims };
   };
+  const bearerClaims = (request) => {
+    const checked = bearer(request);
+    return checked?.ok ? checked.claims : null;
+  };
+  const refuse = (request, reply, fallback) => {
+    const checked = bearer(request);
+    if (checked && !checked.ok) {
+      return reply.code(checked.status).send({ error: checked.error, reason: checked.reason, message: checked.message });
+    }
+    return reply.code(fallback.status).send(fallback.body);
+  };
+  const via = (claims) => claims && !claims.board ? "checkout" : "board";
   const isHost = (request) => isHostCredential(auth, request.headers[HOST_HEADER]);
   const logIn = (reply, user, redirectTo) => {
     reply.header("set-cookie", buildCookie(issueCookieValue(auth, user.id), auth.callbackUrl.startsWith("https://")));
@@ -67358,8 +67589,13 @@ function createApp(options = {}) {
         })
       };
     }
-    const user = requireUser(request, reply);
-    if (!user) return;
+    const user = currentUser(request);
+    if (!user) {
+      return refuse(request, reply, {
+        status: 401,
+        body: { error: "unauthorized", message: "Sign in first." }
+      });
+    }
     return { ticket: issueWsTicket(auth, user.id) };
   });
   fastify.get("/api/sessions", async (request, reply) => {
@@ -67368,7 +67604,10 @@ function createApp(options = {}) {
     if (auth.mode === "peer") {
       const claims = bearerClaims(request);
       if (!claims) {
-        return reply.code(401).send({ error: "unauthorized", message: "Open the board with an invite link." });
+        return refuse(request, reply, {
+          status: 401,
+          body: { error: "unauthorized", message: "Open the board with an invite link." }
+        });
       }
       visible = [claims.sessionId];
     } else {
@@ -67435,15 +67674,24 @@ function createApp(options = {}) {
   fastify.get("/sessions/:ref/snapshot", async (request, reply) => {
     const claims = bearerClaims(request);
     if (!claims && !currentUser(request)) {
-      return reply.code(401).send({ error: "unauthorized", message: "Sign in first." });
+      return refuse(request, reply, {
+        status: 401,
+        body: { error: "unauthorized", message: "Sign in first." }
+      });
     }
     const { ref } = request.params;
     const sessionId = store.findSessionIdByRef(ref);
-    if (!sessionId) return reply.code(404).send({ error: "not_found" });
-    if (claims && claims.sessionId !== sessionId) {
-      return reply.code(403).send({ error: "forbidden", message: "That token is for another session." });
+    if (!sessionId) {
+      const { error: error51, reason, message } = TOKEN_REFUSALS.session_gone;
+      return reply.code(404).send({ error: error51, reason, message });
     }
-    if (claims) service.seen(claims.participantId);
+    if (claims && claims.sessionId !== sessionId) {
+      return reply.code(403).send(OTHER_SESSION);
+    }
+    if (claims) {
+      if (via(claims) === "checkout") service.worked(claims.participantId);
+      else service.seen(claims.participantId);
+    }
     return service.snapshotOf(sessionId);
   });
   fastify.post("/api/sessions/:ref/join-token", async (request, reply) => {
@@ -67509,9 +67757,12 @@ function createApp(options = {}) {
       const claims = bearerClaims(request);
       const allowed = isHost(request) || claims !== null && claims.sessionId === sessionId;
       if (!allowed) {
-        return reply.code(403).send({
-          error: "forbidden",
-          message: "Only someone already in this session, or its host, can invite people to it."
+        return refuse(request, reply, {
+          status: 403,
+          body: {
+            error: "forbidden",
+            message: "Only someone already in this session, or its host, can invite people to it."
+          }
         });
       }
     } else {
@@ -67541,8 +67792,7 @@ function createApp(options = {}) {
     const claims = checked.claims;
     const state = service.state(claims.sessionId);
     if (!state.session) return reply.code(404).send({ error: "not_found" });
-    const record2 = upsertUser(store, {
-      githubId: peerUserId(parsed.data.githubLogin),
+    const record2 = upsertPeerUser(store, {
       githubLogin: parsed.data.githubLogin,
       displayName: parsed.data.displayName,
       avatarUrl: null
@@ -67559,14 +67809,20 @@ function createApp(options = {}) {
           machineId: parsed.data.machineId ?? null,
           fromSeq: null
         },
-        { sessionId: claims.sessionId, participantId: null, user }
+        {
+          sessionId: claims.sessionId,
+          participantId: null,
+          user,
+          via: parsed.data.repoPath ? "checkout" : "board"
+        }
       );
       return {
         participantId: result.participantId,
         participantToken: issueParticipantToken(auth, {
           participantId: result.participantId,
           sessionId: claims.sessionId,
-          userId: user.id
+          userId: user.id,
+          ...parsed.data.repoPath ? {} : { board: true }
         }),
         sessionRef: state.session.slug,
         sessionTitle: state.session.title,
@@ -67598,10 +67854,7 @@ function createApp(options = {}) {
       for (const ref of named) {
         if (!ref) continue;
         if (store.findSessionIdByRef(ref) !== claims.sessionId) {
-          return reply.code(403).send({
-            error: "forbidden",
-            message: "That token is for another session."
-          });
+          return reply.code(403).send(OTHER_SESSION);
         }
       }
       sessionId = claims.sessionId;
@@ -67612,9 +67865,12 @@ function createApp(options = {}) {
     } else {
       const record2 = currentUser(request);
       if (!record2) {
-        return reply.code(401).send({
-          error: "unauthorized",
-          message: "Sign in, or attach this checkout with /ss:join <code>."
+        return refuse(request, reply, {
+          status: 401,
+          body: {
+            error: "unauthorized",
+            message: "Sign in, or attach this checkout with /ss:join <code>."
+          }
         });
       }
       user = toAuthUser(record2);
@@ -67625,7 +67881,12 @@ function createApp(options = {}) {
       }
     }
     try {
-      const data = service.handle(command, { sessionId, participantId, user });
+      const data = service.handle(command, {
+        sessionId,
+        participantId,
+        user,
+        via: via(claims)
+      });
       return { data };
     } catch (error51) {
       return sendServiceError(reply, error51);
