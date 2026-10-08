@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { peerJoin, runCommand } from '../packages/plugin/dist/client.js'
-import { ensureDaemon, readDaemon, stopDaemon } from '../packages/plugin/dist/daemon.js'
+import { HOST_HEADER, ensureDaemon, hostKey, readDaemon, stopDaemon } from '../packages/plugin/dist/daemon.js'
 import {
   checkoutBranch,
   commit,
@@ -266,14 +266,15 @@ try {
   }
   console.log(green('\nDone — that branch is what you open a PR from.\n'))
 } finally {
-  if (!wasRunning) stopDaemon()
+  if (!wasRunning) await stopDaemon()
   rmSync(workspace, { recursive: true, force: true })
 }
 
 async function post(server, path, body) {
   const response = await fetch(new URL(path, server), {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    // The host credential: this script is the host, and only the host opens sessions.
+    headers: { 'content-type': 'application/json', [HOST_HEADER]: hostKey() },
     body: JSON.stringify(body),
   })
   const payload = await response.json()

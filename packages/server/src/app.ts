@@ -13,6 +13,7 @@ import {
   type SessionId,
 } from '@session-share/protocol'
 import {
+  HOST_HEADER,
   JOIN_TOKEN_TTL_MS,
   buildCookie,
   clearCookie,
@@ -25,6 +26,7 @@ import {
   issueInvite,
   issueParticipantToken,
   issueWsTicket,
+  isHostCredential,
   loadAuthConfig,
   peerUserId,
   readInvite,
@@ -33,6 +35,7 @@ import {
   serverFingerprint,
   upsertUser,
   type AuthConfig,
+  type TokenFailure,
   type User,
 } from './auth.js'
 import { buildId } from './build.js'
@@ -70,6 +73,7 @@ const CreateSessionRequest = z.object({
 const JoinRequest = z.object({
   token: z.string().min(1),
   repoPath: z.string().min(1),
+  machineId: z.string().min(1).max(100).nullish(),
 })
 
 const PeerJoinRequest = z.object({
@@ -78,6 +82,8 @@ const PeerJoinRequest = z.object({
   displayName: z.string().min(1),
   /** Null when joining from a browser, which has no checkout to lease against. */
   repoPath: z.string().min(1).nullish(),
+  /** Which machine the checkout is on; see Participant.machineId. */
+  machineId: z.string().min(1).max(100).nullish(),
 })
 
 export interface AppOptions {
@@ -149,19 +155,44 @@ export function createApp(options: AppOptions = {}): App {
     return user
   }
 
+  /**
+   * The participant token on a request, if it carries one that still names a
+   * seat in its session. A token whose participant has gone is treated as no
+   * token rather than as a credential for an empty chair.
+   */
+  const bearerClaims = (request: FastifyRequest) => {
+    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '')
+    const claims = bearer ? readParticipantToken(auth, bearer) : null
+    if (!claims) return null
+    return service.state(claims.sessionId).participants.has(claims.participantId) ? claims : null
+  }
+
+  /** Whoever runs this server. See hostCredential for why this is not an address check. */
+  const isHost = (request: FastifyRequest) => isHostCredential(auth, request.headers[HOST_HEADER])
+
   const logIn = (reply: FastifyReply, user: User, redirectTo: string | null) => {
     reply.header('set-cookie', buildCookie(issueCookieValue(auth, user.id), auth.callbackUrl.startsWith('https://')))
     if (redirectTo) return reply.redirect(redirectTo)
     return reply.send({ user: toAuthUser(user) })
   }
 
-  fastify.get('/healthz', async () => ({
-    ok: true,
-    mode: auth.mode,
-    serverId: serverFingerprint(auth),
-    // Which code is running, so a client can tell a stale daemon from a fresh one.
-    build: buildId(),
-  }))
+  fastify.get('/healthz', async () => {
+    const address = fastify.server.address()
+    return {
+      ok: true,
+      mode: auth.mode,
+      serverId: serverFingerprint(auth),
+      // Which code is running, so a client can tell a stale daemon from a fresh one.
+      build: buildId(),
+      /**
+       * Which process this is. A pid written to a file goes stale the moment the
+       * process dies, and the OS hands it to something else -- so the only pid
+       * worth signalling is the one the server reports about itself, right now.
+       */
+      pid: process.pid,
+      host: address && typeof address === 'object' ? address.address : null,
+    }
+  })
 
   // -- sign in -------------------------------------------------------------
 
@@ -204,11 +235,11 @@ export function createApp(options: AppOptions = {}): App {
 
   /**
    * Local-only shortcut so the whole flow is testable before anyone registers
-   * an OAuth App. Gated on an explicit env flag AND a loopback Host header --
-   * it must never be reachable from another machine.
+   * an OAuth App. Gated on an explicit env flag AND a loopback socket with no
+   * forwarder in front of it -- it must never be reachable from another machine.
    */
   fastify.post('/auth/dev', async (request, reply) => {
-    if (!devLoginAllowed(auth, request.socket.remoteAddress ?? request.ip)) {
+    if (!devLoginAllowed(auth, request.socket.remoteAddress ?? request.ip, request.headers)) {
       return reply.code(404).send({ error: 'not_found' })
     }
     const { login } = (request.body ?? {}) as { login?: string }
@@ -236,13 +267,17 @@ export function createApp(options: AppOptions = {}): App {
      * idea who it was, so it could not tell which participant was itself: the
      * approve button and every "is this mine" check were dead in peer mode.
      */
-    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '')
-    const claims = bearer ? readParticipantToken(auth, bearer) : null
+    const claims = bearerClaims(request)
     const user = (claims ? store.findUserById(claims.userId) : null) ?? currentUser(request)
 
     return {
       mode: auth.mode,
-      user: user ? toAuthUser(user) : null,
+      /**
+       * `participantId` is the seat this token holds. One person can have a
+       * seat per checkout, so "the participant with my user id" is ambiguous;
+       * the token is not.
+       */
+      user: user ? { ...toAuthUser(user), participantId: claims?.participantId ?? null } : null,
       devLogin: auth.devLogin,
       githubConfigured: Boolean(auth.githubClientId),
     }
@@ -254,9 +289,16 @@ export function createApp(options: AppOptions = {}): App {
    * instead -- same exchange, different credential.
    */
   fastify.get('/api/ws-ticket', async (request, reply) => {
-    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '')
-    const claims = bearer ? readParticipantToken(auth, bearer) : null
-    if (claims) return { ticket: issueWsTicket(auth, claims.userId) }
+    const claims = bearerClaims(request)
+    if (claims) {
+      // The socket inherits the token's reach: this session, this seat.
+      return {
+        ticket: issueWsTicket(auth, claims.userId, {
+          sessionId: claims.sessionId,
+          participantId: claims.participantId,
+        }),
+      }
+    }
 
     const user = requireUser(request, reply)
     if (!user) return
@@ -275,8 +317,7 @@ export function createApp(options: AppOptions = {}): App {
     let user: User | null = null
 
     if (auth.mode === 'peer') {
-      const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '')
-      const claims = bearer ? readParticipantToken(auth, bearer) : null
+      const claims = bearerClaims(request)
       if (!claims) {
         return reply
           .code(401)
@@ -317,13 +358,14 @@ export function createApp(options: AppOptions = {}): App {
 
   fastify.post('/api/sessions', async (request, reply) => {
     /**
-     * Only the host opens sessions in peer mode, and the host is by definition
-     * the machine the server runs on -- so loopback is the check. Guests arrive
-     * through a tunnel or the LAN and cannot create anything.
+     * Only the host opens sessions in peer mode. That used to mean "the request
+     * came from loopback", which a tunnel on the host's machine satisfies for
+     * every guest behind it -- so it is the host credential instead, which only
+     * the host's own plugin can read off disk.
      */
     let user: User | null = null
     if (auth.mode === 'peer') {
-      if (!isLoopbackRequest(request)) {
+      if (!isHost(request)) {
         return reply.code(403).send({
           error: 'forbidden',
           message: 'Only the machine hosting this session can create one.',
@@ -356,8 +398,7 @@ export function createApp(options: AppOptions = {}): App {
 
   /** Readable by a signed-in user or by an attached checkout's participant token. */
   fastify.get('/sessions/:ref/snapshot', async (request, reply) => {
-    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '')
-    const claims = bearer ? readParticipantToken(auth, bearer) : null
+    const claims = bearerClaims(request)
     if (!claims && !currentUser(request)) {
       return reply.code(401).send({ error: 'unauthorized', message: 'Sign in first.' })
     }
@@ -368,6 +409,8 @@ export function createApp(options: AppOptions = {}): App {
     if (claims && claims.sessionId !== sessionId) {
       return reply.code(403).send({ error: 'forbidden', message: 'That token is for another session.' })
     }
+    // Reading the session is being here: an agent that only polls is still present.
+    if (claims) service.seen(claims.participantId)
     return service.snapshotOf(sessionId)
   })
 
@@ -421,6 +464,7 @@ export function createApp(options: AppOptions = {}): App {
           githubLogin: user.githubLogin,
           displayName: user.displayName,
           repoPath: parsed.data.repoPath,
+          machineId: parsed.data.machineId ?? null,
           fromSeq: null,
         },
         { sessionId: redeemed.sessionId, participantId: null, user: toAuthUser(user) },
@@ -448,15 +492,28 @@ export function createApp(options: AppOptions = {}): App {
   /**
    * Mints the string that IS the session in peer mode: it names the session and
    * is signed by this server, so holding it is what makes you a participant.
-   * Anyone already in the session can pass it on -- that is the point.
+   * Anyone already in the session can pass it on -- that is the point -- but
+   * "already in the session" has to be shown, not assumed: with no check here,
+   * anyone who could guess a slug (it is the repository's name) could mint
+   * themselves a way in. So it takes a seat in this session, or the host.
    */
   fastify.post('/api/sessions/:ref/invite', async (request, reply) => {
-    if (auth.mode !== 'peer') {
+    const { ref } = request.params as { ref: string }
+    const sessionId = store.findSessionIdByRef(ref)
+
+    if (auth.mode === 'peer') {
+      const claims = bearerClaims(request)
+      const allowed = isHost(request) || (claims !== null && claims.sessionId === sessionId)
+      if (!allowed) {
+        return reply.code(403).send({
+          error: 'forbidden',
+          message: 'Only someone already in this session, or its host, can invite people to it.',
+        })
+      }
+    } else {
       const user = requireUser(request, reply)
       if (!user) return
     }
-    const { ref } = request.params as { ref: string }
-    const sessionId = store.findSessionIdByRef(ref)
     if (!sessionId) return reply.code(404).send({ error: 'not_found' })
 
     const state = service.state(sessionId)
@@ -464,6 +521,8 @@ export function createApp(options: AppOptions = {}): App {
       invite: issueInvite(auth, sessionId),
       sessionRef: state.session?.slug ?? ref,
       sessionTitle: state.session?.title ?? ref,
+      // So a host resuming by slug can tell its own session from a namesake's.
+      repo: state.session?.repo ?? null,
     }
   })
 
@@ -484,22 +543,9 @@ export function createApp(options: AppOptions = {}): App {
       return reply.code(400).send({ error: 'bad_request', message: parsed.error.message })
     }
 
-    const claims = readInvite(auth, parsed.data.invite)
-    if (!claims) {
-      /**
-       * Nearly always this is not a bad token but the wrong server: the address
-       * inside the invite resolved to the guest's own machine. Say so, because
-       * from here "invalid" and "not mine" look identical.
-       */
-      return reply.code(401).send({
-        error: 'unauthorized',
-        message:
-          `That invite was not signed by this server (${serverFingerprint(auth)}). ` +
-          'If a teammate sent it, the address inside it is pointing at your own machine -- ' +
-          'ask them to re-run /ss:host so the invite carries their network address.',
-        serverId: serverFingerprint(auth),
-      })
-    }
+    const checked = readInvite(auth, parsed.data.invite)
+    if (!checked.ok) return reply.code(401).send(inviteRefusal(checked, serverFingerprint(auth)))
+    const claims = checked.claims
 
     const state = service.state(claims.sessionId)
     if (!state.session) return reply.code(404).send({ error: 'not_found' })
@@ -522,6 +568,7 @@ export function createApp(options: AppOptions = {}): App {
           githubLogin: user.githubLogin,
           displayName: user.displayName,
           repoPath: parsed.data.repoPath ?? null,
+          machineId: parsed.data.machineId ?? null,
           fromSeq: null,
         },
         { sessionId: claims.sessionId, participantId: null, user },
@@ -558,18 +605,47 @@ export function createApp(options: AppOptions = {}): App {
       return reply.code(400).send({ error: 'bad_request', message: parsed.error.message })
     }
 
-    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '')
-    const claims = bearer ? readParticipantToken(auth, bearer) : null
+    const { command } = parsed.data
+
+    /**
+     * Sessions are opened through POST /api/sessions, which is where the rule
+     * about who may open one lives. Accepting the command here as well would
+     * let any seat in any session open new ones.
+     */
+    if (command.type === 'session.create') {
+      return reply.code(403).send({
+        error: 'forbidden',
+        message: 'Open a session with POST /api/sessions.',
+      })
+    }
+
+    const claims = bearerClaims(request)
 
     let sessionId: SessionId | null = null
     let participantId: ParticipantId | null = null
     let user: AuthenticatedUser | null = null
 
     if (claims) {
+      /**
+       * A participant token is for one session. Every way a request can name
+       * a session -- the envelope's sessionRef, or a join's own -- has to agree
+       * with it, or the token for one session opens every other.
+       */
+      const named = [parsed.data.sessionRef, command.type === 'session.join' ? command.sessionRef : null]
+      for (const ref of named) {
+        if (!ref) continue
+        if (store.findSessionIdByRef(ref) !== claims.sessionId) {
+          return reply.code(403).send({
+            error: 'forbidden',
+            message: 'That token is for another session.',
+          })
+        }
+      }
       sessionId = claims.sessionId
       participantId = claims.participantId
       const record = store.findUserById(claims.userId)
-      user = record ? toAuthUser(record) : null
+      if (!record) return reply.code(401).send({ error: 'unauthorized', message: 'Unknown user.' })
+      user = toAuthUser(record)
     } else {
       const record = currentUser(request)
       if (!record) {
@@ -589,7 +665,7 @@ export function createApp(options: AppOptions = {}): App {
     }
 
     try {
-      const data = service.handle(parsed.data.command as never, { sessionId, participantId, user })
+      const data = service.handle(command as never, { sessionId, participantId, user })
       return { data }
     } catch (error) {
       return sendServiceError(reply, error)
@@ -645,8 +721,49 @@ export function isLoopbackAddress(address: string | undefined): boolean {
   return normalised === '127.0.0.1' || normalised === '::1' || normalised.startsWith('127.')
 }
 
-function isLoopbackRequest(request: FastifyRequest): boolean {
-  return isLoopbackAddress(request.socket.remoteAddress ?? request.ip)
+/**
+ * What to tell someone whose invite was refused. Each reason has a different
+ * fix, and the commonest one -- the wrong server -- is the one the server can
+ * least explain on its own, so it names itself for the client to compare.
+ */
+function inviteRefusal(
+  checked: { reason: TokenFailure; expiredAt?: number },
+  serverId: string,
+) {
+  switch (checked.reason) {
+    case 'expired':
+      return {
+        error: 'unauthorized',
+        reason: 'expired',
+        message:
+          `That invite expired${checked.expiredAt ? ` on ${new Date(checked.expiredAt).toISOString().slice(0, 10)}` : ''}. ` +
+          'Ask whoever sent it for a fresh one -- /ss:board or /ss:host on their side mints a new link.',
+        serverId,
+      }
+    case 'malformed':
+      return {
+        error: 'unauthorized',
+        reason: 'malformed',
+        message:
+          'That invite is damaged -- most likely it was cut short or wrapped when it was copied. Ask for it again.',
+        serverId,
+      }
+    case 'signature':
+      /**
+       * Nearly always this is not a bad token but the wrong server: the address
+       * inside the invite resolved to the guest's own machine. Say so, because
+       * from here "invalid" and "not mine" look identical.
+       */
+      return {
+        error: 'unauthorized',
+        reason: 'signature',
+        message:
+          `That invite was not signed by this server (${serverId}). ` +
+          'If a teammate sent it, the address inside it is pointing at your own machine -- ' +
+          'ask them to re-run /ss:host so the invite carries their network address.',
+        serverId,
+      }
+  }
 }
 
 function countBy(values: string[]): Record<string, number> {

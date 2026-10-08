@@ -45,7 +45,20 @@ function Board({ slug }: { slug: string }) {
   }
   if (!snapshot) return <div className="p-8 text-xs text-mute">connecting…</div>
 
-  const mine = snapshot.participants.find((p) => p.userId === me?.id)
+  // The token's own seat first: one person can hold a seat per checkout.
+  const mine =
+    snapshot.participants.find((p) => me?.participantId && p.id === me.participantId) ??
+    snapshot.participants.find((p) => p.userId === me?.id)
+  /**
+   * Seats are per checkout, people are per login. Listing them grouped keeps
+   * one person with two clones reading as one person with two places to work,
+   * rather than as two people who happen to share a name.
+   */
+  const seatsOf = new Map<string, number>()
+  for (const p of snapshot.participants) seatsOf.set(p.githubLogin, (seatsOf.get(p.githubLogin) ?? 0) + 1)
+  const people = [...snapshot.participants].sort(
+    (a, b) => a.githubLogin.localeCompare(b.githubLogin) || a.joinedAt - b.joinedAt,
+  )
   const pendingHandoffs = snapshot.handoffs.filter(
     (h) => h.status === 'pending' && h.holderId === mine?.id,
   )
@@ -117,13 +130,21 @@ function Board({ slug }: { slug: string }) {
           <div>
             <p className="text-[10px] uppercase tracking-wider text-mute">Who</p>
             <ul className="mt-2 space-y-2">
-              {snapshot.participants.map((participant) => (
+              {people.map((participant) => (
                 <li key={participant.id} className="text-xs">
                   <div className="flex items-center gap-2">
                     <span
                       className={`h-2 w-2 shrink-0 rounded-full ${DOT[participant.colorIndex % DOT.length]} ${participant.connected ? '' : 'opacity-30'}`}
                     />
-                    <span className="truncate text-neutral-300">{participant.displayName}</span>
+                    <span className="truncate text-neutral-300">
+                      {participant.displayName}
+                      {(seatsOf.get(participant.githubLogin) ?? 0) > 1 && participant.repoPath ? (
+                        <span className="text-mute">
+                          {' '}
+                          · {participant.repoPath.split('/').filter(Boolean).at(-1)}
+                        </span>
+                      ) : null}
+                    </span>
                   </div>
                   <p className="mt-0.5 truncate pl-4 text-[10px] text-mute">
                     {participant.activity.detail}
@@ -258,6 +279,8 @@ function Gate() {
   const { value: invite, ready: inviteReady } = useQueryParam('join')
   const [peerSlug, setPeerSlug] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
+  /** Why the invite in the URL was refused, when there was a seat to fall back to. */
+  const [inviteRefused, setInviteRefused] = useState<string | null>(null)
 
   /**
    * An invite in the URL beats a token in local storage. Both are credentials
@@ -266,7 +289,13 @@ function Gate() {
    * participants, while ignoring the link someone just followed.
    */
   const seated = ready && inviteReady && !peerSlug
-  const seat = seated ? chooseSeat({ invite, hasToken: Boolean(peerToken.get()) }) : null
+  const seat = seated
+    ? chooseSeat({
+        invite,
+        hasToken: Boolean(peerToken.get(slug)),
+        inviteFailed: inviteRefused !== null,
+      })
+    : null
 
   /** A returning visitor's token is scoped to one session; the server says which. */
   useEffect(() => {
@@ -301,10 +330,28 @@ function Gate() {
             setPeerSlug(seat.sessionRef)
             void refresh()
           }}
+          onRefused={(message) => {
+            if (!peerToken.get(slug)) return false
+            setInviteRefused(message)
+            return true
+          }}
         />
       )
     }
-    return <Board slug={seated} />
+    // Set during render, not in an effect: the board's own effects run first
+    // and would otherwise fetch with whichever token was used last.
+    peerToken.use(seated)
+    return (
+      <>
+        {inviteRefused ? (
+          <div className="border-b border-edge px-4 py-1 text-[11px] text-amber-400">
+            The link you opened was refused ({inviteRefused}) — showing the session this browser was
+            already in.
+          </div>
+        ) : null}
+        <Board key={seated} slug={seated} />
+      </>
+    )
   }
 
   if (!me) return <SignIn />

@@ -11,6 +11,11 @@ export interface Me {
   githubLogin: string
   displayName: string
   avatarUrl: string | null
+  /**
+   * The seat this browser's token holds, in peer mode. One person can hold a
+   * seat per checkout, so matching on the user id alone can pick the wrong one.
+   */
+  participantId?: string | null
 }
 
 export interface SessionSummary {
@@ -42,17 +47,69 @@ export class ApiError extends Error {
   }
 }
 
+/** The token used last, whichever session it was for. */
 const TOKEN_KEY = 'session-share.participantToken'
+/** Every token this browser holds, by session. */
+const TOKENS_KEY = 'session-share.participantTokens'
+
+function storage(): Storage | null {
+  try {
+    return typeof window === 'undefined' ? null : window.localStorage
+  } catch {
+    return null
+  }
+}
+
+function readTokens(): Record<string, string> {
+  try {
+    return JSON.parse(storage()?.getItem(TOKENS_KEY) ?? '{}') as Record<string, string>
+  } catch {
+    return {}
+  }
+}
+
+/** Which session's token requests carry; set once the board knows its session. */
+let currentSession: string | null = null
 
 /**
  * In peer mode there is no cookie: the board holds the participant token it got
  * by redeeming an invite, and presents that instead. Kept in localStorage so a
  * reload does not send someone back to the invite link.
+ *
+ * Kept per session. One origin is one host's server, and a host runs several
+ * sessions on it -- with a single slot, opening the second session's board
+ * overwrote the first's token, and the first tab started acting as the second
+ * session's seat.
  */
 export const peerToken = {
-  get: () => (typeof window === 'undefined' ? null : window.localStorage.getItem(TOKEN_KEY)),
-  set: (token: string) => window.localStorage.setItem(TOKEN_KEY, token),
-  clear: () => window.localStorage.removeItem(TOKEN_KEY),
+  get: (sessionRef: string | null = currentSession): string | null => {
+    const store = storage()
+    if (!store) return null
+    if (sessionRef) {
+      const scoped = readTokens()[sessionRef]
+      if (scoped) return scoped
+    }
+    return store.getItem(TOKEN_KEY)
+  },
+  set: (token: string, sessionRef?: string | null) => {
+    const store = storage()
+    if (!store) return
+    store.setItem(TOKEN_KEY, token)
+    if (sessionRef) store.setItem(TOKENS_KEY, JSON.stringify({ ...readTokens(), [sessionRef]: token }))
+  },
+  /** Point requests at one session's token. */
+  use: (sessionRef: string | null) => {
+    currentSession = sessionRef
+  },
+  clear: () => {
+    const store = storage()
+    if (!store) return
+    const last = store.getItem(TOKEN_KEY)
+    store.removeItem(TOKEN_KEY)
+    // Drop the one that failed from the per-session map too, so it is not tried again.
+    const remaining = Object.fromEntries(Object.entries(readTokens()).filter(([, t]) => t !== last))
+    store.setItem(TOKENS_KEY, JSON.stringify(remaining))
+  },
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

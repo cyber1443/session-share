@@ -30,7 +30,7 @@ const note = (s) => console.log(`   ${dim(s)}`)
 
 const app = createApp({
   dbPath: ':memory:',
-  auth: { devLogin: true, secret: 'demo-secret' },
+  auth: { mode: 'oauth', devLogin: true, secret: 'demo-secret' },
 })
 const baseUrl = await app.listen(0)
 

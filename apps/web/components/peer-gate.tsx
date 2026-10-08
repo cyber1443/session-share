@@ -15,7 +15,18 @@ export interface PeerSeat {
  * Nothing is verified -- the invite is the credential -- so this asks for the
  * one thing it genuinely needs and gets out of the way.
  */
-export function PeerGate({ onSeated }: { onSeated: (seat: PeerSeat) => void }) {
+export function PeerGate({
+  onSeated,
+  onRefused,
+}: {
+  onSeated: (seat: PeerSeat) => void
+  /**
+   * Called instead of showing the error when the invite is refused and this
+   * browser already holds a seat to fall back to. An expired link in a
+   * bookmark should land on the board, not on a dead end.
+   */
+  onRefused?: (message: string) => boolean
+}) {
   const { value: invite, ready } = useQueryParam('join')
   /**
    * When the plugin opened this page it already knows who you are -- it just
@@ -44,13 +55,19 @@ export function PeerGate({ onSeated }: { onSeated: (seat: PeerSeat) => void }) {
        */
       const token = unpackInvite(invite)?.token ?? invite
       const result = await api.peerJoin(token, { githubLogin: name, displayName: name })
-      peerToken.set(result.participantToken)
+      peerToken.set(result.participantToken, result.sessionRef)
       window.localStorage.setItem('session-share.handle', name)
       stripQueryParam('join')
       stripQueryParam('as')
       onSeated({ sessionRef: result.sessionRef, displayName: result.displayName })
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : 'could not join')
+      const message = failure instanceof Error ? failure.message : 'could not join'
+      if (onRefused?.(message)) {
+        stripQueryParam('join')
+        stripQueryParam('as')
+        return
+      }
+      setError(message)
     } finally {
       setBusy(false)
       setSeating(false)

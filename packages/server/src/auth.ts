@@ -58,18 +58,37 @@ export function encodeToken(secret: string, claims: Record<string, unknown>): st
   return `${body}.${sign(secret, body)}`
 }
 
-export function decodeToken<T>(secret: string, token: string): T | null {
-  const [body, signature] = token.split('.')
-  if (!body || !signature || !safeEqual(signature, sign(secret, body))) return null
+/**
+ * Why a token was refused. These are three different conversations with the
+ * person holding it -- "ask for a fresh one", "you reached the wrong server",
+ * "it got mangled in the copy" -- and collapsing them into one null is how an
+ * invite that had simply aged out got reported as the wrong machine.
+ */
+export type TokenFailure = 'malformed' | 'signature' | 'expired'
+
+export type TokenCheck<T> =
+  | { ok: true; claims: T }
+  | { ok: false; reason: TokenFailure; expiredAt?: number }
+
+export function verifyToken<T>(secret: string, token: string): TokenCheck<T> {
+  const [body, signature, ...rest] = token.split('.')
+  if (!body || !signature || rest.length > 0) return { ok: false, reason: 'malformed' }
+  if (!safeEqual(signature, sign(secret, body))) return { ok: false, reason: 'signature' }
+  let claims: T & { exp?: number }
   try {
-    const claims = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as T & {
-      exp?: number
-    }
-    if (typeof claims.exp === 'number' && claims.exp < Date.now()) return null
-    return claims
+    claims = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as T & { exp?: number }
   } catch {
-    return null
+    return { ok: false, reason: 'malformed' }
   }
+  if (typeof claims.exp === 'number' && claims.exp < Date.now()) {
+    return { ok: false, reason: 'expired', expiredAt: claims.exp }
+  }
+  return { ok: true, claims }
+}
+
+export function decodeToken<T>(secret: string, token: string): T | null {
+  const checked = verifyToken<T>(secret, token)
+  return checked.ok ? checked.claims : null
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +145,13 @@ export interface ParticipantClaims {
 export interface WsTicketClaims {
   kind: 'ws'
   userId: string
+  /**
+   * Set when the ticket was traded for a participant token. A token is for one
+   * session and one seat in it, and a socket opened with it must stay there --
+   * otherwise the token for session A is a key to every session on the server.
+   */
+  sessionId?: SessionId | null
+  participantId?: ParticipantId | null
   exp: number
 }
 
@@ -138,13 +164,23 @@ export function readParticipantToken(config: AuthConfig, token: string): Partici
   return claims?.kind === 'participant' ? claims : null
 }
 
-export function issueWsTicket(config: AuthConfig, userId: string): string {
-  return encodeToken(config.secret, { kind: 'ws', userId, exp: Date.now() + WS_TICKET_TTL_MS })
+export function issueWsTicket(
+  config: AuthConfig,
+  userId: string,
+  bound: { sessionId: SessionId; participantId: ParticipantId } | null = null,
+): string {
+  return encodeToken(config.secret, {
+    kind: 'ws',
+    userId,
+    ...(bound ? { sessionId: bound.sessionId, participantId: bound.participantId } : {}),
+    exp: Date.now() + WS_TICKET_TTL_MS,
+  })
 }
 
-export function readWsTicket(config: AuthConfig, ticket: string): WsTicketClaims | null {
-  const claims = decodeToken<WsTicketClaims>(config.secret, ticket)
-  return claims?.kind === 'ws' ? claims : null
+export function readWsTicket(config: AuthConfig, ticket: string): TokenCheck<WsTicketClaims> {
+  const checked = verifyToken<WsTicketClaims>(config.secret, ticket)
+  if (checked.ok && checked.claims.kind !== 'ws') return { ok: false, reason: 'signature' }
+  return checked
 }
 
 // ---------------------------------------------------------------------------
@@ -194,18 +230,45 @@ export function issueInvite(config: AuthConfig, sessionId: SessionId): string {
   })
 }
 
-export function readInvite(config: AuthConfig, invite: string): InviteClaims | null {
-  const claims = decodeToken<InviteClaims>(config.secret, invite.trim())
-  return claims?.kind === 'invite' ? claims : null
+export function readInvite(config: AuthConfig, invite: string): TokenCheck<InviteClaims> {
+  const checked = verifyToken<InviteClaims>(config.secret, invite.trim())
+  if (checked.ok && checked.claims.kind !== 'invite') return { ok: false, reason: 'malformed' }
+  return checked
 }
 
 /**
  * In peer mode a participant's name comes from their own machine and is not
  * checked against anything. That is the deal: the invite is the credential, and
  * the names exist so humans can tell each other apart, not to prove anything.
+ *
+ * Not case-folded. A peer handle is often derived from git's user.name, where
+ * "Sam-Lee" and "sam-lee" are two different people far more often than they
+ * are one person typing inconsistently, and folding them merged their seats.
  */
 export function peerUserId(githubLogin: string): string {
-  return `peer:${githubLogin.toLowerCase()}`
+  return `peer:${githubLogin}`
+}
+
+/**
+ * The credential that marks a request as coming from the person hosting this
+ * server: opening sessions, minting invites without a seat of their own.
+ *
+ * This used to be the socket address -- loopback meant "the host". That stops
+ * being true the moment anyone runs a tunnel: cloudflared and friends connect
+ * from 127.0.0.1, so every guest arriving through one looked local. A secret
+ * derived from the signing key is something only the host's own machine can
+ * produce, whatever route the request took. It is derived rather than the key
+ * itself so the header can never be replayed as a signing secret.
+ */
+export const HOST_HEADER = 'x-session-share-host'
+
+export function hostCredential(config: AuthConfig): string {
+  return createHmac('sha256', config.secret).update('session-share/host-key').digest('hex')
+}
+
+export function isHostCredential(config: AuthConfig, presented: string | string[] | undefined): boolean {
+  if (typeof presented !== 'string' || !presented) return false
+  return safeEqual(presented, hostCredential(config))
 }
 
 // ---------------------------------------------------------------------------
@@ -300,13 +363,36 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
 }
 
 /**
+ * Headers a reverse proxy or tunnel adds on the way through. Their *values* are
+ * attacker-controlled and prove nothing, but their presence is a reliable sign
+ * that the loopback socket belongs to a forwarder rather than to someone on
+ * this machine.
+ */
+const FORWARDED_HEADERS = [
+  'forwarded',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-real-ip',
+  'cf-connecting-ip',
+  'true-client-ip',
+]
+
+/**
  * Dev login is a backdoor; it must never be reachable off the machine. The
  * check is on the connecting socket, not on the Host header -- a header is
- * attacker-controlled, so gating on one would gate on nothing.
+ * attacker-controlled, so gating on one would gate on nothing. A loopback
+ * socket alone is not enough either: a tunnel on this machine connects from
+ * loopback on behalf of whoever is at the other end, so anything that arrived
+ * through a forwarder is refused too.
  */
-export function devLoginAllowed(config: AuthConfig, remoteAddress: string | undefined): boolean {
+export function devLoginAllowed(
+  config: Pick<AuthConfig, 'devLogin'>,
+  remoteAddress: string | undefined,
+  headers: Record<string, string | string[] | undefined> = {},
+): boolean {
   if (!config.devLogin) return false
   if (!remoteAddress) return false
+  if (FORWARDED_HEADERS.some((name) => headers[name] !== undefined)) return false
   const normalised = remoteAddress.replace(/^::ffff:/, '')
   return normalised === '::1' || normalised.startsWith('127.')
 }

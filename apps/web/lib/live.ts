@@ -52,7 +52,6 @@ export function useLiveSession(sessionRef: string) {
   const pendingRef = useRef(new Map<string, Pending>())
   const reqCounter = useRef(0)
   const backoff = useRef(RECONNECT_MIN_MS)
-  const closed = useRef(false)
 
   const publish = useCallback(() => {
     if (!stateRef.current.session) return
@@ -81,8 +80,37 @@ export function useLiveSession(sessionRef: string) {
   }, [])
 
   useEffect(() => {
-    closed.current = false
+    /**
+     * Local to this run of the effect, not a ref shared between runs. With a
+     * shared flag, switching sessions cleared it for the new run before the old
+     * socket's close event arrived -- so the old socket reconnected itself, and
+     * two loops ran side by side, one of them for a session nobody was looking at.
+     */
+    let disposed = false
     let timer: ReturnType<typeof setTimeout> | null = null
+
+    /**
+     * A different session is a different log. Folding its events onto the
+     * previous session's state, and resuming from the previous session's seq,
+     * showed a mixture of both until a reload.
+     */
+    stateRef.current = new SessionState()
+    backoff.current = RECONNECT_MIN_MS
+    setSnapshot(null)
+    setEvents([])
+    setActivity({})
+    setStatus('connecting')
+    setError(null)
+
+    const retry = () => {
+      if (disposed || timer) return
+      setStatus('reconnecting')
+      timer = setTimeout(() => {
+        timer = null
+        void connect()
+      }, backoff.current)
+      backoff.current = Math.min(backoff.current * 2, RECONNECT_MAX_MS)
+    }
 
     const applyEvent = (envelope: EventEnvelope) => {
       stateRef.current.apply(envelope)
@@ -92,9 +120,10 @@ export function useLiveSession(sessionRef: string) {
     }
 
     const connect = async () => {
-      if (closed.current) return
+      if (disposed) return
       try {
         const { ticket } = await api.wsTicket()
+        if (disposed) return
         const socket = new WebSocket(`${wsUrl()}?ticket=${encodeURIComponent(ticket)}`)
         socketRef.current = socket
 
@@ -108,6 +137,7 @@ export function useLiveSession(sessionRef: string) {
             githubLogin: null,
             displayName: null,
             repoPath: null,
+            machineId: null,
             fromSeq,
           })
             .then((result) => {
@@ -124,6 +154,7 @@ export function useLiveSession(sessionRef: string) {
         }
 
         socket.onmessage = (raw) => {
+          if (disposed) return
           const message = JSON.parse(raw.data as string) as ServerMessage
           switch (message.kind) {
             case 'ack': {
@@ -162,30 +193,29 @@ export function useLiveSession(sessionRef: string) {
         }
 
         socket.onclose = () => {
-          socketRef.current = null
+          // Only the socket this run owns may clear the slot or reconnect.
+          if (socketRef.current === socket) socketRef.current = null
+          if (disposed) return
           for (const pending of pendingRef.current.values()) {
             pending.reject(new Error('Connection closed'))
           }
           pendingRef.current.clear()
-          if (closed.current) return
-          setStatus('reconnecting')
-          timer = setTimeout(connect, backoff.current)
-          backoff.current = Math.min(backoff.current * 2, RECONNECT_MAX_MS)
+          retry()
         }
       } catch (connectError) {
-        if (closed.current) return
+        if (disposed) return
         setError(connectError instanceof Error ? connectError.message : 'connection failed')
-        setStatus('reconnecting')
-        timer = setTimeout(connect, backoff.current)
-        backoff.current = Math.min(backoff.current * 2, RECONNECT_MAX_MS)
+        retry()
       }
     }
 
     void connect()
 
     return () => {
-      closed.current = true
+      disposed = true
       if (timer) clearTimeout(timer)
+      for (const pending of pendingRef.current.values()) pending.reject(new Error('Connection closed'))
+      pendingRef.current.clear()
       socketRef.current?.close()
       socketRef.current = null
     }

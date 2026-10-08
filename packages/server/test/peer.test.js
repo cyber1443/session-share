@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert'
 import { after, before, describe, it } from 'node:test'
 import { createApp, isLoopbackAddress } from '../dist/index.js'
-import { devLoginAllowed } from '../dist/auth.js'
+import { HOST_HEADER, devLoginAllowed, hostCredential } from '../dist/auth.js'
 
 const REPO = {
   owner: 'acme',
@@ -69,12 +69,11 @@ describe('peer sessions', () => {
   let invite
 
   it('creates a session and returns the invite with it', async () => {
-    const created = await post('/api/sessions', {
-      slug: 'peer-session',
-      title: 'Peer session',
-      repo: REPO,
-      issueRef: null,
-    })
+    const created = await post(
+      '/api/sessions',
+      { slug: 'peer-session', title: 'Peer session', repo: REPO, issueRef: null },
+      { [HOST_HEADER]: hostCredential(app.auth) },
+    )
     assert.equal(created.status, 200)
     assert.ok(created.body.invite, 'a peer session is useless without its invite')
     invite = created.body.invite

@@ -15,16 +15,26 @@ import { findInvite } from './invite.js'
  * earlier one.
  */
 export type Seat =
-  /** Redeem the invite in the URL, replacing whatever token is stored. */
-  | { kind: 'redeem'; invite: string }
+  /**
+   * Redeem the invite in the URL, replacing whatever token is stored. `fallback`
+   * says what to do if the server refuses it: an expired or foreign invite in a
+   * bookmarked link should not lock someone out of a session this browser is
+   * already seated in.
+   */
+  | { kind: 'redeem'; invite: string; fallback: 'stored' | 'ask' }
   /** No invite: use the stored token, and ask the server which session it is for. */
   | { kind: 'stored' }
   /** Nothing to go on -- ask for a handle, or say there is nothing to show. */
   | { kind: 'ask' }
 
-export function chooseSeat(input: { invite: string | null; hasToken: boolean }): Seat {
-  const invite = input.invite ? findInvite(input.invite) : null
-  if (invite) return { kind: 'redeem', invite }
+export function chooseSeat(input: {
+  invite: string | null
+  hasToken: boolean
+  /** Set once the invite in the URL has been tried and refused. */
+  inviteFailed?: boolean
+}): Seat {
+  const invite = input.invite && !input.inviteFailed ? findInvite(input.invite) : null
+  if (invite) return { kind: 'redeem', invite, fallback: input.hasToken ? 'stored' : 'ask' }
   if (input.hasToken) return { kind: 'stored' }
   return { kind: 'ask' }
 }

@@ -109,7 +109,7 @@ Next:
   2. Open Claude Code in ${repo}
   3. /ss:join <session-slug> http://127.0.0.1:4310
 
-To create the session in the first place, one participant runs:
-  curl -s localhost:4310/api/commands -H 'content-type: application/json' \\
-    -d '{"sessionRef":"my-session","command":{"type":"session.create","slug":"my-session","title":"My issue","repo":{"owner":"me","name":"repo","baseBranch":"main","remoteUrl":"git@github.com:me/repo.git"},"issueRef":null}}'
+To create the session in the first place, one participant runs /ss:host in
+Claude Code (peer mode), or opens one from the board (hosted mode). Sessions
+are not created over /api/commands.
 `)

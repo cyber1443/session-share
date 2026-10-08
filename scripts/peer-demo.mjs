@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { unpackInvite } from '../packages/protocol/dist/index.js'
 import { peerJoin, runCommand } from '../packages/plugin/dist/client.js'
-import { ensureDaemon, lanAddress, readDaemon, stopDaemon } from '../packages/plugin/dist/daemon.js'
+import { HOST_HEADER, ensureDaemon, hostKey, lanAddress, readDaemon, stopDaemon } from '../packages/plugin/dist/daemon.js'
 
 const dim = (s) => `\x1b[2m${s}\x1b[0m`
 const bold = (s) => `\x1b[1m${s}\x1b[0m`
@@ -107,8 +107,7 @@ try {
     ok(`invites are signed — ${error.message}`)
   }
 
-  // Dialled over the LAN interface, so the server sees a genuinely non-loopback
-  // socket -- the check is on the connection, not on a forgeable header.
+  // Without the host credential -- what a guest has, whichever route they took.
   if (lanAddress()) {
     const remote = await fetch(new URL('/api/sessions', daemon.url), {
       method: 'POST',
@@ -121,7 +120,7 @@ try {
       }),
     })
     if (remote.status === 403) {
-      ok('only the hosting machine can create sessions (403 over the LAN interface)')
+      ok('only the host can create sessions (403 without the host credential)')
     } else {
       no(`a remote caller created a session (${remote.status})`)
     }
@@ -172,7 +171,7 @@ try {
   console.log(`\n   ${dim(`Board: ${daemon.url}/board/?join=${packed.slice(0, 24)}…`)}`)
   console.log(green('\nDone.\n'))
 } finally {
-  if (!wasRunning) stopDaemon()
+  if (!wasRunning) await stopDaemon()
   rmSync(hostRepo, { recursive: true, force: true })
   rmSync(guestRepo, { recursive: true, force: true })
 }
@@ -193,7 +192,7 @@ function task(id, paths) {
 async function create(url, body) {
   const response = await fetch(new URL('/api/sessions', url), {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', [HOST_HEADER]: hostKey() },
     body: JSON.stringify(body),
   })
   const payload = await response.json()

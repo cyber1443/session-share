@@ -82,11 +82,19 @@ describe('choosing which session a board shows', () => {
   it('redeems an invite from the URL even when a token is already stored', () => {
     // The bug this exists to stop: a board showing the session you opened last
     // week instead of the one you were just sent.
-    assert.deepEqual(chooseSeat({ invite, hasToken: true }), { kind: 'redeem', invite })
+    assert.deepEqual(chooseSeat({ invite, hasToken: true }), {
+      kind: 'redeem',
+      invite,
+      fallback: 'stored',
+    })
   })
 
   it('redeems an invite when there is no token at all', () => {
-    assert.deepEqual(chooseSeat({ invite, hasToken: false }), { kind: 'redeem', invite })
+    assert.deepEqual(chooseSeat({ invite, hasToken: false }), {
+      kind: 'redeem',
+      invite,
+      fallback: 'ask',
+    })
   })
 
   it('falls back to the stored token when the URL carries no invite', () => {
@@ -95,6 +103,16 @@ describe('choosing which session a board shows', () => {
 
   it('asks when there is neither', () => {
     assert.deepEqual(chooseSeat({ invite: null, hasToken: false }), { kind: 'ask' })
+  })
+
+  /**
+   * An expired invite in a bookmarked link used to strand a browser that was
+   * already seated: the refusal replaced the board, and the stored token that
+   * would have worked was never tried.
+   */
+  it('falls back to the stored token once the invite has been refused', () => {
+    assert.deepEqual(chooseSeat({ invite, hasToken: true, inviteFailed: true }), { kind: 'stored' })
+    assert.deepEqual(chooseSeat({ invite, hasToken: false, inviteFailed: true }), { kind: 'ask' })
   })
 
   it('ignores junk in the join parameter rather than trying to redeem it', () => {

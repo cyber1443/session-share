@@ -21,6 +21,13 @@ interface Connection {
   socket: WebSocket
   ctx: CommandContext
   alive: boolean
+  /**
+   * The session and seat the ticket was minted for, when it came from a
+   * participant token. A join on this socket may only ever land there.
+   */
+  bound: { sessionId: SessionId; participantId: ParticipantId | null } | null
+  /** Why the ticket was refused, so the first command can say so. */
+  refusal: string | null
 }
 
 export class Gateway {
@@ -78,13 +85,25 @@ export class Gateway {
   /**
    * A cross-origin WebSocket cannot carry the session cookie over plain http,
    * so the board trades the cookie for a 60-second ticket and presents that.
-   * A connection with no valid ticket is anonymous and can only ping.
+   * A connection with no valid ticket is anonymous and can only ping -- it used
+   * to be able to send `session.join` with any name it liked, which made the
+   * socket a way into any session as anyone.
    */
   private onConnection(socket: WebSocket, request: IncomingMessage): void {
     const url = new URL(request.url ?? '/ws', 'http://localhost')
     const ticket = url.searchParams.get('ticket')
-    const claims = ticket ? readWsTicket(this.auth, ticket) : null
+    const checked = ticket ? readWsTicket(this.auth, ticket) : null
+    const claims = checked?.ok ? checked.claims : null
     const user = claims ? this.store.findUserById(claims.userId) : null
+    const refusal = !ticket
+      ? 'This socket has no ticket. Fetch one from /api/ws-ticket and reconnect with ?ticket=.'
+      : !checked?.ok
+        ? checked?.reason === 'expired'
+          ? 'That ws ticket expired; tickets last a minute. Fetch a fresh one and reconnect.'
+          : 'That ws ticket was not signed by this server.'
+        : !user
+          ? 'That ws ticket names a user this server does not know.'
+          : null
 
     const connection: Connection = {
       socket,
@@ -101,27 +120,34 @@ export class Gateway {
           : null,
       },
       alive: true,
+      bound: claims?.sessionId
+        ? { sessionId: claims.sessionId, participantId: claims.participantId ?? null }
+        : null,
+      refusal,
     }
     this.connections.add(connection)
 
     socket.on('pong', () => {
       connection.alive = true
+      // A board left open is someone watching; that is presence too.
+      if (connection.ctx.participantId) this.service.seen(connection.ctx.participantId)
     })
     socket.on('message', (raw) => this.onMessage(connection, raw.toString()))
     socket.on('close', () => this.onClose(connection))
     socket.on('error', () => this.onClose(connection))
   }
 
+  /**
+   * Closing a socket says nothing about whether its participant is still here.
+   * A board tab is one window onto a seat whose agent may be working away over
+   * HTTP -- and recording "disconnected" when the tab closed left that agent
+   * absent for good, since nothing on the HTTP side ever reconnects it, and the
+   * planner then routed work around someone who was right there. Presence is
+   * when a participant was last heard from, on any transport (see
+   * SessionService.isPresent), so there is nothing to record here.
+   */
   private onClose(connection: Connection): void {
-    if (!this.connections.delete(connection)) return
-    const { sessionId, participantId } = connection.ctx
-    if (!sessionId || !participantId) return
-
-    // Another tab or a reconnect may still hold the same participant.
-    const stillHere = [...this.connections].some(
-      (other) => other.ctx.participantId === participantId,
-    )
-    if (!stillHere) this.service.markDisconnected(sessionId, participantId)
+    this.connections.delete(connection)
   }
 
   private onMessage(connection: Connection, raw: string): void {
@@ -158,7 +184,40 @@ export class Gateway {
     this.runCommand(connection, parsed.reqId, parsed.command)
   }
 
+  /**
+   * What a socket may not do, whatever the service would say. Null when the
+   * command can go ahead.
+   */
+  private refuse(connection: Connection, command: ClientCommand): ServiceError | null {
+    if (!connection.ctx.user) {
+      return new ServiceError('unauthorized', connection.refusal ?? 'Authenticate first.')
+    }
+    // Opening a session has its own gate on POST /api/sessions; this is not a way round it.
+    if (command.type === 'session.create') {
+      return new ServiceError('forbidden', 'Open a session with POST /api/sessions.')
+    }
+    if (command.type === 'session.join' && connection.bound) {
+      const target = this.store.findSessionIdByRef(command.sessionRef)
+      if (target !== connection.bound.sessionId) {
+        return new ServiceError('forbidden', 'This socket was opened for another session.')
+      }
+    }
+    return null
+  }
+
   private runCommand(connection: Connection, reqId: string, command: ClientCommand): void {
+    const refused = this.refuse(connection, command)
+    if (refused) {
+      send(connection.socket, { kind: 'err', reqId, code: refused.code, message: refused.message })
+      return
+    }
+
+    // The seat the ticket names, so the join lands on it rather than on any
+    // seat that happens to share the user.
+    if (command.type === 'session.join' && connection.bound?.participantId && !connection.ctx.participantId) {
+      connection.ctx.participantId = connection.bound.participantId
+    }
+
     try {
       const data = this.service.handle(command as never, connection.ctx)
       send(connection.socket, { kind: 'ack', reqId, data })

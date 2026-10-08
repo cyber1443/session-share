@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert'
 import { after, before, describe, it } from 'node:test'
 import { createApp } from '../dist/index.js'
-import { TestClient, expectError, settle } from './client.js'
+import { TestClient, expectError, settle, ticketFor, useApp } from './client.js'
 
 const REPO = {
   owner: 'acme',
@@ -67,6 +67,7 @@ let url
 
 before(async () => {
   app = createApp({ dbPath: ':memory:' })
+  useApp(app)
   const address = await app.listen(0)
   url = `${address.replace('http://', 'ws://')}/ws`
 })
@@ -563,6 +564,8 @@ describe('handoff', () => {
   it('opens the path once the holder grants it', async () => {
     const { alice, bob } = await buildPhaseSession('handoff-grant')
     await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
+    // A handoff belongs to the task it is asked for, so Bob is holding one.
+    await bob.send({ type: 'task.claim', taskId: 'theme-persist' })
     const path = 'src/components/theme-toggle/index.tsx'
 
     const { request } = await bob.send({
@@ -583,6 +586,7 @@ describe('handoff', () => {
   it('only lets the holder resolve it', async () => {
     const { alice, bob } = await buildPhaseSession('handoff-forbidden')
     await alice.send({ type: 'task.claim', taskId: 'theme-toggle' })
+    await bob.send({ type: 'task.claim', taskId: 'theme-persist' })
     const { request } = await bob.send({
       type: 'handoff.request',
       path: 'src/components/theme-toggle/index.tsx',
@@ -758,7 +762,13 @@ describe('reconnect', () => {
     await bobAgain.close()
   })
 
-  it('marks a participant disconnected when their socket drops', async () => {
+  /**
+   * A socket is one window onto a seat, usually a board tab. Closing it used to
+   * record the seat as disconnected, and since an agent working over HTTP never
+   * reconnects anything, it stayed "gone" while it was busy -- and the planner
+   * routed work around it.
+   */
+  it('does not mark someone gone because a socket closed', async () => {
     const { alice, bob, bobId } = await buildPhaseSession('reconnect-presence')
     await bob.close()
     await settle()
@@ -766,7 +776,17 @@ describe('reconnect', () => {
     const drop = alice
       .eventsOfType('participant.connection')
       .find((e) => e.body.participantId === bobId && e.body.connected === false)
-    assert.ok(drop, 'peers must see the disconnect')
+    assert.equal(drop, undefined, 'a closed tab is not an absence')
+
+    const { snapshot } = await alice.send({
+      type: 'session.join',
+      sessionRef: 'reconnect-presence',
+      githubLogin: 'alice',
+      displayName: 'Alice',
+      repoPath: '/tmp/alice/web',
+      fromSeq: null,
+    })
+    assert.equal(snapshot.participants.find((p) => p.id === bobId).connected, true)
   })
 
   it('rebuilds identical state from the log alone', async () => {

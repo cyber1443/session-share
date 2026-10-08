@@ -67,8 +67,10 @@ export function TicketPanel({
   const [confirming, setConfirming] = useState(false)
   const tasks = snapshot.tasks.filter((task) => task.ticketId === ticket.id)
   const landed = tasks.filter((task) => task.state === 'merged').length
+  // Every ticket has its own split; the session-wide field is only the newest one.
   const decomposition =
-    snapshot.decomposition?.id === ticket.decompositionId ? snapshot.decomposition : null
+    (ticket.decompositionId && snapshot.decompositions?.[ticket.decompositionId]) ||
+    (snapshot.decomposition?.id === ticket.decompositionId ? snapshot.decomposition : null)
   const proposed = tasks.length === 0 ? (decomposition?.tasks ?? []) : []
   const assignedTo = new Map((decomposition?.assignments ?? []).map((a) => [a.taskId, a]))
 

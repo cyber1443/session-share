@@ -1,4 +1,26 @@
 import { WebSocket } from 'ws'
+import { HOST_HEADER, hostCredential, issueWsTicket, peerUserId, upsertUser } from '../dist/auth.js'
+
+/**
+ * The app the clients talk to. A socket is anonymous until it presents a ticket,
+ * and an anonymous socket can do nothing -- so a client that wants to join as
+ * someone needs a ticket for them, which only the server's own key can mint.
+ */
+let app = null
+export function useApp(instance) {
+  app = instance
+}
+
+/** A ws ticket for a peer user, minted the way /api/ws-ticket would. */
+export function ticketFor(login, displayName = login) {
+  const user = upsertUser(app.store, {
+    githubId: peerUserId(login),
+    githubLogin: login,
+    displayName,
+    avatarUrl: null,
+  })
+  return issueWsTicket(app.auth, user.id)
+}
 
 /**
  * Minimal test client: one socket, promise-per-reqId, and a running list of
@@ -15,8 +37,8 @@ export class TestClient {
     this.nextId = 0
   }
 
-  async connect() {
-    this.socket = new WebSocket(this.url)
+  async connect(ticket = null) {
+    this.socket = new WebSocket(ticket ? `${this.url}?ticket=${encodeURIComponent(ticket)}` : this.url)
     await new Promise((resolve, reject) => {
       this.socket.once('open', resolve)
       this.socket.once('error', reject)
@@ -50,7 +72,40 @@ export class TestClient {
     return this
   }
 
-  send(command) {
+  /**
+   * Sessions are opened over HTTP by the host, and a join is only honoured on a
+   * socket that authenticated as that person. Both are done here so the tests
+   * read as the commands they mean.
+   */
+  async send(command) {
+    if (app && command.type === 'session.create') return this.createOverHttp(command)
+    if (app && command.type === 'session.join' && command.githubLogin && this.as !== command.githubLogin) {
+      await this.close()
+      await this.connect(ticketFor(command.githubLogin, command.displayName ?? command.githubLogin))
+      this.as = command.githubLogin
+    }
+    return this.raw(command)
+  }
+
+  async createOverHttp(command) {
+    const base = this.url.replace(/^ws/, 'http').replace(/\/ws$/, '')
+    const { type: _type, ...body } = command
+    const response = await fetch(new URL('/api/sessions', base), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [HOST_HEADER]: hostCredential(app.auth) },
+      body: JSON.stringify(body),
+    })
+    const payload = await response.json()
+    if (!response.ok) {
+      const error = new Error(payload.message ?? payload.error)
+      error.code = payload.error
+      throw error
+    }
+    return payload
+  }
+
+  /** Exactly what is given, on the socket as it stands. */
+  raw(command) {
     const reqId = `r${this.nextId++}`
     const promise = new Promise((resolve, reject) => {
       this.pending.set(reqId, { resolve, reject })
@@ -71,7 +126,7 @@ export class TestClient {
   }
 
   async close() {
-    if (!this.socket) return
+    if (!this.socket || this.socket.readyState === WebSocket.CLOSED) return
     await new Promise((resolve) => {
       this.socket.once('close', resolve)
       this.socket.close()
