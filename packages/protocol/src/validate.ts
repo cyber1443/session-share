@@ -156,14 +156,14 @@ export function validateDecomposition(input: {
       !/^[a-zA-Z]:/.test(file.path) &&
       !normalized.startsWith('/') &&
       !segments.includes('..') &&
-      segments[0] !== '.git'
+      !segments.some((segment) => segment.toLowerCase() === '.git')
     ) {
       continue
     }
     issues.push({
       code: 'path_escapes_repo',
       severity: 'error',
-      message: `Contract file "${file.path}" points outside the repository.`,
+      message: `Contract file "${file.path}" points outside the repository or into .git.`,
       taskIds: [],
       repairHint: 'Contract files are written on whoever lands the contract; give each a repo-relative path with no leading slash and no "..".',
     })
@@ -184,7 +184,14 @@ export function validateDecomposition(input: {
 
     for (const glob of task.ownedPaths) {
       const normalized = normalizeGlob(glob)
-      if (!normalized.startsWith('/') && !normalized.split('/').includes('..')) continue
+      const parts = normalized.split('/')
+      if (
+        !normalized.startsWith('/') &&
+        !parts.includes('..') &&
+        !parts.some((part) => part.toLowerCase() === '.git')
+      ) {
+        continue
+      }
       issues.push({
         code: 'path_escapes_repo',
         severity: 'error',

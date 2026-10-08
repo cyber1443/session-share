@@ -162,6 +162,27 @@ describe('validateDecomposition', () => {
     assert.ok(codesIn(report).includes('error:path_escapes_repo'))
   })
 
+  /**
+   * macOS ignores case, so `.GIT/config` is the repository's own config -- and
+   * a git config can name programs git runs on the next commit.
+   */
+  it('rejects anything aimed into .git, in any case', () => {
+    for (const path of ['.git/config', '.GIT/config', 'vendor/lib/.Git/hooks/pre-commit', 'sub/../.GIT/config']) {
+      const report = validateDecomposition({
+        contract: { summary: 's', files: [{ path, purpose: 'p', contents: '' }] },
+        tasks: [task('a')],
+        participantCount: 1,
+      })
+      assert.ok(codesIn(report).includes('error:path_escapes_repo'), path)
+    }
+    const owned = validateDecomposition({
+      contract,
+      tasks: [task('a', { ownedPaths: ['.GIT/**'] })],
+      participantCount: 1,
+    })
+    assert.ok(codesIn(owned).includes('error:path_escapes_repo'))
+  })
+
   it('warns when the split is narrower than the team', () => {
     const report = validateDecomposition({
       contract,

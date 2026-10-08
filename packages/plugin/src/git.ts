@@ -62,6 +62,22 @@ export async function currentBranch(cwd: string): Promise<string> {
   return git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])
 }
 
+/**
+ * The branch work should be based on: the current one, or on a detached HEAD
+ * the remote's default branch -- a session based on the literal `HEAD` would
+ * branch every task from wherever this checkout happened to be pointing.
+ */
+export async function baseBranch(cwd: string): Promise<string> {
+  const here = await currentBranch(cwd)
+  if (here !== 'HEAD') return here
+  try {
+    const ref = await git(cwd, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+    return ref.replace(/^origin\//, '')
+  } catch {
+    return 'main'
+  }
+}
+
 /** Uncommitted changes, as porcelain lines. Empty means a clean tree. */
 export async function dirtyFiles(cwd: string): Promise<string[]> {
   const output = await git(cwd, ['status', '--porcelain'])
@@ -126,14 +142,19 @@ export async function fastForward(cwd: string, branch: string): Promise<void> {
   if (!(await hasRemote(cwd))) return
   await fetch(cwd)
   if (!(await remoteRefExists(cwd, branch))) return
-  try {
-    await git(cwd, ['merge', '--ff-only', `origin/${branch}`])
-  } catch {
+  const [local, upstream] = await Promise.all([
+    git(cwd, ['rev-parse', 'HEAD']),
+    git(cwd, ['rev-parse', `origin/${branch}`]),
+  ])
+  if (await isAncestor(cwd, upstream, local)) return // up to date, or ahead
+  if (!(await isAncestor(cwd, local, upstream))) {
     throw new GitError(
       `${branch} has diverged from origin/${branch}. Merge or rebase it by hand, then try again.`,
       '',
     )
   }
+  // Behind and a fast-forward: if this fails, git's own reason is the true one.
+  await git(cwd, ['merge', '--ff-only', `origin/${branch}`])
 }
 
 /** Is `origin/<branch>` known locally, as of the last fetch? */
@@ -164,13 +185,15 @@ export async function updateLocalBranch(
     return 'updated'
   }
   if ((await currentBranch(cwd)) === branch) {
-    const before = await git(cwd, ['rev-parse', 'HEAD'])
-    try {
-      await git(cwd, ['merge', '--ff-only', remote])
-    } catch {
-      return 'diverged'
-    }
-    return before === (await git(cwd, ['rev-parse', 'HEAD'])) ? 'unchanged' : 'updated'
+    const [head, upstream] = await Promise.all([
+      git(cwd, ['rev-parse', 'HEAD']),
+      git(cwd, ['rev-parse', remote]),
+    ])
+    if (await isAncestor(cwd, upstream, head)) return 'unchanged'
+    if (!(await isAncestor(cwd, head, upstream))) return 'diverged'
+    // A fast-forward that fails here fails for git's own reason; let it say so.
+    await git(cwd, ['merge', '--ff-only', remote])
+    return 'updated'
   }
 
   const [local, upstream] = await Promise.all([
@@ -180,6 +203,27 @@ export async function updateLocalBranch(
   if (local === upstream) return 'unchanged'
   if (await isAncestor(cwd, upstream, local)) return 'unchanged' // local is ahead
   if (!(await isAncestor(cwd, local, upstream))) return 'diverged'
+
+  /**
+   * Moving the ref under a worktree that has it checked out leaves that tree's
+   * index describing the old commit -- a staged reversal of whatever just
+   * landed, waiting to be committed. There, it is fast-forwarded in place.
+   */
+  const here = resolve(await git(cwd, ['rev-parse', '--show-toplevel']))
+  const elsewhere = (await listWorktrees(cwd)).find(
+    (tree) => tree.branch === branch && resolve(tree.path) !== here,
+  )
+  if (elsewhere) {
+    try {
+      await git(elsewhere.path, ['merge', '--ff-only', remote])
+      return 'updated'
+    } catch (error) {
+      throw new GitError(
+        `${branch} is checked out at ${elsewhere.path} and could not be fast-forwarded there: ${(error as Error).message}`,
+        '',
+      )
+    }
+  }
   await git(cwd, ['update-ref', `refs/heads/${branch}`, upstream, local])
   return 'updated'
 }
@@ -205,7 +249,14 @@ export function insideRepo(cwd: string, path: string): string {
   if (isAbsolute(path) || rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(`Refusing to write "${path}": it is outside the repository.`)
   }
-  if (rel.split(/[\\/]/)[0] === '.git') throw new Error(`Refusing to write "${path}" inside .git.`)
+  /**
+   * Any `.git` segment, in any case: macOS volumes ignore case, so `.GIT/config`
+   * is `.git/config`, and a git config can name programs git will run. A nested
+   * repository's `.git` is just as dangerous as the top one.
+   */
+  if (rel.split(/[\\/]/).some((segment) => segment.toLowerCase() === '.git')) {
+    throw new Error(`Refusing to write "${path}" inside a .git directory.`)
+  }
   return absolute
 }
 
