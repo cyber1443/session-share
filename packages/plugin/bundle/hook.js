@@ -11,11 +11,13 @@ var __export = (target, all) => {
 };
 
 // packages/plugin/src/hook.ts
-import { relative, resolve as resolve3 } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, dirname as dirname4, join as join7, relative, resolve as resolve3 } from "node:path";
 
 // packages/plugin/src/config.ts
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/external.js
 var external_exports = {};
@@ -14566,118 +14568,22 @@ function readConfig(startDir) {
   }
 }
 
-// packages/plugin/src/client.ts
-var CommandError = class extends Error {
-  constructor(code, message) {
-    super(message);
-    this.code = code;
-    this.name = "CommandError";
-  }
-  code;
-};
-async function runCommand(config2, command, timeoutMs = 3e3) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(new URL("/api/commands", config2.serverUrl), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...config2.participantToken ? { authorization: `Bearer ${config2.participantToken}` } : {}
-      },
-      body: JSON.stringify({ sessionRef: config2.sessionRef, command }),
-      signal: controller.signal
-    });
-    const payload = await response.json();
-    if (!response.ok || "error" in payload) {
-      const failure = payload;
-      throw new CommandError(failure.error, failure.message ?? failure.error);
-    }
-    return payload.data;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// packages/plugin/src/inbox.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { homedir } from "node:os";
-import { join as join2 } from "node:path";
-function stateDir() {
-  return process.env.SESSION_SHARE_HOME ?? join2(homedir(), ".session-share");
-}
-var inboxFile = () => join2(stateDir(), "inbox.json");
-function cursorKey(config2) {
-  return `${config2.serverUrl}|${config2.sessionRef}|${config2.participantId}`;
-}
-function readCursors() {
-  const path = inboxFile();
-  if (!existsSync2(path)) return {};
-  try {
-    return JSON.parse(readFileSync2(path, "utf8"));
-  } catch {
-    return {};
-  }
-}
-function writeCursor(key, value) {
-  mkdirSync2(stateDir(), { recursive: true });
-  writeFileSync2(inboxFile(), `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
-`);
-}
-function markCaughtUp(config2, at = Date.now()) {
-  writeCursor(cursorKey(config2), at);
-}
-async function pendingDirectives(config2, timeoutMs = 2500, consume = true) {
-  const key = cursorKey(config2);
-  const cursor = readCursors()[key];
-  if (cursor === void 0) {
-    markCaughtUp(config2);
-    return [];
-  }
-  const { messages } = await runCommand(
-    config2,
-    { type: "chat.read", limit: 50, beforeSeq: null, taskRef: null },
-    timeoutMs
-  );
-  const pending = messages.filter(
-    (message) => message.directive && message.createdAt > cursor && message.authorId !== config2.participantId && (message.mentions.length === 0 || message.mentions.includes(config2.participantId))
-  );
-  if (consume && pending.length > 0) {
-    writeCursor(key, Math.max(...pending.map((message) => message.createdAt)));
-  }
-  return pending;
-}
-function describeDirectives(messages, names) {
-  const lines = messages.map((message) => {
-    const author = message.authorId && names.get(message.authorId) || "a teammate";
-    const scope = message.taskRef ? ` (about #${message.taskRef})` : "";
-    return `- ${author}${scope}: ${message.body}`;
-  });
-  return [
-    `[session-share] ${messages.length === 1 ? "A teammate sent an instruction" : `${messages.length} instructions arrived`} in the session room:`,
-    "",
-    ...lines,
-    "",
-    "Do it now, in this turn, without asking whether you should. It was addressed to you by",
-    "someone who has already agreed to it -- asking them to confirm it a second time is the",
-    "coordination this exists to remove.",
-    "",
-    "Your file leases still apply, so an edit outside your task will be refused. Reply in the",
-    "room with ss_chat_post when you are done, or if you are genuinely stuck."
-  ].join("\n");
-}
-
-// packages/plugin/src/preferences.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname3, join as join4 } from "node:path";
-
 // packages/plugin/src/daemon.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync3, mkdirSync as mkdirSync3, openSync, readFileSync as readFileSync3, readdirSync, statSync, writeFileSync as writeFileSync3 } from "node:fs";
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import {
+  existsSync as existsSync2,
+  mkdirSync as mkdirSync2,
+  openSync,
+  readFileSync as readFileSync2,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync as writeFileSync2
+} from "node:fs";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { networkInterfaces } from "node:os";
-import { homedir as homedir2 } from "node:os";
-import { dirname as dirname2, join as join3, resolve as resolve2 } from "node:path";
+import { homedir } from "node:os";
+import { dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // packages/protocol/dist/ids.js
@@ -14739,6 +14645,12 @@ var Participant = external_exports.object({
    * that join.
    */
   repoPath: external_exports.string().min(1).nullable(),
+  /**
+   * Which machine that checkout is on. The same absolute path on two laptops is
+   * two working trees, not one, so the path alone cannot say whether two agents
+   * would collide. Absent on records written before it existed.
+   */
+  machineId: external_exports.string().min(1).nullish(),
   connected: external_exports.boolean(),
   activity: ParticipantActivity,
   joinedAt: Timestamp
@@ -14850,10 +14762,19 @@ var Decomposition = external_exports.object({
    * final arrangement into tasks.
    */
   assignments: external_exports.array(Assignment).default([]),
+  /**
+   * The commit this split's contract landed in, once it has. Per split rather
+   * than per session: every ticket brings its own seam, and a second ticket's
+   * tasks are not claimable just because somebody else's contract is on the
+   * branch -- the files they import would not be there.
+   */
+  contractCommit: external_exports.string().nullable().default(null),
   createdAt: Timestamp
 });
 var ValidationCode = external_exports.enum([
   "overlapping_paths",
+  "duplicate_task_id",
+  "task_id_taken",
   "dependency_cycle",
   "unknown_dependency",
   "missing_acceptance",
@@ -14938,6 +14859,12 @@ var HandoffRequest = external_exports.object({
   requesterId: ParticipantId,
   holderId: ParticipantId,
   heldByTaskId: TaskId,
+  /**
+   * The task the requester was holding when they asked. A grant opens a path
+   * for that piece of work, not for the person forever after: it lapses when
+   * either lease goes. Null in requests logged before this was recorded.
+   */
+  requesterTaskId: TaskId.nullable().default(null),
   reason: external_exports.string().max(280),
   status: HandoffStatus,
   createdAt: Timestamp
@@ -14985,8 +14912,22 @@ var SessionSnapshot = external_exports.object({
   session: Session,
   participants: external_exports.array(Participant),
   tickets: external_exports.array(Ticket).default([]),
+  /**
+   * One split, for clients written when a session had only one. With several
+   * tickets this is the split most likely to be acted on next: the newest one
+   * approved but not yet landed, or failing that the newest proposal. Anything
+   * that knows which ticket it means should read `decompositions` instead.
+   */
   decomposition: Decomposition.nullable(),
   validation: ValidationReport.nullable(),
+  /**
+   * Every split still worth knowing about, keyed by its id: each ticket's
+   * current one (`ticket.decompositionId`), its newest proposal even when that
+   * failed validation -- the repair round needs to see what was wrong -- and
+   * any that were approved, whose contract files stay frozen.
+   */
+  decompositions: external_exports.record(external_exports.string(), Decomposition).default({}),
+  validations: external_exports.record(external_exports.string(), ValidationReport).default({}),
   tasks: external_exports.array(Task),
   leases: external_exports.array(Lease),
   handoffs: external_exports.array(HandoffRequest),
@@ -14997,6 +14938,7 @@ var SessionSnapshot = external_exports.object({
 });
 
 // packages/protocol/dist/events.js
+var SplitRef = DecompositionId.nullable().default(null);
 var EventBody = external_exports.discriminatedUnion("type", [
   // -- session lifecycle ----------------------------------------------------
   external_exports.object({ type: external_exports.literal("session.created"), session: Session }),
@@ -15019,7 +14961,8 @@ var EventBody = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("participant.attached"),
     participantId: ParticipantId,
-    repoPath: external_exports.string().min(1)
+    repoPath: external_exports.string().min(1),
+    machineId: external_exports.string().min(1).nullish()
   }),
   // -- tickets --------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("ticket.created"), ticket: Ticket }),
@@ -15056,6 +14999,7 @@ var EventBody = external_exports.discriminatedUnion("type", [
   }),
   external_exports.object({
     type: external_exports.literal("decomposition.approval"),
+    decompositionId: SplitRef,
     participantId: ParticipantId,
     approvals: external_exports.array(ParticipantId),
     /** True once the approval rule is satisfied: unanimous at <=3, lead above. */
@@ -15068,15 +15012,22 @@ var EventBody = external_exports.discriminatedUnion("type", [
    */
   external_exports.object({
     type: external_exports.literal("decomposition.assigned"),
+    decompositionId: SplitRef,
     assignments: external_exports.array(Assignment)
   }),
   external_exports.object({
     type: external_exports.literal("decomposition.rejected"),
+    decompositionId: SplitRef,
     participantId: ParticipantId,
     reason: external_exports.string().max(500)
   }),
   external_exports.object({
     type: external_exports.literal("contract.committed"),
+    /**
+     * The split whose contract this is. Left out by logs from before each
+     * ticket landed its own seam, when one landing made everything claimable.
+     */
+    decompositionId: SplitRef,
     branch: external_exports.string().min(1),
     commitSha: external_exports.string().min(1),
     prNumber: external_exports.number().int().nullable()
@@ -15173,8 +15124,8 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     /** Either works; the plugin has the slug, the board has the id. */
     sessionRef: external_exports.string().min(1),
     /**
-     * Only used when the caller is unauthenticated. An authenticated join takes
-     * its identity from the credential, so the board sends neither.
+     * Ignored. Identity always comes from the credential the caller presented;
+     * kept so older clients that still send it are not rejected.
      */
     githubLogin: external_exports.string().min(1).nullish().default(null),
     displayName: external_exports.string().min(1).nullish().default(null),
@@ -15183,6 +15134,12 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
      * checkout. Rejected if another connected participant reports the same path.
      */
     repoPath: external_exports.string().min(1).nullable().default(null),
+    /**
+     * Which machine `repoPath` is on. A checkout is a path on a machine, and
+     * each checkout is its own participant -- that is what gives two clones of
+     * one person separate leases.
+     */
+    machineId: external_exports.string().min(1).nullable().default(null),
     /** Replay from here instead of receiving a full snapshot. */
     fromSeq: Seq.nullable().default(null)
   }),
@@ -15263,11 +15220,24 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     type: external_exports.literal("contract.committed"),
     branch: external_exports.string().min(1),
     commitSha: external_exports.string().min(1),
-    prNumber: external_exports.number().int().nullable().default(null)
+    prNumber: external_exports.number().int().nullable().default(null),
+    /**
+     * Whose contract this is. Left out, the server takes the split the snapshot
+     * offers as `decomposition` -- the newest one approved and not yet landed --
+     * which is the one a client that does not know about tickets just wrote.
+     */
+    ticketId: TicketId.nullish()
   }),
   /** Omit taskId to be handed the best ready task by affinity. */
   external_exports.object({ type: external_exports.literal("task.claim"), taskId: TaskId.nullable().default(null) }),
   external_exports.object({ type: external_exports.literal("task.release"), taskId: TaskId }),
+  /**
+   * Take a task back from someone who has gone. Only while the holder has not
+   * been heard from for a while, and only by the lead or someone on the
+   * ticket -- otherwise a laptop closing mid-task strands its files behind a
+   * lease nobody can lift.
+   */
+  external_exports.object({ type: external_exports.literal("task.forceRelease"), taskId: TaskId }),
   external_exports.object({
     type: external_exports.literal("task.progress"),
     taskId: TaskId,
@@ -15311,7 +15281,13 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     type: external_exports.literal("chat.read"),
     limit: external_exports.number().int().min(1).max(200).default(50),
     beforeSeq: Seq.nullable().default(null),
-    taskRef: TaskId.nullable().default(null)
+    taskRef: TaskId.nullable().default(null),
+    /**
+     * Only messages posted after this one, oldest first. This is how an inbox
+     * pages through the room in the server's own order, rather than comparing
+     * its clock to the server's.
+     */
+    afterId: MessageId.nullable().default(null)
   }),
   /**
    * Tokens this participant's own account spent since the last report. Sent by
@@ -15456,14 +15432,178 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
 ]);
 
 // packages/plugin/src/daemon.ts
-var STATE_DIR = process.env.SESSION_SHARE_HOME ?? join3(homedir2(), ".session-share");
-var DAEMON_FILE = join3(STATE_DIR, "daemon.json");
-var SECRET_FILE = join3(STATE_DIR, "secret");
-var DB_FILE = join3(STATE_DIR, "sessions.db");
-var LOG_FILE = join3(STATE_DIR, "server.log");
+var STATE_DIR = process.env.SESSION_SHARE_HOME ?? join2(homedir(), ".session-share");
+var DAEMON_FILE = join2(STATE_DIR, "daemon.json");
+var SECRET_FILE = join2(STATE_DIR, "secret");
+var MACHINE_FILE = join2(STATE_DIR, "machine-id");
+var DB_FILE = join2(STATE_DIR, "sessions.db");
+var LOG_FILE = join2(STATE_DIR, "server.log");
 var DEFAULT_PORT = Number(process.env.SESSION_SHARE_PORT ?? 4310);
 
+// packages/plugin/src/client.ts
+var CommandError = class extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+    this.name = "CommandError";
+  }
+  code;
+};
+async function runCommand(config2, command, timeoutMs = 3e3) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(new URL("/api/commands", config2.serverUrl), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...config2.participantToken ? { authorization: `Bearer ${config2.participantToken}` } : {}
+      },
+      body: JSON.stringify({ sessionRef: config2.sessionRef, command }),
+      signal: controller.signal
+    });
+    const payload = await response.json();
+    if (!response.ok || "error" in payload) {
+      const failure = payload;
+      throw new CommandError(failure.error, failure.message ?? failure.error);
+    }
+    return payload.data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// packages/plugin/src/busy.ts
+import { createHash as createHash2 } from "node:crypto";
+import { mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join3 } from "node:path";
+var MAX_TURN_MS = 2 * 60 * 60 * 1e3;
+function marker(repoPath) {
+  const home = process.env.SESSION_SHARE_HOME ?? join3(homedir2(), ".session-share");
+  const id = createHash2("sha256").update(repoPath).digest("hex").slice(0, 16);
+  return join3(home, "busy", id);
+}
+function markBusy(repoPath) {
+  try {
+    const path = marker(repoPath);
+    mkdirSync3(join3(path, ".."), { recursive: true });
+    writeFileSync3(path, `${process.pid}
+`);
+  } catch {
+  }
+}
+function markIdle(repoPath) {
+  rmSync2(marker(repoPath), { force: true });
+}
+
+// packages/plugin/src/inbox.ts
+import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync3, renameSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join4 } from "node:path";
+function stateDir() {
+  return process.env.SESSION_SHARE_HOME ?? join4(homedir3(), ".session-share");
+}
+var inboxFile = () => join4(stateDir(), "inbox.json");
+var PAGE = 200;
+function cursorKey(config2) {
+  return `${config2.serverUrl}|${config2.sessionRef}|${config2.participantId}`;
+}
+function readCursors() {
+  const path = inboxFile();
+  if (!existsSync3(path)) return {};
+  try {
+    return JSON.parse(readFileSync3(path, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function readCursor(key) {
+  const value = readCursors()[key];
+  return typeof value === "string" ? value : void 0;
+}
+function writeCursor(key, value) {
+  mkdirSync4(stateDir(), { recursive: true });
+  const path = inboxFile();
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync4(temporary, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
+`);
+  renameSync(temporary, path);
+}
+async function markCaughtUp(config2, timeoutMs = 2500) {
+  try {
+    const { latestId } = await runCommand(
+      config2,
+      { type: "chat.read", limit: 1, beforeSeq: null, taskRef: null, afterId: null },
+      timeoutMs
+    );
+    writeCursor(cursorKey(config2), latestId ?? "");
+  } catch {
+  }
+}
+var addressedTo = (config2) => (message) => message.directive && message.authorId !== config2.participantId && (message.mentions.length === 0 || message.mentions.includes(config2.participantId));
+async function readInbox(config2, timeoutMs = 2500) {
+  const key = cursorKey(config2);
+  const from = readCursor(key);
+  if (from === void 0) {
+    await markCaughtUp(config2, timeoutMs);
+    return { messages: [], from: readCursor(key) ?? "", to: readCursor(key) ?? "" };
+  }
+  const deadline = Date.now() + timeoutMs;
+  const messages = [];
+  let cursor = from;
+  for (; ; ) {
+    const remaining = Math.max(deadline - Date.now(), 250);
+    const page = await runCommand(
+      config2,
+      { type: "chat.read", limit: PAGE, beforeSeq: null, taskRef: null, afterId: cursor || null },
+      remaining
+    );
+    if (cursor && !page.cursorFound) {
+      return { messages: [], from, to: page.latestId ?? "" };
+    }
+    if (!cursor) {
+      return { messages: page.messages.filter(addressedTo(config2)), from, to: page.latestId ?? "" };
+    }
+    messages.push(...page.messages.filter(addressedTo(config2)));
+    if (page.messages.length > 0) cursor = page.messages.at(-1).id;
+    if (page.messages.length < PAGE) break;
+  }
+  return { messages, from, to: cursor };
+}
+function acknowledge(config2, inbox) {
+  const key = cursorKey(config2);
+  if ((readCursor(key) ?? "") !== inbox.from) return;
+  if (inbox.to !== inbox.from) writeCursor(key, inbox.to);
+}
+async function pendingDirectives(config2, timeoutMs = 2500, consume = true) {
+  const inbox = await readInbox(config2, timeoutMs);
+  if (consume) acknowledge(config2, inbox);
+  return inbox.messages;
+}
+function describeDirectives(messages, names) {
+  const lines = messages.map((message) => {
+    const author = message.authorId && names.get(message.authorId) || "a teammate";
+    const scope = message.taskRef ? ` (about #${message.taskRef})` : "";
+    return `- ${author}${scope}: ${message.body}`;
+  });
+  return [
+    `[session-share] ${messages.length === 1 ? "A teammate sent an instruction" : `${messages.length} instructions arrived`} in the session room:`,
+    "",
+    ...lines,
+    "",
+    "Do it now, in this turn, without asking whether you should. It was addressed to you by",
+    "someone who has already agreed to it -- asking them to confirm it a second time is the",
+    "coordination this exists to remove.",
+    "",
+    "Your file leases still apply, so an edit outside your task will be refused. Reply in the",
+    "room with ss_chat_post when you are done, or if you are genuinely stuck."
+  ].join("\n");
+}
+
 // packages/plugin/src/preferences.ts
+import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname3, join as join5 } from "node:path";
 var Preferences = external_exports.object({
   /**
    * explicit: nothing is committed until you run /ss:done.
@@ -15498,7 +15638,7 @@ var Preferences = external_exports.object({
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });
-var PREFERENCES_PATH = join4(STATE_DIR, "preferences.json");
+var PREFERENCES_PATH = join5(STATE_DIR, "preferences.json");
 function readPreferences() {
   if (!existsSync4(PREFERENCES_PATH)) return Preferences.parse({});
   try {
@@ -15509,9 +15649,9 @@ function readPreferences() {
 }
 
 // packages/plugin/src/usage.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync5, statSync as statSync2, writeFileSync as writeFileSync5 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join5 } from "node:path";
+import { existsSync as existsSync5, mkdirSync as mkdirSync6, readFileSync as readFileSync5, statSync as statSync3, writeFileSync as writeFileSync6 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join6 } from "node:path";
 var EMPTY = {
   inputTokens: 0,
   outputTokens: 0,
@@ -15520,9 +15660,9 @@ var EMPTY = {
   turns: 0
 };
 function stateDir2() {
-  return process.env.SESSION_SHARE_HOME ?? join5(homedir3(), ".session-share");
+  return process.env.SESSION_SHARE_HOME ?? join6(homedir4(), ".session-share");
 }
-var offsetsFile = () => join5(stateDir2(), "usage.json");
+var offsetsFile = () => join6(stateDir2(), "usage.json");
 function readOffsets() {
   const path = offsetsFile();
   if (!existsSync5(path)) return {};
@@ -15533,15 +15673,15 @@ function readOffsets() {
   }
 }
 function writeOffset(transcript, bytes) {
-  mkdirSync5(stateDir2(), { recursive: true });
-  writeFileSync5(offsetsFile(), `${JSON.stringify({ ...readOffsets(), [transcript]: bytes }, null, 2)}
+  mkdirSync6(stateDir2(), { recursive: true });
+  writeFileSync6(offsetsFile(), `${JSON.stringify({ ...readOffsets(), [transcript]: bytes }, null, 2)}
 `);
 }
 function usageSince(transcriptPath) {
   if (!transcriptPath || !existsSync5(transcriptPath)) return EMPTY;
   let size;
   try {
-    size = statSync2(transcriptPath).size;
+    size = statSync3(transcriptPath).size;
   } catch {
     return EMPTY;
   }
@@ -15549,8 +15689,13 @@ function usageSince(transcriptPath) {
   const from = seen > size ? 0 : seen;
   if (from === size) return EMPTY;
   let text;
+  let consumed;
   try {
-    text = readFileSync5(transcriptPath, "utf8").slice(from);
+    const bytes = readFileSync5(transcriptPath).subarray(from);
+    const lastNewline = bytes.lastIndexOf(10);
+    if (lastNewline === -1) return EMPTY;
+    consumed = from + lastNewline + 1;
+    text = bytes.subarray(0, lastNewline + 1).toString("utf8");
   } catch {
     return EMPTY;
   }
@@ -15571,7 +15716,7 @@ function usageSince(transcriptPath) {
     delta.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
     delta.turns += 1;
   }
-  writeOffset(transcriptPath, size);
+  writeOffset(transcriptPath, consumed);
   return delta;
 }
 
@@ -15588,9 +15733,23 @@ function extractPaths(toolInput) {
   }
   return paths;
 }
+function canonical(path) {
+  const tail = [];
+  let current = resolve3(path);
+  for (; ; ) {
+    try {
+      return join7(realpathSync.native(current), ...tail.reverse());
+    } catch {
+      const parent = dirname4(current);
+      if (parent === current) return resolve3(path);
+      tail.push(basename(current));
+      current = parent;
+    }
+  }
+}
 function toRepoRelative(repoPath, cwd, filePath) {
-  const absolute = resolve3(cwd, filePath);
-  return relative(repoPath, absolute).split("\\").join("/");
+  const absolute = canonical(resolve3(cwd, filePath));
+  return relative(canonical(repoPath), absolute).split("\\").join("/");
 }
 async function decide(input) {
   if (!input.tool_name || !EDIT_TOOLS.has(input.tool_name)) return null;
@@ -15636,6 +15795,7 @@ async function collectRoom(input) {
   const config2 = readConfig(input.cwd ?? process.cwd());
   if (!config2) return null;
   if (!readPreferences().acceptDirectives) return null;
+  if (process.env.SESSION_SHARE_AUTOPILOT === "child") return null;
   let pending;
   try {
     pending = await pendingDirectives(config2, ROOM_TIMEOUT_MS);
@@ -15667,13 +15827,18 @@ async function route(input) {
      */
     case "Stop": {
       await reportUsage(input);
-      if (input.stop_hook_active) return null;
-      const reason = await collectRoom(input);
+      const config2 = readConfig(input.cwd ?? process.cwd());
+      const reason = input.stop_hook_active ? null : await collectRoom(input);
+      if (config2 && !reason && process.env.SESSION_SHARE_AUTOPILOT !== "child") markIdle(config2.repoPath);
       return reason ? { decision: "block", reason } : null;
     }
     // The human is already talking to the agent; ride along rather than interrupt.
     case "UserPromptSubmit":
     case "SessionStart": {
+      if (event === "UserPromptSubmit" && process.env.SESSION_SHARE_AUTOPILOT !== "child") {
+        const config2 = readConfig(input.cwd ?? process.cwd());
+        if (config2) markBusy(config2.repoPath);
+      }
       const additionalContext = await collectRoom(input);
       return additionalContext ? { hookSpecificOutput: { hookEventName: event, additionalContext } } : null;
     }
@@ -15700,6 +15865,7 @@ if (isEntrypoint) {
   process.exit(0);
 }
 export {
+  canonical,
   collectRoom,
   decide,
   extractPaths,

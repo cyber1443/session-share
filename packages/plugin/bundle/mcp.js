@@ -2989,7 +2989,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve4.call(this, root, ref);
+      let _sch = resolve5.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3016,7 +3016,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve4(root, ref) {
+    function resolve5(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3647,7 +3647,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve4(baseURI, relativeURI, options) {
+    function resolve5(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
       const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
@@ -3658,49 +3658,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative, options, skipNormalization) {
+    function resolveComponent(base, relative2, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse3(serialize(base, options), options);
-        relative = parse3(serialize(relative, options), options);
+        relative2 = parse3(serialize(relative2, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative.scheme) {
-        target.scheme = relative.scheme;
-        target.userinfo = relative.userinfo;
-        target.host = relative.host;
-        target.port = relative.port;
-        target.path = removeDotSegments(relative.path || "");
-        target.query = relative.query;
+      if (!options.tolerant && relative2.scheme) {
+        target.scheme = relative2.scheme;
+        target.userinfo = relative2.userinfo;
+        target.host = relative2.host;
+        target.port = relative2.port;
+        target.path = removeDotSegments(relative2.path || "");
+        target.query = relative2.query;
       } else {
-        if (relative.userinfo !== void 0 || relative.host !== void 0 || relative.port !== void 0) {
-          target.userinfo = relative.userinfo;
-          target.host = relative.host;
-          target.port = relative.port;
-          target.path = removeDotSegments(relative.path || "");
-          target.query = relative.query;
+        if (relative2.userinfo !== void 0 || relative2.host !== void 0 || relative2.port !== void 0) {
+          target.userinfo = relative2.userinfo;
+          target.host = relative2.host;
+          target.port = relative2.port;
+          target.path = removeDotSegments(relative2.path || "");
+          target.query = relative2.query;
         } else {
-          if (!relative.path) {
+          if (!relative2.path) {
             target.path = base.path;
-            if (relative.query !== void 0) {
-              target.query = relative.query;
+            if (relative2.query !== void 0) {
+              target.query = relative2.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative.path[0] === "/") {
-              target.path = removeDotSegments(relative.path);
+            if (relative2.path[0] === "/") {
+              target.path = removeDotSegments(relative2.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative.path;
+                target.path = "/" + relative2.path;
               } else if (!base.path) {
-                target.path = relative.path;
+                target.path = relative2.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative2.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative.query;
+            target.query = relative2.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -3708,7 +3708,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative.fragment;
+      target.fragment = relative2.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -3931,7 +3931,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve4,
+      resolve: resolve5,
       resolveComponent,
       equal,
       serialize,
@@ -6921,7 +6921,8 @@ var require_dist = __commonJS({
 });
 
 // packages/plugin/src/mcp.ts
-import { basename, resolve as resolve3 } from "node:path";
+import { createHash as createHash3 } from "node:crypto";
+import { basename, resolve as resolve4 } from "node:path";
 
 // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v3/helpers/util.js
 var util;
@@ -28881,7 +28882,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve4) => setTimeout(resolve4, pollInterval));
+        await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error51) {
@@ -28898,7 +28899,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve5, reject) => {
       const earlyReject = (error51) => {
         reject(error51);
       };
@@ -28976,7 +28977,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve4(parseResult.data);
+            resolve5(parseResult.data);
           }
         } catch (error51) {
           reject(error51);
@@ -29237,12 +29238,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve5, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve4, interval);
+      const timeoutId = setTimeout(resolve5, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -30333,7 +30334,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve4) => setTimeout(resolve4, pollInterval));
+      await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -30997,12 +30998,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve4) => {
+    return new Promise((resolve5) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve4();
+        resolve5();
       } else {
-        this._stdout.once("drain", resolve4);
+        this._stdout.once("drain", resolve5);
       }
     });
   }
@@ -31067,6 +31068,12 @@ var Participant = external_exports.object({
    * that join.
    */
   repoPath: external_exports.string().min(1).nullable(),
+  /**
+   * Which machine that checkout is on. The same absolute path on two laptops is
+   * two working trees, not one, so the path alone cannot say whether two agents
+   * would collide. Absent on records written before it existed.
+   */
+  machineId: external_exports.string().min(1).nullish(),
   connected: external_exports.boolean(),
   activity: ParticipantActivity,
   joinedAt: Timestamp
@@ -31178,10 +31185,19 @@ var Decomposition = external_exports.object({
    * final arrangement into tasks.
    */
   assignments: external_exports.array(Assignment).default([]),
+  /**
+   * The commit this split's contract landed in, once it has. Per split rather
+   * than per session: every ticket brings its own seam, and a second ticket's
+   * tasks are not claimable just because somebody else's contract is on the
+   * branch -- the files they import would not be there.
+   */
+  contractCommit: external_exports.string().nullable().default(null),
   createdAt: Timestamp
 });
 var ValidationCode = external_exports.enum([
   "overlapping_paths",
+  "duplicate_task_id",
+  "task_id_taken",
   "dependency_cycle",
   "unknown_dependency",
   "missing_acceptance",
@@ -31266,6 +31282,12 @@ var HandoffRequest = external_exports.object({
   requesterId: ParticipantId,
   holderId: ParticipantId,
   heldByTaskId: TaskId,
+  /**
+   * The task the requester was holding when they asked. A grant opens a path
+   * for that piece of work, not for the person forever after: it lapses when
+   * either lease goes. Null in requests logged before this was recorded.
+   */
+  requesterTaskId: TaskId.nullable().default(null),
   reason: external_exports.string().max(280),
   status: HandoffStatus,
   createdAt: Timestamp
@@ -31313,8 +31335,22 @@ var SessionSnapshot = external_exports.object({
   session: Session,
   participants: external_exports.array(Participant),
   tickets: external_exports.array(Ticket).default([]),
+  /**
+   * One split, for clients written when a session had only one. With several
+   * tickets this is the split most likely to be acted on next: the newest one
+   * approved but not yet landed, or failing that the newest proposal. Anything
+   * that knows which ticket it means should read `decompositions` instead.
+   */
   decomposition: Decomposition.nullable(),
   validation: ValidationReport.nullable(),
+  /**
+   * Every split still worth knowing about, keyed by its id: each ticket's
+   * current one (`ticket.decompositionId`), its newest proposal even when that
+   * failed validation -- the repair round needs to see what was wrong -- and
+   * any that were approved, whose contract files stay frozen.
+   */
+  decompositions: external_exports.record(external_exports.string(), Decomposition).default({}),
+  validations: external_exports.record(external_exports.string(), ValidationReport).default({}),
   tasks: external_exports.array(Task),
   leases: external_exports.array(Lease),
   handoffs: external_exports.array(HandoffRequest),
@@ -31325,6 +31361,7 @@ var SessionSnapshot = external_exports.object({
 });
 
 // packages/protocol/dist/events.js
+var SplitRef = DecompositionId.nullable().default(null);
 var EventBody = external_exports.discriminatedUnion("type", [
   // -- session lifecycle ----------------------------------------------------
   external_exports.object({ type: external_exports.literal("session.created"), session: Session }),
@@ -31347,7 +31384,8 @@ var EventBody = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("participant.attached"),
     participantId: ParticipantId,
-    repoPath: external_exports.string().min(1)
+    repoPath: external_exports.string().min(1),
+    machineId: external_exports.string().min(1).nullish()
   }),
   // -- tickets --------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("ticket.created"), ticket: Ticket }),
@@ -31384,6 +31422,7 @@ var EventBody = external_exports.discriminatedUnion("type", [
   }),
   external_exports.object({
     type: external_exports.literal("decomposition.approval"),
+    decompositionId: SplitRef,
     participantId: ParticipantId,
     approvals: external_exports.array(ParticipantId),
     /** True once the approval rule is satisfied: unanimous at <=3, lead above. */
@@ -31396,15 +31435,22 @@ var EventBody = external_exports.discriminatedUnion("type", [
    */
   external_exports.object({
     type: external_exports.literal("decomposition.assigned"),
+    decompositionId: SplitRef,
     assignments: external_exports.array(Assignment)
   }),
   external_exports.object({
     type: external_exports.literal("decomposition.rejected"),
+    decompositionId: SplitRef,
     participantId: ParticipantId,
     reason: external_exports.string().max(500)
   }),
   external_exports.object({
     type: external_exports.literal("contract.committed"),
+    /**
+     * The split whose contract this is. Left out by logs from before each
+     * ticket landed its own seam, when one landing made everything claimable.
+     */
+    decompositionId: SplitRef,
     branch: external_exports.string().min(1),
     commitSha: external_exports.string().min(1),
     prNumber: external_exports.number().int().nullable()
@@ -31501,8 +31547,8 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     /** Either works; the plugin has the slug, the board has the id. */
     sessionRef: external_exports.string().min(1),
     /**
-     * Only used when the caller is unauthenticated. An authenticated join takes
-     * its identity from the credential, so the board sends neither.
+     * Ignored. Identity always comes from the credential the caller presented;
+     * kept so older clients that still send it are not rejected.
      */
     githubLogin: external_exports.string().min(1).nullish().default(null),
     displayName: external_exports.string().min(1).nullish().default(null),
@@ -31511,6 +31557,12 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
      * checkout. Rejected if another connected participant reports the same path.
      */
     repoPath: external_exports.string().min(1).nullable().default(null),
+    /**
+     * Which machine `repoPath` is on. A checkout is a path on a machine, and
+     * each checkout is its own participant -- that is what gives two clones of
+     * one person separate leases.
+     */
+    machineId: external_exports.string().min(1).nullable().default(null),
     /** Replay from here instead of receiving a full snapshot. */
     fromSeq: Seq.nullable().default(null)
   }),
@@ -31591,11 +31643,24 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     type: external_exports.literal("contract.committed"),
     branch: external_exports.string().min(1),
     commitSha: external_exports.string().min(1),
-    prNumber: external_exports.number().int().nullable().default(null)
+    prNumber: external_exports.number().int().nullable().default(null),
+    /**
+     * Whose contract this is. Left out, the server takes the split the snapshot
+     * offers as `decomposition` -- the newest one approved and not yet landed --
+     * which is the one a client that does not know about tickets just wrote.
+     */
+    ticketId: TicketId.nullish()
   }),
   /** Omit taskId to be handed the best ready task by affinity. */
   external_exports.object({ type: external_exports.literal("task.claim"), taskId: TaskId.nullable().default(null) }),
   external_exports.object({ type: external_exports.literal("task.release"), taskId: TaskId }),
+  /**
+   * Take a task back from someone who has gone. Only while the holder has not
+   * been heard from for a while, and only by the lead or someone on the
+   * ticket -- otherwise a laptop closing mid-task strands its files behind a
+   * lease nobody can lift.
+   */
+  external_exports.object({ type: external_exports.literal("task.forceRelease"), taskId: TaskId }),
   external_exports.object({
     type: external_exports.literal("task.progress"),
     taskId: TaskId,
@@ -31639,7 +31704,13 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     type: external_exports.literal("chat.read"),
     limit: external_exports.number().int().min(1).max(200).default(50),
     beforeSeq: Seq.nullable().default(null),
-    taskRef: TaskId.nullable().default(null)
+    taskRef: TaskId.nullable().default(null),
+    /**
+     * Only messages posted after this one, oldest first. This is how an inbox
+     * pages through the room in the server's own order, rather than comparing
+     * its clock to the server's.
+     */
+    afterId: MessageId.nullable().default(null)
   }),
   /**
    * Tokens this participant's own account spent since the last report. Sent by
@@ -31783,6 +31854,102 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
   external_exports.object({ kind: external_exports.literal("pong"), ts: external_exports.number() })
 ]);
 
+// packages/protocol/dist/glob.js
+function expandBraces(pattern) {
+  const open = pattern.indexOf("{");
+  if (open === -1)
+    return [pattern];
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "{")
+      depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  if (close === -1)
+    return [pattern];
+  const head = pattern.slice(0, open);
+  const tail = pattern.slice(close + 1);
+  const alternatives = [];
+  let current = "";
+  let innerDepth = 0;
+  for (const ch of pattern.slice(open + 1, close)) {
+    if (ch === "{")
+      innerDepth++;
+    if (ch === "}")
+      innerDepth--;
+    if (ch === "," && innerDepth === 0) {
+      alternatives.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  alternatives.push(current);
+  return alternatives.flatMap((alt) => expandBraces(`${head}${alt}${tail}`));
+}
+function normalizeGlob(pattern) {
+  return pattern.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+}
+function toSegments(pattern) {
+  const normalized = normalizeGlob(pattern);
+  const segments = normalized.split("/").filter((s) => s.length > 0);
+  const last = segments[segments.length - 1];
+  if (last !== void 0 && !/[*?.]/.test(last))
+    segments.push("**");
+  return segments;
+}
+function foldCase(pattern) {
+  return pattern.toLowerCase();
+}
+function pathMatchesAny(filePath, patterns) {
+  const target = resolveDots(normalizeGlob(foldCase(filePath)).split("/").filter((s) => s.length > 0));
+  return patterns.some((pattern) => expandBraces(foldCase(pattern)).some((variant) => pathMatchesSegments(target, toSegments(variant))));
+}
+function pathMatchesSegments(path, pattern) {
+  const walk = (i, j) => {
+    if (j >= pattern.length)
+      return i >= path.length;
+    const head = pattern[j];
+    if (head === "**") {
+      for (let k = i; k <= path.length; k++)
+        if (walk(k, j + 1))
+          return true;
+      return false;
+    }
+    if (i >= path.length)
+      return false;
+    return matchesSegment(path[i], head) && walk(i + 1, j + 1);
+  };
+  return walk(0, 0);
+}
+function matchesSegment(name, pattern) {
+  if (pattern === "*")
+    return true;
+  const regex = new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+  return regex.test(name);
+}
+function resolveDots(segments) {
+  const resolved = [];
+  for (const segment of segments) {
+    if (segment === ".")
+      continue;
+    if (segment === ".." && resolved.length > 0 && resolved[resolved.length - 1] !== "..") {
+      resolved.pop();
+      continue;
+    }
+    resolved.push(segment);
+  }
+  return resolved;
+}
+
 // packages/protocol/dist/invite.js
 var INVITE_PREFIX = "ssx_";
 function packInvite(invite) {
@@ -31835,6 +32002,268 @@ function base64UrlDecode(value) {
   return new TextDecoder().decode(Uint8Array.from(atob(padded), (c) => c.charCodeAt(0)));
 }
 
+// packages/plugin/src/daemon.ts
+import { spawn } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { networkInterfaces } from "node:os";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+var STATE_DIR = process.env.SESSION_SHARE_HOME ?? join(homedir(), ".session-share");
+var DAEMON_FILE = join(STATE_DIR, "daemon.json");
+var SECRET_FILE = join(STATE_DIR, "secret");
+var MACHINE_FILE = join(STATE_DIR, "machine-id");
+var DB_FILE = join(STATE_DIR, "sessions.db");
+var LOG_FILE = join(STATE_DIR, "server.log");
+var DEFAULT_PORT = Number(process.env.SESSION_SHARE_PORT ?? 4310);
+function ensureStateDir() {
+  mkdirSync(STATE_DIR, { recursive: true });
+}
+function hostSecret() {
+  return readOrCreate(SECRET_FILE, () => randomBytes(32).toString("hex"), 384);
+}
+function readOrCreate(path, make, mode) {
+  ensureStateDir();
+  if (!existsSync(path)) {
+    try {
+      writeFileSync(path, `${make()}
+`, { mode, flag: "wx" });
+    } catch (error51) {
+      if (error51.code !== "EEXIST") throw error51;
+    }
+  }
+  return readFileSync(path, "utf8").trim();
+}
+function machineId() {
+  return readOrCreate(MACHINE_FILE, () => randomUUID(), 420);
+}
+var HOST_HEADER = "x-session-share-host";
+function hostKey() {
+  return createHmac("sha256", hostSecret()).update("session-share/host-key").digest("hex");
+}
+function expectedServerId() {
+  return createHmac("sha256", hostSecret()).update("session-share/server-id").digest("hex").slice(0, 16);
+}
+function readDaemon() {
+  if (!existsSync(DAEMON_FILE)) return null;
+  try {
+    const info = JSON.parse(readFileSync(DAEMON_FILE, "utf8"));
+    return { ...info, expose: info.expose ?? (isLoopbackUrl(info.url) ? "loopback" : "lan") };
+  } catch {
+    return null;
+  }
+}
+function writeDaemon(info) {
+  ensureStateDir();
+  writeFileSync(DAEMON_FILE, `${JSON.stringify(info, null, 2)}
+`);
+}
+function expectedBuild() {
+  let entry;
+  try {
+    entry = serverEntrypoint();
+  } catch {
+    return "unknown";
+  }
+  const hash2 = createHash("sha256");
+  try {
+    const dir = dirname(entry);
+    for (const name of readdirSync(dir).filter((file2) => file2.endsWith(".js")).sort()) {
+      const path = join(dir, name);
+      if (!statSync(path).isFile()) continue;
+      hash2.update(name);
+      hash2.update(readFileSync(path));
+    }
+  } catch {
+    return "unknown";
+  }
+  return hash2.digest("hex").slice(0, 12);
+}
+async function probe(url2, timeoutMs = 1500) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(new URL("/healthz", url2), { signal: controller.signal });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function isHealthy(url2, timeoutMs = 1200) {
+  return await probe(url2, timeoutMs) !== null;
+}
+var SKIP_INTERFACE = /^(utun|awdl|llw|bridge|br-|vmnet|docker|veth|virbr|tun|tap|wg|tailscale|zt|ap\d)/i;
+var PRIVATE_LAN = /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/;
+var TAILSCALE = /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./;
+function lanAddress(interfaces = networkInterfaces()) {
+  const real = [];
+  const overlay = [];
+  for (const [name, addresses] of Object.entries(interfaces)) {
+    for (const address of addresses ?? []) {
+      if (address.family !== "IPv4" || address.internal) continue;
+      if (TAILSCALE.test(address.address)) overlay.push(address.address);
+      else if (!SKIP_INTERFACE.test(name)) real.push(address.address);
+    }
+  }
+  return real.find((address) => PRIVATE_LAN.test(address)) ?? real[0] ?? overlay[0] ?? null;
+}
+function publicUrlOverride(given) {
+  const value = (given ?? process.env.SESSION_SHARE_PUBLIC_URL ?? "").trim();
+  if (!value) return null;
+  try {
+    const url2 = new URL(value);
+    if (url2.protocol !== "http:" && url2.protocol !== "https:") throw new Error("not http");
+    return url2.origin;
+  } catch {
+    throw new Error(`"${value}" is not an http(s) URL, so it cannot be put in an invite.`);
+  }
+}
+function serverEntrypoint() {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    process.env.SESSION_SHARE_SERVER_ENTRY,
+    // Installed plugin: this file is bundle/mcp.js, the server is bundle/server.
+    resolve(here, "server/index.js"),
+    // Unbundled build inside the plugin directory.
+    resolve(here, "../server/index.js"),
+    // In the monorepo: packages/plugin/dist -> packages/server/dist.
+    resolve(here, "../../server/dist/index.js")
+  ].filter((value) => Boolean(value));
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found) {
+    throw new Error(
+      `Could not find the coordination server. Looked in:
+${candidates.join("\n")}
+Build it with: pnpm build`
+    );
+  }
+  return found;
+}
+async function ensureDaemon(options = {}) {
+  const port = options.port ?? DEFAULT_PORT;
+  const expose = options.expose ?? "lan";
+  const mine = expectedServerId();
+  const wanted = expectedBuild();
+  const existing = readDaemon();
+  for (const candidate of new Set([existing?.port, port].filter((p) => Boolean(p)))) {
+    const health = await probe(`http://127.0.0.1:${candidate}`);
+    if (!health) continue;
+    if (health.serverId && health.serverId !== mine) {
+      if (candidate !== port) continue;
+      throw new Error(
+        `Port ${port} is already serving a different session-share (id ${health.serverId}).
+It is not this machine's server, so invites from it cannot be redeemed here. Stop it, or pick another port with SESSION_SHARE_PORT.`
+      );
+    }
+    const boundTo = health.host ? health.host === "127.0.0.1" || health.host === "::1" ? "loopback" : "lan" : existing?.port === candidate ? existing.expose : null;
+    if (health.serverId && health.build === wanted && boundTo === expose && candidate === port) {
+      return adopt(port, expose, health, existing);
+    }
+    await stopServerAt(candidate, health);
+  }
+  ensureStateDir();
+  const out = openLog();
+  const child = spawn(process.execPath, [serverEntrypoint()], {
+    detached: true,
+    stdio: ["ignore", out, out],
+    env: {
+      ...process.env,
+      SESSION_SHARE_MODE: "peer",
+      SESSION_SHARE_SECRET: hostSecret(),
+      SESSION_SHARE_DB: DB_FILE,
+      PORT: String(port),
+      HOST: expose === "lan" ? "0.0.0.0" : "127.0.0.1"
+    }
+  });
+  child.unref();
+  const loopback = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 15e3;
+  while (Date.now() < deadline) {
+    const health = await probe(loopback);
+    if (health) {
+      if (health.serverId && health.serverId !== mine) {
+        throw new Error(
+          `Something else took port ${port} while this server was starting (id ${health.serverId}). See ${LOG_FILE}`
+        );
+      }
+      if (health.build !== wanted) {
+        throw new Error(
+          [
+            `Port ${port} is still answered by build ${health.build ?? "unknown"} after a restart; the installed build is ${wanted}.`,
+            `The old server did not stop${health.pid ? ` (pid ${health.pid})` : ""}. Stop it by hand and host again.`,
+            `See ${LOG_FILE}`
+          ].join("\n")
+        );
+      }
+      return adopt(port, expose, health, null);
+    }
+    await sleep(250);
+  }
+  throw new Error(`The coordination server did not come up on port ${port}. See ${LOG_FILE}`);
+}
+function adopt(port, expose, health, existing) {
+  const ip = expose === "lan" ? lanAddress() : null;
+  const info = {
+    port,
+    url: ip ? `http://${ip}:${port}` : `http://127.0.0.1:${port}`,
+    expose,
+    pid: health.pid ?? existing?.pid ?? -1,
+    startedAt: existing?.port === port && existing.pid === health.pid ? existing.startedAt : Date.now()
+  };
+  const same = existing && existing.port === info.port && existing.url === info.url && existing.expose === info.expose && existing.pid === info.pid;
+  if (!same) writeDaemon(info);
+  return same ? existing : info;
+}
+async function waitUntilDown(url2, timeoutMs = 5e3) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!await isHealthy(url2, 500)) return;
+    await sleep(150);
+  }
+}
+async function stopDaemon() {
+  const info = readDaemon();
+  const port = info?.port ?? DEFAULT_PORT;
+  const health = await probe(`http://127.0.0.1:${port}`);
+  let stopped = false;
+  if (health && health.serverId === expectedServerId()) {
+    stopped = await stopServerAt(port, health, info);
+  }
+  forgetDaemon();
+  return stopped ? "stopped" : "not-running";
+}
+async function stopServerAt(port, health, info = readDaemon()) {
+  const pid = health.pid ?? (info?.port === port ? info.pid : null);
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid);
+  } catch {
+    return false;
+  }
+  await waitUntilDown(`http://127.0.0.1:${port}`);
+  return true;
+}
+function forgetDaemon() {
+  rmSync(DAEMON_FILE, { force: true });
+}
+function openLog() {
+  return openSync(LOG_FILE, "a");
+}
+var sleep = (ms) => new Promise((resolve5) => setTimeout(resolve5, ms));
+
 // packages/plugin/src/client.ts
 var CommandError = class extends Error {
   constructor(code, message) {
@@ -31848,7 +32277,8 @@ async function peerJoin(serverUrl, invite, identity, repoPath) {
   const response = await fetch(new URL("/api/peer/join", serverUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ invite, repoPath, ...identity })
+    // The machine makes the checkout: same path, different laptop, different seat.
+    body: JSON.stringify({ invite, repoPath, machineId: repoPath ? machineId() : null, ...identity })
   });
   const payload = await response.json();
   if (!response.ok) {
@@ -31860,7 +32290,7 @@ async function pair(serverUrl, token, repoPath) {
   const response = await fetch(new URL("/api/join", serverUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token, repoPath })
+    body: JSON.stringify({ token, repoPath, machineId: machineId() })
   });
   const payload = await response.json();
   if (!response.ok) throw new CommandError(payload.error ?? "internal", payload.message ?? "join failed");
@@ -31891,8 +32321,9 @@ async function runCommand(config3, command, timeoutMs = 3e3) {
 }
 
 // packages/plugin/src/config.ts
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname2, isAbsolute, join as join2, resolve as resolve2 } from "node:path";
 var SessionConfig = external_exports.object({
   serverUrl: external_exports.string().min(1),
   sessionRef: external_exports.string().min(1),
@@ -31906,13 +32337,13 @@ var SessionConfig = external_exports.object({
   displayName: external_exports.string().min(1),
   repoPath: external_exports.string().min(1)
 });
-var CONFIG_RELATIVE_PATH = join(".session-share", "session.json");
+var CONFIG_RELATIVE_PATH = join2(".session-share", "session.json");
 function findConfigPath(startDir) {
-  let dir = resolve(startDir);
+  let dir = resolve2(startDir);
   for (; ; ) {
-    const candidate = join(dir, CONFIG_RELATIVE_PATH);
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(dir);
+    const candidate = join2(dir, CONFIG_RELATIVE_PATH);
+    if (existsSync2(candidate)) return candidate;
+    const parent = dirname2(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -31921,226 +32352,45 @@ function readConfig(startDir) {
   const path = findConfigPath(startDir);
   if (!path) return null;
   try {
-    return SessionConfig.parse(JSON.parse(readFileSync(path, "utf8")));
+    return SessionConfig.parse(JSON.parse(readFileSync2(path, "utf8")));
   } catch {
     return null;
   }
 }
 function writeConfig(repoPath, config3) {
-  const path = join(repoPath, CONFIG_RELATIVE_PATH);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(config3, null, 2)}
-`);
+  const path = join2(repoPath, CONFIG_RELATIVE_PATH);
+  mkdirSync2(dirname2(path), { recursive: true });
+  writeFileSync2(path, `${JSON.stringify(config3, null, 2)}
+`, { mode: 384 });
+  excludeFromGit(repoPath);
   return path;
 }
-
-// packages/plugin/src/daemon.ts
-import { spawn } from "node:child_process";
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, readdirSync, statSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { createHash, createHmac, randomBytes } from "node:crypto";
-import { networkInterfaces } from "node:os";
-import { homedir } from "node:os";
-import { dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
-import { fileURLToPath } from "node:url";
-var STATE_DIR = process.env.SESSION_SHARE_HOME ?? join2(homedir(), ".session-share");
-var DAEMON_FILE = join2(STATE_DIR, "daemon.json");
-var SECRET_FILE = join2(STATE_DIR, "secret");
-var DB_FILE = join2(STATE_DIR, "sessions.db");
-var LOG_FILE = join2(STATE_DIR, "server.log");
-var DEFAULT_PORT = Number(process.env.SESSION_SHARE_PORT ?? 4310);
-function ensureStateDir() {
-  mkdirSync2(STATE_DIR, { recursive: true });
-}
-function hostSecret() {
-  ensureStateDir();
-  if (existsSync2(SECRET_FILE)) return readFileSync2(SECRET_FILE, "utf8").trim();
-  const secret = randomBytes(32).toString("hex");
-  writeFileSync2(SECRET_FILE, `${secret}
-`, { mode: 384 });
-  return secret;
-}
-function expectedServerId() {
-  return createHmac("sha256", hostSecret()).update("session-share/server-id").digest("hex").slice(0, 16);
-}
-function readDaemon() {
-  if (!existsSync2(DAEMON_FILE)) return null;
+function excludeFromGit(repoPath) {
   try {
-    const info = JSON.parse(readFileSync2(DAEMON_FILE, "utf8"));
-    return { ...info, expose: info.expose ?? (isLoopbackUrl(info.url) ? "loopback" : "lan") };
-  } catch {
-    return null;
-  }
-}
-function writeDaemon(info) {
-  ensureStateDir();
-  writeFileSync2(DAEMON_FILE, `${JSON.stringify(info, null, 2)}
+    const common = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd: repoPath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    const exclude = join2(isAbsolute(common) ? common : join2(repoPath, common), "info", "exclude");
+    const current = existsSync2(exclude) ? readFileSync2(exclude, "utf8") : "";
+    if (current.split("\n").some((line) => line.trim() === ".session-share/")) return;
+    mkdirSync2(dirname2(exclude), { recursive: true });
+    appendFileSync(exclude, `${current && !current.endsWith("\n") ? "\n" : ""}.session-share/
 `);
-}
-function expectedBuild() {
-  let entry;
-  try {
-    entry = serverEntrypoint();
   } catch {
-    return "unknown";
-  }
-  const hash2 = createHash("sha256");
-  try {
-    const dir = dirname2(entry);
-    for (const name of readdirSync(dir).filter((file2) => file2.endsWith(".js")).sort()) {
-      const path = join2(dir, name);
-      if (!statSync(path).isFile()) continue;
-      hash2.update(name);
-      hash2.update(readFileSync2(path));
-    }
-  } catch {
-    return "unknown";
-  }
-  return hash2.digest("hex").slice(0, 12);
-}
-async function probe(url2, timeoutMs = 1500) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(new URL("/healthz", url2), { signal: controller.signal });
-    if (!response.ok) return null;
-    return await response.json();
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
   }
 }
-async function isHealthy(url2, timeoutMs = 1200) {
-  return await probe(url2, timeoutMs) !== null;
-}
-var SKIP_INTERFACE = /^(utun|awdl|llw|bridge|vmnet|docker|veth|tun|tap|ap\d)/i;
-var PRIVATE_LAN = /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/;
-function lanAddress() {
-  const candidates = [];
-  for (const [name, addresses] of Object.entries(networkInterfaces())) {
-    if (SKIP_INTERFACE.test(name)) continue;
-    for (const address of addresses ?? []) {
-      if (address.family !== "IPv4" || address.internal) continue;
-      candidates.push(address.address);
-    }
-  }
-  return candidates.find((address) => PRIVATE_LAN.test(address)) ?? candidates[0] ?? null;
-}
-function serverEntrypoint() {
-  const here = dirname2(fileURLToPath(import.meta.url));
-  const candidates = [
-    process.env.SESSION_SHARE_SERVER_ENTRY,
-    // Installed plugin: this file is bundle/mcp.js, the server is bundle/server.
-    resolve2(here, "server/index.js"),
-    // Unbundled build inside the plugin directory.
-    resolve2(here, "../server/index.js"),
-    // In the monorepo: packages/plugin/dist -> packages/server/dist.
-    resolve2(here, "../../server/dist/index.js")
-  ].filter((value) => Boolean(value));
-  const found = candidates.find((candidate) => existsSync2(candidate));
-  if (!found) {
-    throw new Error(
-      `Could not find the coordination server. Looked in:
-${candidates.join("\n")}
-Build it with: pnpm build`
-    );
-  }
-  return found;
-}
-async function ensureDaemon(options = {}) {
-  const port = options.port ?? DEFAULT_PORT;
-  const expose = options.expose ?? "lan";
-  const mine = expectedServerId();
-  const existing = readDaemon();
-  if (existing) {
-    const health = await probe(`http://127.0.0.1:${existing.port}`);
-    if (health && (!health.serverId || health.serverId === mine)) {
-      const current = health.build === expectedBuild();
-      if (current && health.serverId && existing.expose === expose) return refreshAddress(existing);
-      stopDaemon();
-      await waitUntilDown(`http://127.0.0.1:${existing.port}`);
-    }
-  }
-  const squatter = await probe(`http://127.0.0.1:${port}`);
-  if (squatter && squatter.serverId !== mine) {
-    throw new Error(
-      `Port ${port} is already serving a different session-share (id ${squatter.serverId ?? "unknown"}).
-It is not this machine's server, so invites from it cannot be redeemed here. Stop it, or pick another port with SESSION_SHARE_PORT.`
-    );
-  }
-  ensureStateDir();
-  const out = openLog();
-  const child = spawn(process.execPath, [serverEntrypoint()], {
-    detached: true,
-    stdio: ["ignore", out, out],
-    env: {
-      ...process.env,
-      SESSION_SHARE_MODE: "peer",
-      SESSION_SHARE_SECRET: hostSecret(),
-      SESSION_SHARE_DB: DB_FILE,
-      PORT: String(port),
-      HOST: expose === "lan" ? "0.0.0.0" : "127.0.0.1"
-    }
-  });
-  child.unref();
-  const loopback = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + 15e3;
-  while (Date.now() < deadline) {
-    if (await isHealthy(loopback)) {
-      const ip = expose === "lan" ? lanAddress() : null;
-      const info = {
-        port,
-        url: ip ? `http://${ip}:${port}` : loopback,
-        expose,
-        pid: child.pid ?? -1,
-        startedAt: Date.now()
-      };
-      writeDaemon(info);
-      return info;
-    }
-    await sleep(250);
-  }
-  throw new Error(`The coordination server did not come up on port ${port}. See ${LOG_FILE}`);
-}
-function refreshAddress(info) {
-  if (info.expose !== "lan") return info;
-  const ip = lanAddress();
-  const url2 = ip ? `http://${ip}:${info.port}` : `http://127.0.0.1:${info.port}`;
-  if (url2 === info.url) return info;
-  const updated = { ...info, url: url2 };
-  writeDaemon(updated);
-  return updated;
-}
-async function waitUntilDown(url2, timeoutMs = 5e3) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!await isHealthy(url2, 500)) return;
-    await sleep(150);
-  }
-}
-function stopDaemon() {
-  const info = readDaemon();
-  if (!info) return false;
-  try {
-    process.kill(info.pid);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function openLog() {
-  return openSync(LOG_FILE, "a");
-}
-var sleep = (ms) => new Promise((resolve4) => setTimeout(resolve4, ms));
 
 // packages/plugin/src/inbox.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join3 } from "node:path";
 function stateDir() {
   return process.env.SESSION_SHARE_HOME ?? join3(homedir2(), ".session-share");
 }
 var inboxFile = () => join3(stateDir(), "inbox.json");
+var PAGE = 200;
 function cursorKey(config3) {
   return `${config3.serverUrl}|${config3.sessionRef}|${config3.participantId}`;
 }
@@ -32153,33 +32403,68 @@ function readCursors() {
     return {};
   }
 }
+function readCursor(key) {
+  const value = readCursors()[key];
+  return typeof value === "string" ? value : void 0;
+}
 function writeCursor(key, value) {
   mkdirSync3(stateDir(), { recursive: true });
-  writeFileSync3(inboxFile(), `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
+  const path = inboxFile();
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync3(temporary, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
 `);
+  renameSync(temporary, path);
 }
-function markCaughtUp(config3, at = Date.now()) {
-  writeCursor(cursorKey(config3), at);
+async function markCaughtUp(config3, timeoutMs = 2500) {
+  try {
+    const { latestId } = await runCommand(
+      config3,
+      { type: "chat.read", limit: 1, beforeSeq: null, taskRef: null, afterId: null },
+      timeoutMs
+    );
+    writeCursor(cursorKey(config3), latestId ?? "");
+  } catch {
+  }
+}
+var addressedTo = (config3) => (message) => message.directive && message.authorId !== config3.participantId && (message.mentions.length === 0 || message.mentions.includes(config3.participantId));
+async function readInbox(config3, timeoutMs = 2500) {
+  const key = cursorKey(config3);
+  const from = readCursor(key);
+  if (from === void 0) {
+    await markCaughtUp(config3, timeoutMs);
+    return { messages: [], from: readCursor(key) ?? "", to: readCursor(key) ?? "" };
+  }
+  const deadline = Date.now() + timeoutMs;
+  const messages = [];
+  let cursor = from;
+  for (; ; ) {
+    const remaining = Math.max(deadline - Date.now(), 250);
+    const page = await runCommand(
+      config3,
+      { type: "chat.read", limit: PAGE, beforeSeq: null, taskRef: null, afterId: cursor || null },
+      remaining
+    );
+    if (cursor && !page.cursorFound) {
+      return { messages: [], from, to: page.latestId ?? "" };
+    }
+    if (!cursor) {
+      return { messages: page.messages.filter(addressedTo(config3)), from, to: page.latestId ?? "" };
+    }
+    messages.push(...page.messages.filter(addressedTo(config3)));
+    if (page.messages.length > 0) cursor = page.messages.at(-1).id;
+    if (page.messages.length < PAGE) break;
+  }
+  return { messages, from, to: cursor };
+}
+function acknowledge(config3, inbox) {
+  const key = cursorKey(config3);
+  if ((readCursor(key) ?? "") !== inbox.from) return;
+  if (inbox.to !== inbox.from) writeCursor(key, inbox.to);
 }
 async function pendingDirectives(config3, timeoutMs = 2500, consume = true) {
-  const key = cursorKey(config3);
-  const cursor = readCursors()[key];
-  if (cursor === void 0) {
-    markCaughtUp(config3);
-    return [];
-  }
-  const { messages } = await runCommand(
-    config3,
-    { type: "chat.read", limit: 50, beforeSeq: null, taskRef: null },
-    timeoutMs
-  );
-  const pending = messages.filter(
-    (message) => message.directive && message.createdAt > cursor && message.authorId !== config3.participantId && (message.mentions.length === 0 || message.mentions.includes(config3.participantId))
-  );
-  if (consume && pending.length > 0) {
-    writeCursor(key, Math.max(...pending.map((message) => message.createdAt)));
-  }
-  return pending;
+  const inbox = await readInbox(config3, timeoutMs);
+  if (consume) acknowledge(config3, inbox);
+  return inbox.messages;
 }
 function peekDirectives(config3, timeoutMs = 2e3) {
   return pendingDirectives(config3, timeoutMs, false);
@@ -32206,13 +32491,32 @@ function describeDirectives(messages, names) {
 
 // packages/plugin/src/autopilot.ts
 import { spawn as spawn2 } from "node:child_process";
-import { appendFileSync, mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync5 } from "node:fs";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync6, readFileSync as readFileSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join6 } from "node:path";
+
+// packages/plugin/src/busy.ts
+import { createHash as createHash2 } from "node:crypto";
+import { mkdirSync as mkdirSync4, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join4 } from "node:path";
+var MAX_TURN_MS = 2 * 60 * 60 * 1e3;
+function marker(repoPath) {
+  const home = process.env.SESSION_SHARE_HOME ?? join4(homedir3(), ".session-share");
+  const id = createHash2("sha256").update(repoPath).digest("hex").slice(0, 16);
+  return join4(home, "busy", id);
+}
+function isBusy(repoPath) {
+  try {
+    return Date.now() - statSync2(marker(repoPath)).mtimeMs < MAX_TURN_MS;
+  } catch {
+    return false;
+  }
+}
 
 // packages/plugin/src/preferences.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname3, join as join4 } from "node:path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname3, join as join5 } from "node:path";
 var Preferences = external_exports.object({
   /**
    * explicit: nothing is committed until you run /ss:done.
@@ -32247,7 +32551,7 @@ var Preferences = external_exports.object({
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });
-var PREFERENCES_PATH = join4(STATE_DIR, "preferences.json");
+var PREFERENCES_PATH = join5(STATE_DIR, "preferences.json");
 function readPreferences() {
   if (!existsSync4(PREFERENCES_PATH)) return Preferences.parse({});
   try {
@@ -32258,8 +32562,8 @@ function readPreferences() {
 }
 function writePreferences(update) {
   const merged = Preferences.parse({ ...readPreferences(), ...update });
-  mkdirSync4(dirname3(PREFERENCES_PATH), { recursive: true });
-  writeFileSync4(PREFERENCES_PATH, `${JSON.stringify(merged, null, 2)}
+  mkdirSync5(dirname3(PREFERENCES_PATH), { recursive: true });
+  writeFileSync5(PREFERENCES_PATH, `${JSON.stringify(merged, null, 2)}
 `);
   return merged;
 }
@@ -32280,9 +32584,9 @@ function describePreferences(preferences) {
 var POLL_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_POLL_MS ?? 2e4);
 var IDLE_GRACE_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_GRACE_MS ?? 25e3);
 function stateDir2() {
-  return process.env.SESSION_SHARE_HOME ?? join5(homedir3(), ".session-share");
+  return process.env.SESSION_SHARE_HOME ?? join6(homedir4(), ".session-share");
 }
-var spendFile = () => join5(stateDir2(), "autopilot.json");
+var spendFile = () => join6(stateDir2(), "autopilot.json");
 function readSpend(today) {
   try {
     const spend = JSON.parse(readFileSync5(spendFile(), "utf8"));
@@ -32293,8 +32597,8 @@ function readSpend(today) {
 }
 function addSpend(today, tokens) {
   const spend = readSpend(today);
-  mkdirSync5(stateDir2(), { recursive: true });
-  writeFileSync5(spendFile(), `${JSON.stringify({ day: today, tokens: spend.tokens + tokens })}
+  mkdirSync6(stateDir2(), { recursive: true });
+  writeFileSync6(spendFile(), `${JSON.stringify({ day: today, tokens: spend.tokens + tokens })}
 `);
 }
 function decide(input) {
@@ -32309,32 +32613,82 @@ function decide(input) {
   }
   return { run: true, reason: "work is waiting" };
 }
+var MCP_PREFIXES = ["mcp__plugin_ss_session-share__", "mcp__session-share__"];
+var mcpTools = (...names) => MCP_PREFIXES.flatMap((prefix) => names.map((name) => `${prefix}${name}`));
 var PLANNING_TOOLS = [
   "Read",
   "Grep",
   "Glob",
-  "mcp__session-share__ss_propose",
-  "mcp__session-share__ss_tickets",
-  "mcp__session-share__ss_get_contract",
-  "mcp__session-share__ss_chat_post"
+  ...mcpTools("ss_propose", "ss_tickets", "ss_get_contract", "ss_chat_post", "ss_chat_read", "ss_status")
+];
+var BUILDING_TOOLS = [
+  "Read",
+  "Grep",
+  "Glob",
+  "Edit",
+  "Write",
+  "MultiEdit",
+  "NotebookEdit",
+  "Bash",
+  ...mcpTools(
+    "ss_claim",
+    "ss_start_task",
+    "ss_get_my_task",
+    "ss_get_contract",
+    "ss_report_progress",
+    "ss_report_test",
+    "ss_check_lease",
+    "ss_request_handoff",
+    "ss_release",
+    "ss_done",
+    "ss_sync",
+    "ss_land_contract",
+    "ss_propose",
+    "ss_tickets",
+    "ss_status",
+    "ss_chat_post",
+    "ss_chat_read",
+    "ss_inbox",
+    "ss_ticket_verified",
+    "ss_ticket_shipped",
+    "ss_ship"
+  )
 ];
 var isPlanning = (messages) => messages.every((message) => /ss_propose|Split the ticket/.test(message.body));
 var running = false;
+var firstSeen = /* @__PURE__ */ new Map();
 var failedUntil = 0;
 var FAILURE_BACKOFF_MS = 5 * 60 * 1e3;
-var logFile = () => join5(stateDir2(), "autopilot.log");
+var logFile = () => join6(stateDir2(), "autopilot.log");
 function log(line) {
   try {
-    mkdirSync5(stateDir2(), { recursive: true });
-    appendFileSync(logFile(), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
+    mkdirSync6(stateDir2(), { recursive: true });
+    appendFileSync2(logFile(), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
   } catch {
   }
 }
+function readOutcome(stdout) {
+  const line = stdout.trim().split("\n").at(-1) ?? "";
+  try {
+    const result = JSON.parse(line);
+    const denied = (result.permission_denials ?? []).map((denial) => denial.tool_name ?? "a tool");
+    if (result.is_error || result.subtype && result.subtype !== "success") {
+      return { ok: false, detail: `the run ended with ${result.subtype ?? "an error"}: ${(result.result ?? "").slice(0, 200)}` };
+    }
+    if (denied.length > 0) {
+      return { ok: false, detail: `it was not allowed to use ${[...new Set(denied)].join(", ")}` };
+    }
+    return { ok: true, detail: (result.result ?? "").slice(0, 300) };
+  } catch {
+    return { ok: false, detail: "it did not report a result" };
+  }
+}
 function runHeadless(config3, prompt, planningOnly, command = "claude") {
-  return new Promise((resolve4) => {
-    const args = ["-p", prompt, "--add-dir", config3.repoPath];
+  return new Promise((resolve5) => {
+    const args = ["-p", prompt, "--add-dir", config3.repoPath, "--output-format", "json"];
     if (planningOnly) args.push("--allowedTools", ...PLANNING_TOOLS);
+    else args.push("--permission-mode", "acceptEdits", "--allowedTools", ...BUILDING_TOOLS);
     const child = spawn2(command, args, {
       cwd: config3.repoPath,
       stdio: ["ignore", "pipe", "pipe"],
@@ -32345,22 +32699,27 @@ function runHeadless(config3, prompt, planningOnly, command = "claude") {
       }
     });
     let tail = "";
+    let stdout = "";
     const keep = (chunk) => {
       tail = `${tail}${chunk}`.slice(-2e3);
     };
-    child.stdout.on("data", keep);
+    child.stdout.on("data", (chunk) => {
+      stdout = `${stdout}${chunk}`.slice(-1e6);
+    });
     child.stderr.on("data", keep);
     child.on("error", (error51) => {
       log(`spawn failed: ${error51.message}`);
-      resolve4({ ok: false, code: null, detail: error51.message });
+      resolve5({ ok: false, code: null, detail: error51.message });
     });
     child.on("close", (code) => {
+      const outcome = readOutcome(stdout);
       log(`exit ${code}
+${outcome.detail}
 ${tail}`);
-      resolve4({
-        ok: code === 0,
+      resolve5({
+        ok: code === 0 && outcome.ok,
         code,
-        detail: tail.trim().split("\n").slice(-3).join(" ").slice(0, 300)
+        detail: (outcome.ok ? "" : outcome.detail) || tail.trim().split("\n").slice(-3).join(" ").slice(0, 300)
       });
     });
   });
@@ -32370,12 +32729,13 @@ async function tickOnce(options = {}) {
   if (!config3) return { ran: false, ok: false, reason: "this checkout is not in a session" };
   const preferences = readPreferences();
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  let waiting;
+  let inbox;
   try {
-    waiting = await peekDirectives(config3);
+    inbox = await readInbox(config3, 2e3);
   } catch {
     return { ran: false, ok: false, reason: "the server did not answer" };
   }
+  const waiting = inbox.messages;
   const planningOnly = waiting.length > 0 && isPlanning(waiting);
   const verdict = decide({
     preferences,
@@ -32385,8 +32745,13 @@ async function tickOnce(options = {}) {
     spentToday: readSpend(today).tokens
   });
   if (!verdict.run) return { ran: false, ok: false, reason: verdict.reason };
-  const oldest = Math.min(...waiting.map((message) => message.createdAt));
-  if (Date.now() - oldest < (options.graceMs ?? IDLE_GRACE_MS)) {
+  if (isBusy(config3.repoPath)) {
+    return { ran: false, ok: false, reason: "the interactive session is mid-turn" };
+  }
+  const now = Date.now();
+  for (const message of waiting) if (!firstSeen.has(message.id)) firstSeen.set(message.id, now);
+  const oldest = Math.min(...waiting.map((message) => firstSeen.get(message.id)));
+  if (now - oldest < (options.graceMs ?? IDLE_GRACE_MS)) {
     return { ran: false, ok: false, reason: "the interactive session may still take it" };
   }
   running = true;
@@ -32405,7 +32770,8 @@ async function tickOnce(options = {}) {
       );
       return { ran: true, ok: false, reason: result.detail || `exit ${result.code}` };
     }
-    markCaughtUp(config3, Math.max(...waiting.map((message) => message.createdAt)));
+    acknowledge(config3, inbox);
+    for (const message of waiting) firstSeen.delete(message.id);
     addSpend(today, 2e4);
     await say(config3, `Ran that headlessly -- nobody was at the keyboard. ${waiting.length} instruction(s).`);
     return { ran: true, ok: true, reason: "done" };
@@ -32450,8 +32816,8 @@ function boardUrl(serverUrl, packedInvite, as) {
 
 // packages/plugin/src/git.ts
 import { execFile } from "node:child_process";
-import { existsSync as existsSync6, mkdirSync as mkdirSync6, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname4, join as join6 } from "node:path";
+import { existsSync as existsSync6, mkdirSync as mkdirSync7, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname4, isAbsolute as isAbsolute2, relative, resolve as resolve3 } from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
 var GitError = class extends Error {
@@ -32470,11 +32836,13 @@ async function git(cwd, args) {
     return stdout.trim();
   } catch (error51) {
     const failure = error51;
-    throw new GitError(
-      `git ${args[0]} failed: ${(failure.stderr ?? failure.message ?? "").trim().split("\n")[0]}`,
-      failure.stderr ?? ""
-    );
+    throw new GitError(`git ${args[0]} failed: ${summarize(failure.stderr ?? failure.message ?? "")}`, failure.stderr ?? "");
   }
+}
+function summarize(stderr) {
+  const lines = stderr.split("\n").map((line) => line.trim()).filter((line) => line.length > 0 && !/^(To |From |hint:)/.test(line));
+  const telling = lines.find((line) => /^(error|fatal|!|CONFLICT)/.test(line));
+  return telling ?? lines[0] ?? "no output";
 }
 async function hasRemote(cwd) {
   try {
@@ -32483,6 +32851,9 @@ async function hasRemote(cwd) {
   } catch {
     return false;
   }
+}
+async function currentBranch(cwd) {
+  return git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
 }
 async function dirtyFiles(cwd) {
   const output = await git(cwd, ["status", "--porcelain"]);
@@ -32510,6 +32881,7 @@ async function fetch2(cwd) {
 async function checkoutBranch(cwd, branch, from) {
   if (await branchExists(cwd, branch)) {
     await git(cwd, ["checkout", branch]);
+    await fastForward(cwd, branch);
     return "switched";
   }
   await fetch2(cwd);
@@ -32521,21 +32893,112 @@ async function checkoutBranch(cwd, branch, from) {
   await git(cwd, ["checkout", "-b", branch, base]);
   return "created";
 }
+async function fastForward(cwd, branch) {
+  if (!await hasRemote(cwd)) return;
+  await fetch2(cwd);
+  if (!await remoteRefExists(cwd, branch)) return;
+  try {
+    await git(cwd, ["merge", "--ff-only", `origin/${branch}`]);
+  } catch {
+    throw new GitError(
+      `${branch} has diverged from origin/${branch}. Merge or rebase it by hand, then try again.`,
+      ""
+    );
+  }
+}
+async function remoteRefExists(cwd, branch) {
+  try {
+    await git(cwd, ["rev-parse", "--verify", `refs/remotes/origin/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function updateLocalBranch(cwd, branch) {
+  if (!await hasRemote(cwd)) return "no-remote";
+  await fetch2(cwd);
+  if (!await remoteRefExists(cwd, branch)) return "no-remote";
+  const remote = `origin/${branch}`;
+  if (!await branchExists(cwd, branch)) {
+    await git(cwd, ["branch", branch, remote]);
+    return "updated";
+  }
+  if (await currentBranch(cwd) === branch) {
+    const before = await git(cwd, ["rev-parse", "HEAD"]);
+    try {
+      await git(cwd, ["merge", "--ff-only", remote]);
+    } catch {
+      return "diverged";
+    }
+    return before === await git(cwd, ["rev-parse", "HEAD"]) ? "unchanged" : "updated";
+  }
+  const [local, upstream] = await Promise.all([
+    git(cwd, ["rev-parse", branch]),
+    git(cwd, ["rev-parse", remote])
+  ]);
+  if (local === upstream) return "unchanged";
+  if (await isAncestor(cwd, upstream, local)) return "unchanged";
+  if (!await isAncestor(cwd, local, upstream)) return "diverged";
+  await git(cwd, ["update-ref", `refs/heads/${branch}`, upstream, local]);
+  return "updated";
+}
+async function isAncestor(cwd, ancestor, of) {
+  try {
+    await git(cwd, ["merge-base", "--is-ancestor", ancestor, of]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function insideRepo(cwd, path) {
+  const root = resolve3(cwd);
+  const absolute = resolve3(root, path);
+  const rel = relative(root, absolute);
+  if (isAbsolute2(path) || rel === "" || rel.startsWith("..") || isAbsolute2(rel)) {
+    throw new Error(`Refusing to write "${path}": it is outside the repository.`);
+  }
+  if (rel.split(/[\\/]/)[0] === ".git") throw new Error(`Refusing to write "${path}" inside .git.`);
+  return absolute;
+}
 async function writeFiles(cwd, files) {
+  const targets = files.map((file2) => insideRepo(cwd, file2.path));
   const written = [];
-  for (const file2 of files) {
-    const absolute = join6(cwd, file2.path);
-    mkdirSync6(dirname4(absolute), { recursive: true });
-    writeFileSync6(absolute, file2.contents);
+  for (const [index, file2] of files.entries()) {
+    const absolute = targets[index];
+    mkdirSync7(dirname4(absolute), { recursive: true });
+    writeFileSync7(absolute, file2.contents);
     written.push(file2.path);
   }
   return written;
 }
-async function commit(cwd, paths, message) {
-  await git(cwd, ["add", "--", ...paths]);
-  const staged = await git(cwd, ["diff", "--cached", "--name-only"]);
-  if (!staged) return null;
-  await git(cwd, ["commit", "-m", message]);
+async function changedFiles(cwd) {
+  return (await statusEntries(cwd)).map((entry) => entry.path);
+}
+async function foreignChanges(cwd, patterns, ignore) {
+  return (await statusEntries(cwd)).filter((entry) => entry.status !== "??").map((entry) => entry.path).filter((path) => !pathMatchesAny(path, patterns) && !ignore.some((prefix) => path.startsWith(prefix)));
+}
+async function statusEntries(cwd) {
+  const { stdout } = await run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
+    cwd,
+    timeout: 6e4,
+    maxBuffer: 10 * 1024 * 1024
+  });
+  const entries = stdout.split("\0");
+  const files = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.length < 4) continue;
+    const status = entry.slice(0, 2);
+    files.push({ status, path: entry.slice(3) });
+    if (status[0] === "R" || status[0] === "C") files.push({ status, path: entries[++i] });
+  }
+  return files;
+}
+async function commit(cwd, patterns, message) {
+  const files = (await changedFiles(cwd)).filter((file2) => pathMatchesAny(file2, patterns));
+  if (files.length === 0) return null;
+  await git(cwd, ["add", "-A", "--", ...files]);
+  await git(cwd, ["commit", "--only", "-m", message, "--", ...files]);
   return git(cwd, ["rev-parse", "HEAD"]);
 }
 async function push(cwd, branch) {
@@ -32548,9 +33011,10 @@ async function mergeInto(cwd, into, from) {
   try {
     await git(cwd, ["merge", "--no-ff", from, "-m", `Merge ${from} into ${into}`]);
     return { merged: true, conflicts: [] };
-  } catch {
+  } catch (error51) {
     const conflicts = (await git(cwd, ["diff", "--name-only", "--diff-filter=U"])).split("\n").filter(Boolean);
     await git(cwd, ["merge", "--abort"]).catch(() => void 0);
+    if (conflicts.length === 0) throw error51;
     return { merged: false, conflicts };
   }
 }
@@ -32671,7 +33135,7 @@ async function repoRemote(cwd) {
     return null;
   }
 }
-async function currentBranch(cwd) {
+async function currentBranch2(cwd) {
   try {
     const { stdout } = await run2("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
       cwd,
@@ -32768,8 +33232,10 @@ Stored in ${PREFERENCES_FILE}.${preferences.configured ? "" : "\n\nThese are def
         );
         lines.push(`server url ${config3.serverUrl} \u2014 reachable`);
       } catch (error51) {
+        const message = error51 instanceof Error ? error51.message : String(error51);
+        const status = Number(message.match(/\b(401|403|404)\b/)?.[1] ?? 0);
         lines.push(
-          attached ? `session    attached, but the server did not answer: ${error51 instanceof Error ? error51.message : error51}` : "session    this checkout is not attached \u2014 run /ss:host or /ss:join"
+          !attached ? "session    this checkout is not attached \u2014 run /ss:host or /ss:join" : status === 401 ? "session    attached, but the server does not accept this checkout's token \u2014 it was minted by a different server or a different secret. Join again with a fresh invite" : status === 403 ? "session    attached, but the token is for a different session than the one configured here. Join again with a fresh invite" : status === 404 ? "session    the server answered but has no such session \u2014 it was hosted on another server, or its database was reset. Ask for a fresh invite" : `session    attached, but the server did not answer: ${message}`
         );
       }
       lines.push("");
@@ -32788,9 +33254,14 @@ Stored in ${PREFERENCES_FILE}.${preferences.configured ? "" : "\n\nThese are def
       const root = await ctx.repoRoot();
       const preferences = readPreferences();
       const state = await ctx.snapshot(config3);
-      if (!state.decomposition) throw new Error("There is no decomposition yet. Run /ss:plan first.");
-      if (state.decomposition.status !== "approved") {
-        throw new Error("The split has not been approved yet. Approve it on the board first.");
+      const splits = Object.values(state.decompositions ?? {}).filter(
+        (split) => split.status === "approved" && !split.contractCommit
+      );
+      if (splits.length === 0 && state.decomposition?.status === "approved") splits.push(state.decomposition);
+      if (splits.length === 0) {
+        throw new Error(
+          state.decomposition ? "No approved split is waiting to land. Approve one on the board first." : "There is no decomposition yet. Run /ss:plan first."
+        );
       }
       const dirty = (await dirtyFiles(root)).filter((line) => {
         const path = line.replace(/^\S+\s+/, "");
@@ -32805,15 +33276,14 @@ Commit or stash them first \u2014 landing the contract switches branches.`
         );
       }
       const branch = contractBranch(state.session.slug);
+      const files = splits.flatMap((split) => split.contract.files);
+      const summary = splits.map((split) => split.contract.summary).join("\n\n");
+      for (const file2 of files) insideRepo(root, file2.path);
       await checkoutBranch(root, branch, state.session.repo.baseBranch);
-      const written = await writeFiles(root, state.decomposition.contract.files);
-      const sha = await commit(
-        root,
-        written,
-        `contract: ${state.session.title}
+      const written = await writeFiles(root, files);
+      const sha = await commit(root, written, `contract: ${state.session.title}
 
-${state.decomposition.contract.summary}`
-      );
+${summary}`);
       const pushed = preferences.push ? await push(root, branch) : false;
       let prNumber = null;
       if (preferences.openPullRequests && pushed) {
@@ -32821,21 +33291,24 @@ ${state.decomposition.contract.summary}`
           head: branch,
           base: state.session.repo.baseBranch,
           title: state.session.title,
-          body: `${state.decomposition.contract.summary}
+          body: `${summary}
 
 Tasks land on this branch as they finish.`,
           draft: true
         });
       }
-      await runCommand(config3, {
-        type: "contract.committed",
-        branch,
-        commitSha: sha ?? "unchanged",
-        prNumber
-      });
+      for (const split of splits) {
+        await runCommand(config3, {
+          type: "contract.committed",
+          branch,
+          commitSha: sha ?? "unchanged",
+          prNumber,
+          ticketId: split.ticketId
+        });
+      }
       return ctx.text(
         [
-          `Contract landed on ${branch}.`,
+          `Contract landed on ${branch}${splits.length > 1 ? ` for ${splits.length} tickets` : ""}.`,
           written.length > 0 ? `  ${written.join("\n  ")}` : "  (files already present)",
           "",
           pushed ? "Pushed to origin." : "Not pushed \u2014 your teammate cannot see it yet.",
@@ -32881,6 +33354,7 @@ Tasks land on this branch as they finish.`,
       const task = state.tasks.find((t) => t.id === taskId);
       if (!task) throw new Error(`No task "${taskId}" in this session.`);
       if (task.ownerId !== config3.participantId) throw new Error(`You do not hold "${taskId}".`);
+      if (task.state === "merged") return ctx.text(`"${taskId}" is already merged into the contract.`);
       if (!force && !task.lastTest?.passed) {
         return ctx.text(
           [
@@ -32895,6 +33369,17 @@ Tasks land on this branch as they finish.`,
       }
       const branch = taskBranch(state.session.slug, taskId);
       const contract = contractBranch(state.session.slug);
+      const foreign = await foreignChanges(root, task.ownedPaths, OWN_ARTIFACTS);
+      if (foreign.length > 0) {
+        return ctx.text(
+          [
+            `These changes are outside "${taskId}" and would block switching branches:`,
+            ...foreign.slice(0, 10).map((path) => `  ${path}`),
+            "",
+            "They are not part of this task, so they are not committed with it. Commit them elsewhere, stash them, or unstage them, then finish again."
+          ].join("\n")
+        );
+      }
       await checkoutBranch(root, branch, contract);
       const sha = await commit(root, task.ownedPaths, `${taskId}: ${summary}`);
       const pushed = preferences.push ? await push(root, branch) : false;
@@ -32912,14 +33397,13 @@ Proven by \`${task.acceptance.testCommand}\`.`
           await runCommand(config3, { type: "task.branch", taskId, branch, prNumber });
         }
       }
-      if (preferences.push) {
-        await fetch2(root);
+      if (preferences.push && await updateLocalBranch(root, contract) === "diverged") {
         const caughtUp = await mergeInto(root, contract, `origin/${contract}`);
         if (!caughtUp.merged) {
           await checkoutBranch(root, branch, contract);
           return ctx.text(
             [
-              `${contract} has moved on and cannot be fast-forwarded here:`,
+              `${contract} has moved on and your local copy cannot be merged with it:`,
               ...caughtUp.conflicts.map((path) => `  ${path}`),
               "",
               "Run /ss:sync, resolve that, then finish again."
@@ -32967,12 +33451,17 @@ Proven by \`${task.acceptance.testCommand}\`.`
       const root = await ctx.repoRoot();
       const state = await ctx.snapshot(config3);
       const contract = contractBranch(state.session.slug);
-      if (!await hasRemote(root)) return ctx.text("No origin remote, so there is nothing to sync.");
-      await fetch2(root);
-      const merge2 = await mergeInto(root, contract, `origin/${contract}`);
-      return ctx.text(
-        merge2.merged ? `${contract} is up to date with origin.` : `Could not fast-forward ${contract}: ${merge2.conflicts.join(", ")}`
-      );
+      const outcome = await updateLocalBranch(root, contract);
+      const messages = {
+        "no-remote": `origin has no ${contract} yet (or there is no origin), so there is nothing to sync.`,
+        unchanged: `${contract} is already up to date with origin.`,
+        updated: `${contract} now matches origin.`,
+        diverged: `${contract} has commits origin does not, and origin has commits it does not. Merge origin/${contract} into it by hand.`
+      };
+      const here = await currentBranch(root);
+      const hint = outcome === "updated" && here !== contract ? `
+You are still on ${here}. Run \`git merge ${contract}\` there if you need what landed.` : "";
+      return ctx.text(`${messages[outcome]}${hint}`);
     }
   );
   server.registerTool(
@@ -32998,7 +33487,18 @@ Proven by \`${task.acceptance.testCommand}\`.`
         );
       }
       const contract = contractBranch(state.session.slug);
+      const synced = await updateLocalBranch(root, contract);
+      if (synced === "diverged") {
+        return ctx.text(
+          `${contract} has diverged from origin. Run /ss:sync and merge origin/${contract} into it before shipping.`
+        );
+      }
       if (preferences.push) await push(root, contract);
+      if (!preferences.openPullRequests) {
+        return ctx.text(
+          `Everything is merged into ${contract}. Opening pull requests is off in /ss:setup, so open ${contract} \u2192 ${state.session.repo.baseBranch} yourself.`
+        );
+      }
       const body = [
         state.decomposition?.contract.summary ?? "",
         "",
@@ -33026,7 +33526,8 @@ function slugify2(value) {
 async function createSession(serverUrl, input) {
   const response = await fetch(new URL("/api/sessions", serverUrl), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    // Opening a session is the host's alone; see server/auth.ts hostCredential.
+    headers: { "content-type": "application/json", [HOST_HEADER]: hostKey() },
     body: JSON.stringify(input)
   });
   const payload = await response.json();
@@ -33038,12 +33539,18 @@ async function createSession(serverUrl, input) {
   };
 }
 async function mintInvite(serverUrl, slug) {
-  const response = await fetch(new URL(`/api/sessions/${slug}/invite`, serverUrl), { method: "POST" });
+  const response = await fetch(new URL(`/api/sessions/${slug}/invite`, serverUrl), {
+    method: "POST",
+    headers: { [HOST_HEADER]: hostKey() }
+  });
   const payload = await response.json();
   if (!response.ok || !payload.invite) {
     throw new Error(payload.message ?? payload.error ?? "could not mint an invite");
   }
-  return payload.invite;
+  return { invite: payload.invite, repo: payload.repo ?? null };
+}
+function shortHash(value) {
+  return createHash3("sha256").update(value).digest("hex").slice(0, 6);
 }
 function splitHint(cfg, ticket, plannerId) {
   if (plannerId && plannerId === cfg.participantId) {
@@ -33113,41 +33620,56 @@ function createServer() {
         issueRef: external_exports.string().nullish().describe("Issue URL, if there is one"),
         expose: external_exports.enum(["lan", "loopback"]).nullish().describe(
           "lan lets teammates on the same network connect; loopback is this machine only. Defaults to your saved preference."
+        ),
+        publicUrl: external_exports.string().nullish().describe(
+          "The address teammates should dial when it is not one this machine can see: a tunnel (https://x.trycloudflare.com), a Tailscale name, a port forward. Defaults to SESSION_SHARE_PUBLIC_URL."
         )
       }
     },
-    async ({ title: given, issueRef, expose }) => {
+    async ({ title: given, issueRef, expose, publicUrl: givenPublicUrl }) => {
       const root = await repoRoot(REPO_ROOT);
       const title = given?.trim() || basename(root);
       const identity = await localIdentity();
+      const publicUrl = publicUrlOverride(givenPublicUrl);
       const daemon = await ensureDaemon({ expose: expose ?? readPreferences().expose });
       const loopback = `http://127.0.0.1:${daemon.port}`;
+      const dialUrl = publicUrl ?? daemon.url;
       const remote = await repoRemote(root);
-      const slug = slugify2(title);
-      let created;
-      try {
-        const fresh = await createSession(loopback, {
-          slug,
-          title,
-          repo: {
-            owner: remote?.owner ?? "local",
-            name: remote?.name ?? basename(root),
-            baseBranch: await currentBranch(root),
-            remoteUrl: remote?.remoteUrl ?? root
-          },
-          issueRef: issueRef ?? null
-        });
-        created = { invite: fresh.invite, resumed: false };
-      } catch (error51) {
-        if (!String(error51).includes("is taken")) throw error51;
-        created = { invite: await mintInvite(loopback, slug), resumed: true };
+      const repo = {
+        owner: remote?.owner ?? "local",
+        name: remote?.name ?? basename(root),
+        baseBranch: await currentBranch2(root),
+        remoteUrl: remote?.remoteUrl ?? root
+      };
+      const slug = given?.trim() ? slugify2(title) : remote ? slugify2(`${remote.owner}-${remote.name}`) : `${slugify2(basename(root)).slice(0, 33)}-${shortHash(root)}`;
+      const sameRepo = (stored) => Boolean(stored) && (remote ? stored.owner === repo.owner && stored.name === repo.name : stored.remoteUrl === repo.remoteUrl);
+      const open = async (candidate) => {
+        try {
+          const fresh = await createSession(loopback, {
+            slug: candidate,
+            title,
+            repo,
+            issueRef: issueRef ?? null
+          });
+          return { invite: fresh.invite, resumed: false, slug: candidate };
+        } catch (error51) {
+          if (!String(error51).includes("is taken")) throw error51;
+          const existing = await mintInvite(loopback, candidate);
+          return sameRepo(existing.repo) ? { invite: existing.invite, resumed: true, slug: candidate } : null;
+        }
+      };
+      const created = await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? null;
+      if (!created) {
+        throw new Error(
+          `Sessions named "${slug}" on this server belong to other repositories. Pass a title to name this one.`
+        );
       }
       if (!created.invite) {
         throw new Error("This server verifies identity with GitHub; use the board to invite people.");
       }
       const health = await probe(loopback);
       const packed = packInvite({
-        url: daemon.url,
+        url: dialUrl,
         token: created.invite,
         serverId: health?.serverId ?? null
       });
@@ -33162,10 +33684,10 @@ function createServer() {
         repoPath: root
       };
       writeConfig(root, cfg);
-      markCaughtUp(cfg);
-      const board = boardUrl(daemon.url, packed, joined.githubLogin);
+      await markCaughtUp(cfg);
+      const board = boardUrl(publicUrl ? loopback : daemon.url, packed, joined.githubLogin);
       const opened = readPreferences().openBoard && openInBrowser(board);
-      const loopbackOnly = isLoopbackUrl(daemon.url);
+      const loopbackOnly = isLoopbackUrl(dialUrl);
       return text(
         [
           created.resumed ? `Resumed hosting "${title}" as ${identity.displayName}.` : `Hosting "${title}" as ${identity.displayName}.`,
@@ -33179,7 +33701,7 @@ function createServer() {
             "This invite only works on this machine: the server is bound to loopback,",
             "so the address inside it points at whatever is running on the other person's",
             'own port 4310. Re-run with expose="lan"' + (readPreferences().expose === "lan" ? " -- and check you are on a network, because no LAN address was found." : " to let a teammate on your network in.")
-          ].join("\n") : `Reachable on your network at ${daemon.url}. Anyone who has the invite can join; anyone who does not, cannot.`,
+          ].join("\n") : publicUrl ? `Teammates dial ${publicUrl}. Anyone who has the invite can join; anyone who does not, cannot.` : `Reachable on your network at ${daemon.url}. Anyone who has the invite can join; anyone who does not, cannot.`,
           "",
           `Every edit in ${basename(root)} is now checked against this session's file leases.`
         ].join("\n")
@@ -33192,7 +33714,9 @@ function createServer() {
       description: "Attach this checkout to a session. Accepts an ssx_ invite from a teammate (peer session, no login) or an ssj_ code from a hosted board.",
       inputSchema: {
         code: external_exports.string().describe("The ssx_ invite or ssj_ code you were sent"),
-        serverUrl: external_exports.string().nullish().describe("Only for ssj_ codes on a server that is not the default")
+        serverUrl: external_exports.string().nullish().describe(
+          "For ssj_ codes, the server to redeem at. For ssx_ invites, an address to dial instead of the one inside the invite -- for when the host is behind a tunnel or on Tailscale and the invite names an address you cannot reach."
+        )
       }
     },
     async ({ code, serverUrl }) => {
@@ -33204,10 +33728,11 @@ function createServer() {
           "That looks like an invite but it is damaged -- most likely it was cut short or wrapped when it was copied. Ask for it again, or have the host re-run /ss:host."
         );
       }
-      if (packed) await checkReachable(packed.url, packed.serverId ?? null);
-      const result = packed ? await peerJoin(packed.url, packed.token, await localIdentity(), root) : await pair(serverUrl ?? DEFAULT_SERVER_URL, trimmed, root);
+      const dial = packed ? serverUrl ? publicUrlOverride(serverUrl) : packed.url : null;
+      if (packed) await checkReachable(dial, packed.serverId ?? null);
+      const result = packed ? await peerJoin(dial, packed.token, await localIdentity(), root) : await pair(serverUrl ?? DEFAULT_SERVER_URL, trimmed, root);
       const cfg = {
-        serverUrl: packed?.url ?? serverUrl ?? DEFAULT_SERVER_URL,
+        serverUrl: dial ?? serverUrl ?? DEFAULT_SERVER_URL,
         sessionRef: result.sessionRef,
         participantId: result.participantId,
         participantToken: result.participantToken,
@@ -33216,8 +33741,12 @@ function createServer() {
         repoPath: root
       };
       const path = writeConfig(root, cfg);
-      markCaughtUp(cfg);
-      const board = packed ? boardUrl(packed.url, trimmed, result.githubLogin) : null;
+      await markCaughtUp(cfg);
+      const board = packed ? boardUrl(
+        dial,
+        dial === packed.url ? trimmed : packInvite({ ...packed, url: dial }),
+        result.githubLogin
+      ) : null;
       const opened = Boolean(board) && readPreferences().openBoard && openInBrowser(board);
       return text(
         [
@@ -33268,9 +33797,9 @@ function createServer() {
     async ({ title, issueRef, invite }) => {
       const root = await repoRoot(REPO_ROOT);
       const slug = slugify2(title);
-      const path = resolve3(root, "..", `${basename(root)}-${slug}`);
+      const path = resolve4(root, "..", `${basename(root)}-${slug}`);
       const branch = `ss/${slug}/work`;
-      const created = await addWorktree(root, path, branch, await currentBranch(root));
+      const created = await addWorktree(root, path, branch, await currentBranch2(root));
       return text(
         [
           created === "existing" ? `${path} already exists -- reusing it.` : `Created a worktree at ${path} on ${branch}.`,
@@ -33292,7 +33821,9 @@ function createServer() {
       description: "Stop the coordination server running on this machine. Everyone loses the session until it is started again; the event log survives.",
       inputSchema: {}
     },
-    async () => text(stopDaemon() ? "Stopped." : "Nothing was running.")
+    async () => text(
+      await stopDaemon() === "stopped" ? "Stopped." : "Nothing was running. (Any stale record of one has been cleared.)"
+    )
   );
   server.registerTool(
     "ss_status",
@@ -33329,7 +33860,7 @@ function createServer() {
     async () => {
       const cfg = config2();
       const state = await snapshot(cfg);
-      const mine = state.tasks.find((t) => t.ownerId === cfg.participantId);
+      const mine = state.tasks.find((t) => t.ownerId === cfg.participantId && t.state !== "merged");
       if (!mine) return text("You hold no task. Use ss_claim to take the next ready one.");
       return text({
         id: mine.id,
@@ -33352,10 +33883,13 @@ function createServer() {
     async () => {
       const cfg = config2();
       const state = await snapshot(cfg);
-      if (!state.decomposition) return text("No decomposition yet.");
+      const held = state.tasks.find((t) => t.ownerId === cfg.participantId && t.state !== "merged");
+      const ticket = held?.ticketId ? state.tickets.find((t) => t.id === held.ticketId) : void 0;
+      const split = ticket?.decompositionId && state.decompositions?.[ticket.decompositionId] || state.decomposition;
+      if (!split) return text("No decomposition yet.");
       return text({
-        summary: state.decomposition.contract.summary,
-        files: state.decomposition.contract.files.map((f) => ({
+        summary: split.contract.summary,
+        files: split.contract.files.map((f) => ({
           path: f.path,
           purpose: f.purpose
         }))
@@ -33593,7 +34127,7 @@ function createServer() {
           decompositionId: result.decompositionId,
           maxParallel: result.validation.maxFrontier,
           warnings: result.validation.issues,
-          assigned: (after.decomposition?.assignments ?? []).map((a) => ({
+          assigned: (after.decompositions?.[result.decompositionId]?.assignments ?? after.decomposition?.assignments ?? []).map((a) => ({
             task: a.taskId,
             to: names.get(a.participantId) ?? a.participantId
           })),
@@ -33662,11 +34196,20 @@ function createServer() {
   server.registerTool(
     "ss_release",
     {
-      description: "Give a task back to the ready pool and drop its lease.",
-      inputSchema: { taskId: external_exports.string() }
+      description: "Give a task back to the ready pool and drop its lease. With abandoned: true, take it back from someone else who has gone quiet (not heard from for 10 minutes) -- the lead or anyone on its ticket may do that, so a vanished teammate cannot hold files hostage.",
+      inputSchema: {
+        taskId: external_exports.string(),
+        abandoned: external_exports.boolean().nullish().describe("The task is held by someone else who has disappeared; reclaim it for the pool")
+      }
     },
-    async ({ taskId }) => {
+    async ({ taskId, abandoned }) => {
       const cfg = config2();
+      if (abandoned) {
+        const { holderId } = await runCommand(cfg, { type: "task.forceRelease", taskId });
+        const state = await snapshot(cfg);
+        const holder = state.participants.find((p) => p.id === holderId)?.displayName ?? "its holder";
+        return text(`Took ${taskId} back from ${holder}; it is claimable again and their lease is gone.`);
+      }
       await runCommand(cfg, { type: "task.release", taskId });
       return text(`Released ${taskId}.`);
     }
@@ -33678,7 +34221,7 @@ function createServer() {
       inputSchema: {
         taskId: external_exports.string(),
         activityLine: external_exports.string().max(120),
-        state: external_exports.enum(["claimed", "running", "testing", "pr", "failed"]).nullish().describe("Only when the task actually changes phase")
+        state: external_exports.enum(["claimed", "running", "testing"]).nullish().describe("Only when the task actually changes phase")
       }
     },
     async ({ taskId, activityLine, state }) => {
@@ -33747,6 +34290,11 @@ function createServer() {
         taskId,
         result: { passed, command, exitCode, summary, ranAt: Date.now() }
       });
+      if (passed && readPreferences().commitPolicy === "auto-on-green") {
+        return text(
+          `Recorded. Commits are set to happen on green, so finish it now: call ss_done with taskId "${taskId}" and a one-line summary.`
+        );
+      }
       return text("Recorded.");
     }
   );
@@ -33793,7 +34341,8 @@ function createServer() {
         type: "chat.read",
         limit,
         beforeSeq: null,
-        taskRef: taskRef ?? null
+        taskRef: taskRef ?? null,
+        afterId: null
       });
       return text(
         messages.map(

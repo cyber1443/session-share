@@ -63168,6 +63168,12 @@ var Participant = external_exports.object({
    * that join.
    */
   repoPath: external_exports.string().min(1).nullable(),
+  /**
+   * Which machine that checkout is on. The same absolute path on two laptops is
+   * two working trees, not one, so the path alone cannot say whether two agents
+   * would collide. Absent on records written before it existed.
+   */
+  machineId: external_exports.string().min(1).nullish(),
   connected: external_exports.boolean(),
   activity: ParticipantActivity,
   joinedAt: Timestamp
@@ -63279,10 +63285,19 @@ var Decomposition = external_exports.object({
    * final arrangement into tasks.
    */
   assignments: external_exports.array(Assignment).default([]),
+  /**
+   * The commit this split's contract landed in, once it has. Per split rather
+   * than per session: every ticket brings its own seam, and a second ticket's
+   * tasks are not claimable just because somebody else's contract is on the
+   * branch -- the files they import would not be there.
+   */
+  contractCommit: external_exports.string().nullable().default(null),
   createdAt: Timestamp
 });
 var ValidationCode = external_exports.enum([
   "overlapping_paths",
+  "duplicate_task_id",
+  "task_id_taken",
   "dependency_cycle",
   "unknown_dependency",
   "missing_acceptance",
@@ -63367,6 +63382,12 @@ var HandoffRequest = external_exports.object({
   requesterId: ParticipantId,
   holderId: ParticipantId,
   heldByTaskId: TaskId,
+  /**
+   * The task the requester was holding when they asked. A grant opens a path
+   * for that piece of work, not for the person forever after: it lapses when
+   * either lease goes. Null in requests logged before this was recorded.
+   */
+  requesterTaskId: TaskId.nullable().default(null),
   reason: external_exports.string().max(280),
   status: HandoffStatus,
   createdAt: Timestamp
@@ -63414,8 +63435,22 @@ var SessionSnapshot = external_exports.object({
   session: Session,
   participants: external_exports.array(Participant),
   tickets: external_exports.array(Ticket).default([]),
+  /**
+   * One split, for clients written when a session had only one. With several
+   * tickets this is the split most likely to be acted on next: the newest one
+   * approved but not yet landed, or failing that the newest proposal. Anything
+   * that knows which ticket it means should read `decompositions` instead.
+   */
   decomposition: Decomposition.nullable(),
   validation: ValidationReport.nullable(),
+  /**
+   * Every split still worth knowing about, keyed by its id: each ticket's
+   * current one (`ticket.decompositionId`), its newest proposal even when that
+   * failed validation -- the repair round needs to see what was wrong -- and
+   * any that were approved, whose contract files stay frozen.
+   */
+  decompositions: external_exports.record(external_exports.string(), Decomposition).default({}),
+  validations: external_exports.record(external_exports.string(), ValidationReport).default({}),
   tasks: external_exports.array(Task),
   leases: external_exports.array(Lease),
   handoffs: external_exports.array(HandoffRequest),
@@ -63426,6 +63461,7 @@ var SessionSnapshot = external_exports.object({
 });
 
 // packages/protocol/dist/events.js
+var SplitRef = DecompositionId.nullable().default(null);
 var EventBody = external_exports.discriminatedUnion("type", [
   // -- session lifecycle ----------------------------------------------------
   external_exports.object({ type: external_exports.literal("session.created"), session: Session }),
@@ -63448,7 +63484,8 @@ var EventBody = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("participant.attached"),
     participantId: ParticipantId,
-    repoPath: external_exports.string().min(1)
+    repoPath: external_exports.string().min(1),
+    machineId: external_exports.string().min(1).nullish()
   }),
   // -- tickets --------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("ticket.created"), ticket: Ticket }),
@@ -63485,6 +63522,7 @@ var EventBody = external_exports.discriminatedUnion("type", [
   }),
   external_exports.object({
     type: external_exports.literal("decomposition.approval"),
+    decompositionId: SplitRef,
     participantId: ParticipantId,
     approvals: external_exports.array(ParticipantId),
     /** True once the approval rule is satisfied: unanimous at <=3, lead above. */
@@ -63497,15 +63535,22 @@ var EventBody = external_exports.discriminatedUnion("type", [
    */
   external_exports.object({
     type: external_exports.literal("decomposition.assigned"),
+    decompositionId: SplitRef,
     assignments: external_exports.array(Assignment)
   }),
   external_exports.object({
     type: external_exports.literal("decomposition.rejected"),
+    decompositionId: SplitRef,
     participantId: ParticipantId,
     reason: external_exports.string().max(500)
   }),
   external_exports.object({
     type: external_exports.literal("contract.committed"),
+    /**
+     * The split whose contract this is. Left out by logs from before each
+     * ticket landed its own seam, when one landing made everything claimable.
+     */
+    decompositionId: SplitRef,
     branch: external_exports.string().min(1),
     commitSha: external_exports.string().min(1),
     prNumber: external_exports.number().int().nullable()
@@ -63602,8 +63647,8 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     /** Either works; the plugin has the slug, the board has the id. */
     sessionRef: external_exports.string().min(1),
     /**
-     * Only used when the caller is unauthenticated. An authenticated join takes
-     * its identity from the credential, so the board sends neither.
+     * Ignored. Identity always comes from the credential the caller presented;
+     * kept so older clients that still send it are not rejected.
      */
     githubLogin: external_exports.string().min(1).nullish().default(null),
     displayName: external_exports.string().min(1).nullish().default(null),
@@ -63612,6 +63657,12 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
      * checkout. Rejected if another connected participant reports the same path.
      */
     repoPath: external_exports.string().min(1).nullable().default(null),
+    /**
+     * Which machine `repoPath` is on. A checkout is a path on a machine, and
+     * each checkout is its own participant -- that is what gives two clones of
+     * one person separate leases.
+     */
+    machineId: external_exports.string().min(1).nullable().default(null),
     /** Replay from here instead of receiving a full snapshot. */
     fromSeq: Seq.nullable().default(null)
   }),
@@ -63692,11 +63743,24 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     type: external_exports.literal("contract.committed"),
     branch: external_exports.string().min(1),
     commitSha: external_exports.string().min(1),
-    prNumber: external_exports.number().int().nullable().default(null)
+    prNumber: external_exports.number().int().nullable().default(null),
+    /**
+     * Whose contract this is. Left out, the server takes the split the snapshot
+     * offers as `decomposition` -- the newest one approved and not yet landed --
+     * which is the one a client that does not know about tickets just wrote.
+     */
+    ticketId: TicketId.nullish()
   }),
   /** Omit taskId to be handed the best ready task by affinity. */
   external_exports.object({ type: external_exports.literal("task.claim"), taskId: TaskId.nullable().default(null) }),
   external_exports.object({ type: external_exports.literal("task.release"), taskId: TaskId }),
+  /**
+   * Take a task back from someone who has gone. Only while the holder has not
+   * been heard from for a while, and only by the lead or someone on the
+   * ticket -- otherwise a laptop closing mid-task strands its files behind a
+   * lease nobody can lift.
+   */
+  external_exports.object({ type: external_exports.literal("task.forceRelease"), taskId: TaskId }),
   external_exports.object({
     type: external_exports.literal("task.progress"),
     taskId: TaskId,
@@ -63740,7 +63804,13 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     type: external_exports.literal("chat.read"),
     limit: external_exports.number().int().min(1).max(200).default(50),
     beforeSeq: Seq.nullable().default(null),
-    taskRef: TaskId.nullable().default(null)
+    taskRef: TaskId.nullable().default(null),
+    /**
+     * Only messages posted after this one, oldest first. This is how an inbox
+     * pages through the room in the server's own order, rather than comparing
+     * its clock to the server's.
+     */
+    afterId: MessageId.nullable().default(null)
   }),
   /**
    * Tokens this participant's own account spent since the last report. Sent by
@@ -64016,9 +64086,12 @@ function segmentListsIntersect(a, b) {
   };
   return walk(0, 0);
 }
+function foldCase(pattern) {
+  return pattern.toLowerCase();
+}
 function globsIntersect(a, b) {
-  const aVariants = expandBraces(a).map(toSegments);
-  const bVariants = expandBraces(b).map(toSegments);
+  const aVariants = expandBraces(foldCase(a)).map(toSegments);
+  const bVariants = expandBraces(foldCase(b)).map(toSegments);
   return aVariants.some((av) => bVariants.some((bv) => segmentListsIntersect(av, bv)));
 }
 function globSetsIntersect(a, b) {
@@ -64031,8 +64104,8 @@ function globSetsIntersect(a, b) {
   return null;
 }
 function pathMatchesAny(filePath, patterns) {
-  const target = normalizeGlob(filePath).split("/").filter((s) => s.length > 0);
-  return patterns.some((pattern) => expandBraces(pattern).some((variant) => pathMatchesSegments(target, toSegments(variant))));
+  const target = resolveDots(normalizeGlob(foldCase(filePath)).split("/").filter((s) => s.length > 0));
+  return patterns.some((pattern) => expandBraces(foldCase(pattern)).some((variant) => pathMatchesSegments(target, toSegments(variant))));
 }
 function pathMatchesSegments(path, pattern) {
   const walk = (i, j) => {
@@ -64056,6 +64129,23 @@ function matchesSegment(name, pattern) {
     return true;
   const regex = new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
   return regex.test(name);
+}
+function resolveDots(segments) {
+  const resolved = [];
+  for (const segment of segments) {
+    if (segment === ".")
+      continue;
+    if (segment === ".." && resolved.length > 0 && resolved[resolved.length - 1] !== "..") {
+      resolved.pop();
+      continue;
+    }
+    resolved.push(segment);
+  }
+  return resolved;
+}
+function samePath(a, b) {
+  const canonical = (path) => resolveDots(normalizeGlob(foldCase(path)).split("/").filter((s) => s.length > 0)).join("/");
+  return canonical(a) === canonical(b);
 }
 
 // packages/protocol/dist/validate.js
@@ -64115,6 +64205,22 @@ function validateDecomposition(input) {
   const { contract, tasks, participantCount } = input;
   const issues = [];
   const analysis = analyzeDag(tasks);
+  const seen = /* @__PURE__ */ new Set();
+  const duplicated = /* @__PURE__ */ new Set();
+  for (const task of tasks) {
+    if (seen.has(task.id))
+      duplicated.add(task.id);
+    seen.add(task.id);
+  }
+  for (const id of duplicated) {
+    issues.push({
+      code: "duplicate_task_id",
+      severity: "error",
+      message: `More than one task is called "${id}".`,
+      taskIds: [id],
+      repairHint: `Give each task its own id; rename all but one "${id}" and update any dependsOn that meant it.`
+    });
+  }
   for (const { taskId, missing } of analysis.unknownDeps) {
     issues.push({
       code: "unknown_dependency",
@@ -64150,6 +64256,20 @@ function validateDecomposition(input) {
         repairHint: concurrent ? `Hoist the shared part of "${overlap[0]}" into the contract, or make "${b.id}" depend on "${a.id}" so they are sequential.` : "No action needed; the later task will see the earlier task merged."
       });
     }
+  }
+  for (const file2 of contract.files) {
+    const normalized = normalizeGlob(file2.path);
+    const segments = normalized.split("/");
+    if (!/^[a-zA-Z]:/.test(file2.path) && !normalized.startsWith("/") && !segments.includes("..") && segments[0] !== ".git") {
+      continue;
+    }
+    issues.push({
+      code: "path_escapes_repo",
+      severity: "error",
+      message: `Contract file "${file2.path}" points outside the repository.`,
+      taskIds: [],
+      repairHint: 'Contract files are written on whoever lands the contract; give each a repo-relative path with no leading slash and no "..".'
+    });
   }
   const contractPaths = contract.files.map((f) => normalizeGlob(f.path));
   for (const task of tasks) {
@@ -64282,8 +64402,19 @@ var SessionState = class {
   participants = /* @__PURE__ */ new Map();
   /** Insertion-ordered, which is the order the board's Plan column shows. */
   tickets = /* @__PURE__ */ new Map();
-  decomposition = null;
-  validation = null;
+  /**
+   * Splits, keyed by id, in the order they were proposed.
+   *
+   * This was one session-wide `decomposition`, overwritten by every proposal.
+   * With several tickets that meant starting ticket A seeded whichever split
+   * had arrived last -- quite possibly ticket B's -- and only the newest
+   * contract was ever frozen. Each ticket now points at its own split through
+   * `ticket.decompositionId`, and everything that acts on one looks it up.
+   */
+  decompositions = /* @__PURE__ */ new Map();
+  validations = /* @__PURE__ */ new Map();
+  /** The newest proposal: what an event that names no split has always meant. */
+  latestDecompositionId = null;
   tasks = /* @__PURE__ */ new Map();
   /** Keyed by task: a lease exists exactly as long as its task is held. */
   leases = /* @__PURE__ */ new Map();
@@ -64328,7 +64459,11 @@ var SessionState = class {
       case "participant.attached": {
         const participant = this.participants.get(body.participantId);
         if (participant) {
-          this.participants.set(body.participantId, { ...participant, repoPath: body.repoPath });
+          this.participants.set(body.participantId, {
+            ...participant,
+            repoPath: body.repoPath,
+            machineId: body.machineId ?? participant.machineId ?? null
+          });
         }
         break;
       }
@@ -64373,10 +64508,15 @@ var SessionState = class {
             continue;
           this.tasks.delete(task.id);
           this.leases.delete(task.id);
+          this.expireHandoffs(task.id);
         }
-        if (this.decomposition?.ticketId === body.ticketId) {
-          this.decomposition = null;
-          this.validation = null;
+        for (const split of [...this.decompositions.values()]) {
+          if (split.ticketId !== body.ticketId)
+            continue;
+          this.decompositions.delete(split.id);
+          this.validations.delete(split.id);
+          if (this.latestDecompositionId === split.id)
+            this.latestDecompositionId = null;
         }
         break;
       }
@@ -64385,36 +64525,58 @@ var SessionState = class {
           this.session = { ...this.session, goal: body.goal, issueRef: body.issueRef };
         break;
       case "decomposition.proposed": {
-        this.decomposition = body.decomposition;
-        this.validation = body.validation;
-        const ticket = body.decomposition.ticketId ? this.tickets.get(body.decomposition.ticketId) : null;
-        if (ticket) {
-          this.tickets.set(ticket.id, { ...ticket, decompositionId: body.decomposition.id });
+        const split = {
+          ...body.decomposition,
+          contractCommit: body.decomposition.contractCommit ?? null
+        };
+        this.decompositions.set(split.id, split);
+        this.validations.set(split.id, body.validation);
+        this.latestDecompositionId = split.id;
+        const ticket = split.ticketId ? this.tickets.get(split.ticketId) : null;
+        if (ticket && this.tasksOfTicket(ticket.id).length === 0) {
+          this.tickets.set(ticket.id, {
+            ...ticket,
+            decompositionId: body.validation.ok ? split.id : null
+          });
+        }
+        const current = split.ticketId ? this.tickets.get(split.ticketId)?.decompositionId : null;
+        for (const older of [...this.decompositions.values()]) {
+          if (older.id === split.id || older.id === current)
+            continue;
+          if (older.ticketId !== split.ticketId || older.status === "approved")
+            continue;
+          this.decompositions.delete(older.id);
+          this.validations.delete(older.id);
         }
         break;
       }
       case "decomposition.assigned":
-        if (this.decomposition) {
-          this.decomposition = { ...this.decomposition, assignments: body.assignments };
-        }
+        this.updateSplit(body.decompositionId, (split) => ({
+          ...split,
+          assignments: body.assignments
+        }));
         break;
       case "decomposition.approval":
-        if (this.decomposition) {
-          this.decomposition = {
-            ...this.decomposition,
-            approvals: body.approvals,
-            status: body.satisfied ? "approved" : this.decomposition.status
-          };
-        }
+        this.updateSplit(body.decompositionId, (split) => ({
+          ...split,
+          approvals: body.approvals,
+          status: body.satisfied ? "approved" : split.status
+        }));
         break;
       case "decomposition.rejected":
-        if (this.decomposition)
-          this.decomposition = { ...this.decomposition, status: "rejected" };
+        this.updateSplit(body.decompositionId, (split) => ({ ...split, status: "rejected" }));
         break;
-      case "contract.committed":
+      case "contract.committed": {
         if (this.session)
           this.session = { ...this.session, contractBranch: body.branch };
+        const named = body.decompositionId ?? null;
+        for (const split of [...this.decompositions.values()]) {
+          const lands = named ? split.id === named : split.status === "approved" && split.contractCommit === null;
+          if (lands)
+            this.decompositions.set(split.id, { ...split, contractCommit: body.commitSha });
+        }
         break;
+      }
       case "tasks.seeded":
         for (const task of body.tasks)
           this.tasks.set(task.id, task);
@@ -64454,6 +64616,7 @@ var SessionState = class {
         break;
       case "lease.released":
         this.leases.delete(body.taskId);
+        this.expireHandoffs(body.taskId);
         break;
       case "lease.denied":
         break;
@@ -64503,7 +64666,77 @@ var SessionState = class {
         break;
     }
   }
+  /** Applies a change to the split an event names, or the newest one if it names none. */
+  updateSplit(id, change) {
+    const key = id ?? this.latestDecompositionId;
+    const split = key ? this.decompositions.get(key) : void 0;
+    if (split)
+      this.decompositions.set(split.id, change(split));
+  }
+  /**
+   * A handoff opens a path for one piece of work. When the lease it was carved
+   * out of goes, or the requester's own task does, the grant goes with it --
+   * otherwise a yes given for one afternoon's fix is a key that never expires.
+   */
+  expireHandoffs(taskId) {
+    for (const request of this.handoffs.values()) {
+      if (request.status !== "pending" && request.status !== "granted")
+        continue;
+      if (request.heldByTaskId !== taskId && request.requesterTaskId !== taskId)
+        continue;
+      this.handoffs.set(request.id, { ...request, status: "expired" });
+    }
+  }
   // -- derived -------------------------------------------------------------
+  /**
+   * The one split a client that predates tickets should see. The newest split
+   * that has been approved and not yet landed comes first, because that is the
+   * one somebody is about to write onto the branch; otherwise the newest
+   * proposal, which is what this field always meant.
+   */
+  get decomposition() {
+    const awaiting = [...this.decompositions.values()].filter((split) => split.status === "approved" && split.contractCommit === null);
+    const latest = this.latestDecompositionId ? this.decompositions.get(this.latestDecompositionId) : void 0;
+    return awaiting.at(-1) ?? latest ?? null;
+  }
+  get validation() {
+    const split = this.decomposition;
+    return split ? this.validations.get(split.id) ?? null : null;
+  }
+  /** The split a ticket is running, or is about to. */
+  splitOfTicket(ticketId) {
+    const id = this.tickets.get(ticketId)?.decompositionId;
+    return id ? this.decompositions.get(id) ?? null : null;
+  }
+  /** The split a live task was seeded from. */
+  splitOfTask(task) {
+    if (task.ticketId)
+      return this.splitOfTicket(task.ticketId);
+    const legacy = [...this.decompositions.values()].filter((split) => split.ticketId === null);
+    return legacy.findLast((split) => split.tasks.some((spec) => spec.id === task.id)) ?? null;
+  }
+  /**
+   * Whether the seam this task was planned against is on the branch yet. Per
+   * task rather than per session: one ticket landing its contract says nothing
+   * about the files another ticket's tasks are going to import.
+   */
+  contractLanded(task) {
+    const split = this.splitOfTask(task);
+    if (split)
+      return split.contractCommit !== null;
+    return Boolean(this.session?.contractBranch);
+  }
+  /** Every contract file that has landed. All of them stay frozen, not just the newest. */
+  frozenContractPaths() {
+    const paths = [];
+    for (const split of this.decompositions.values()) {
+      if (split.contractCommit === null)
+        continue;
+      for (const file2 of split.contract.files)
+        paths.push(file2.path);
+    }
+    return paths;
+  }
   /**
    * Which lease, if any, covers this file. This is the whole lease gate: the
    * PreToolUse hook asks, and a hit from another participant is a hard deny.
@@ -64546,7 +64779,8 @@ var SessionState = class {
         touched.add(topLevel(glob));
     }
     const rank = (task) => task.assigneeId === participantId ? 0 : task.assigneeId === null ? 1 : 2;
-    const scored = this.readyTasks().map((task) => {
+    const claimable = this.readyTasks().filter((task) => this.contractLanded(task));
+    const scored = claimable.map((task) => {
       const affinity = task.ownedPaths.some((glob) => touched.has(topLevel(glob))) ? 1 : 0;
       const unblocks = [...this.tasks.values()].filter((t) => t.dependsOn.includes(task.id)).length;
       return { task, affinity, unblocks, rank: rank(task) };
@@ -64624,8 +64858,27 @@ var SessionState = class {
     this.tickets.clear();
     for (const ticket of snapshot.tickets ?? [])
       this.tickets.set(ticket.id, ticket);
-    this.decomposition = snapshot.decomposition;
-    this.validation = snapshot.validation;
+    this.decompositions.clear();
+    this.validations.clear();
+    const splits = { ...snapshot.decompositions ?? {} };
+    const reports = { ...snapshot.validations ?? {} };
+    const legacy = snapshot.decomposition;
+    if (Object.keys(splits).length === 0 && legacy) {
+      const landed = legacy.status === "approved" && snapshot.session.contractBranch;
+      splits[legacy.id] = { ...legacy, contractCommit: legacy.contractCommit ?? (landed ? "landed" : null) };
+      if (snapshot.validation)
+        reports[legacy.id] = snapshot.validation;
+    }
+    for (const [id, split] of Object.entries(splits)) {
+      this.decompositions.set(id, {
+        ...split,
+        contractCommit: split.contractCommit ?? null
+      });
+    }
+    for (const [id, report] of Object.entries(reports)) {
+      this.validations.set(id, report);
+    }
+    this.latestDecompositionId = [...this.decompositions.keys()].at(-1) ?? null;
     this.tasks.clear();
     for (const task of snapshot.tasks)
       this.tasks.set(task.id, task);
@@ -64662,6 +64915,8 @@ var SessionState = class {
       })),
       decomposition: this.decomposition,
       validation: this.validation,
+      decompositions: Object.fromEntries(this.decompositions),
+      validations: Object.fromEntries(this.validations),
       tasks: [...this.tasks.values()],
       leases: [...this.leases.values()],
       handoffs: [...this.handoffs.values()],
@@ -64689,12 +64944,18 @@ function parseTaskRefs(body, knownTaskIds) {
   }
   return found;
 }
-function parseMentions(body, loginToId) {
+function parseMentions(body, loginToIds) {
+  const byLogin = /* @__PURE__ */ new Map();
+  for (const [login, ids] of loginToIds) {
+    const key = login.toLowerCase();
+    byLogin.set(key, [...byLogin.get(key) ?? [], ...ids]);
+  }
   const found = [];
   for (const match of body.matchAll(MENTION)) {
-    const id = loginToId.get(match[1]);
-    if (id && !found.includes(id))
-      found.push(id);
+    for (const id of byLogin.get(match[1].toLowerCase()) ?? []) {
+      if (!found.includes(id))
+        found.push(id);
+    }
   }
   return found;
 }
@@ -64717,16 +64978,24 @@ function encodeToken(secret, claims) {
   const body = Buffer.from(JSON.stringify(claims)).toString("base64url");
   return `${body}.${sign(secret, body)}`;
 }
-function decodeToken(secret, token) {
-  const [body, signature] = token.split(".");
-  if (!body || !signature || !safeEqual(signature, sign(secret, body))) return null;
+function verifyToken(secret, token) {
+  const [body, signature, ...rest] = token.split(".");
+  if (!body || !signature || rest.length > 0) return { ok: false, reason: "malformed" };
+  if (!safeEqual(signature, sign(secret, body))) return { ok: false, reason: "signature" };
+  let claims;
   try {
-    const claims = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-    if (typeof claims.exp === "number" && claims.exp < Date.now()) return null;
-    return claims;
+    claims = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
   } catch {
-    return null;
+    return { ok: false, reason: "malformed" };
   }
+  if (typeof claims.exp === "number" && claims.exp < Date.now()) {
+    return { ok: false, reason: "expired", expiredAt: claims.exp };
+  }
+  return { ok: true, claims };
+}
+function decodeToken(secret, token) {
+  const checked = verifyToken(secret, token);
+  return checked.ok ? checked.claims : null;
 }
 function issueCookieValue(config2, userId) {
   return encodeToken(config2.secret, { userId, exp: Date.now() + COOKIE_TTL_MS });
@@ -64762,12 +65031,18 @@ function readParticipantToken(config2, token) {
   const claims = decodeToken(config2.secret, token);
   return claims?.kind === "participant" ? claims : null;
 }
-function issueWsTicket(config2, userId) {
-  return encodeToken(config2.secret, { kind: "ws", userId, exp: Date.now() + WS_TICKET_TTL_MS });
+function issueWsTicket(config2, userId, bound = null) {
+  return encodeToken(config2.secret, {
+    kind: "ws",
+    userId,
+    ...bound ? { sessionId: bound.sessionId, participantId: bound.participantId } : {},
+    exp: Date.now() + WS_TICKET_TTL_MS
+  });
 }
 function readWsTicket(config2, ticket) {
-  const claims = decodeToken(config2.secret, ticket);
-  return claims?.kind === "ws" ? claims : null;
+  const checked = verifyToken(config2.secret, ticket);
+  if (checked.ok && checked.claims.kind !== "ws") return { ok: false, reason: "signature" };
+  return checked;
 }
 function generateJoinToken() {
   return `ssj_${randomBytes(18).toString("base64url")}`;
@@ -64781,11 +65056,20 @@ function issueInvite(config2, sessionId) {
   });
 }
 function readInvite(config2, invite) {
-  const claims = decodeToken(config2.secret, invite.trim());
-  return claims?.kind === "invite" ? claims : null;
+  const checked = verifyToken(config2.secret, invite.trim());
+  if (checked.ok && checked.claims.kind !== "invite") return { ok: false, reason: "malformed" };
+  return checked;
 }
 function peerUserId(githubLogin) {
-  return `peer:${githubLogin.toLowerCase()}`;
+  return `peer:${githubLogin}`;
+}
+var HOST_HEADER = "x-session-share-host";
+function hostCredential(config2) {
+  return createHmac("sha256", config2.secret).update("session-share/host-key").digest("hex");
+}
+function isHostCredential(config2, presented) {
+  if (typeof presented !== "string" || !presented) return false;
+  return safeEqual(presented, hostCredential(config2));
 }
 function githubAuthorizeUrl(config2, state) {
   if (!config2.githubClientId) throw new Error("GITHUB_CLIENT_ID is not set");
@@ -64857,9 +65141,18 @@ function loadAuthConfig(env = process.env) {
     devLogin: env.SESSION_SHARE_DEV_LOGIN === "1"
   };
 }
-function devLoginAllowed(config2, remoteAddress) {
+var FORWARDED_HEADERS = [
+  "forwarded",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-real-ip",
+  "cf-connecting-ip",
+  "true-client-ip"
+];
+function devLoginAllowed(config2, remoteAddress, headers = {}) {
   if (!config2.devLogin) return false;
   if (!remoteAddress) return false;
+  if (FORWARDED_HEADERS.some((name) => headers[name] !== void 0)) return false;
   const normalised = remoteAddress.replace(/^::ffff:/, "");
   return normalised === "::1" || normalised.startsWith("127.");
 }
@@ -65073,6 +65366,8 @@ var ServiceError = class extends Error {
 var PALETTE_SIZE = 8;
 var UNANIMOUS_UP_TO = 3;
 var PRESENT_FOR_MS = 10 * 60 * 1e3;
+var PROGRESS_STATES = /* @__PURE__ */ new Set(["claimed", "running", "testing"]);
+var REBUILD_PAGE = 5e3;
 var SessionService = class {
   constructor(store, broadcast, relayFrame) {
     this.store = store;
@@ -65085,13 +65380,25 @@ var SessionService = class {
   states = /* @__PURE__ */ new Map();
   /** Public so a test can age someone out without waiting ten minutes. */
   lastSeen = /* @__PURE__ */ new Map();
+  /**
+   * `lastSeen` lives in memory, so a restart forgets everyone at once. Counting
+   * from the restart rather than from when they joined keeps a server that has
+   * just come back from declaring the whole room gone -- which would let anyone
+   * take anyone's task the moment it restarted.
+   */
+  startedAt = Date.now();
   // -- state access --------------------------------------------------------
   /** Folds the log on first touch; afterwards the map is the live projection. */
   state(sessionId) {
     const existing = this.states.get(sessionId);
     if (existing) return existing;
     const state = new SessionState();
-    for (const envelope of this.store.readEvents(sessionId, 0)) state.apply(envelope);
+    for (let from = 0; ; ) {
+      const page = this.store.readEvents(sessionId, from, REBUILD_PAGE);
+      for (const envelope of page) state.apply(envelope);
+      if (page.length < REBUILD_PAGE) break;
+      from = page[page.length - 1].seq + 1;
+    }
     this.states.set(sessionId, state);
     return state;
   }
@@ -65106,6 +65413,16 @@ var SessionService = class {
     this.lastSeen.set(participantId, Date.now());
   }
   /**
+   * Whether someone has been heard from recently. The `connected` flag says
+   * whether a socket is open, which is not the same question: an attached
+   * checkout speaks over HTTP and never holds one, and a closed board tab says
+   * nothing about whether its owner's agent is still working.
+   */
+  isPresent(participant, now = Date.now()) {
+    const last = this.lastSeen.get(participant.id) ?? Math.max(participant.joinedAt, this.startedAt);
+    return now - last < PRESENT_FOR_MS;
+  }
+  /**
    * The snapshot everyone actually reads, with presence resolved from when each
    * participant was last heard from rather than from a flag nobody clears.
    */
@@ -65116,7 +65433,9 @@ var SessionService = class {
       ...snapshot,
       participants: snapshot.participants.map((participant) => ({
         ...participant,
-        connected: participant.connected && now - (this.lastSeen.get(participant.id) ?? participant.joinedAt) < PRESENT_FOR_MS
+        // The flag alone used to be ANDed in, so one closed board tab marked an
+        // agent that was still working over HTTP as gone, permanently.
+        connected: this.isPresent(participant, now)
       }))
     };
   }
@@ -65164,6 +65483,8 @@ var SessionService = class {
         return this.claim(command, ctx);
       case "task.release":
         return this.release(command, ctx);
+      case "task.forceRelease":
+        return this.forceRelease(command, ctx);
       case "task.progress":
         return this.progress(command, ctx);
       case "task.testResult":
@@ -65212,31 +65533,35 @@ var SessionService = class {
     return { sessionId, slug: command.slug };
   }
   join(command, ctx) {
+    const user = ctx.user;
+    if (!user) {
+      throw new ServiceError("unauthorized", "Sign in, or attach this checkout with /ss:join <code>.");
+    }
     const sessionId = this.store.findSessionIdByRef(command.sessionRef);
     if (!sessionId) throw new ServiceError("not_found", `No session "${command.sessionRef}".`);
     const state = this.state(sessionId);
-    const githubLogin = ctx.user?.githubLogin ?? command.githubLogin;
-    if (!githubLogin) {
-      throw new ServiceError("unauthorized", "Sign in, or attach this checkout with /ss:join <code>.");
-    }
     const identity = {
-      userId: ctx.user?.id ?? null,
-      githubLogin,
-      displayName: ctx.user?.displayName ?? command.displayName ?? githubLogin,
-      avatarUrl: ctx.user?.avatarUrl ?? null
+      userId: user.id,
+      githubLogin: user.githubLogin,
+      displayName: user.displayName,
+      avatarUrl: user.avatarUrl
     };
-    const clash = command.repoPath ? [...state.participants.values()].find(
-      (p) => p.connected && p.repoPath === command.repoPath && p.githubLogin !== identity.githubLogin
+    const repoPath = command.repoPath;
+    const machineId = command.machineId ?? null;
+    const sameCheckout = (p) => p.repoPath === repoPath && (!p.machineId || !machineId || p.machineId === machineId);
+    const isMe = (p) => p.userId === identity.userId;
+    const clash = repoPath ? [...state.participants.values()].find(
+      (p) => this.isPresent(p) && sameCheckout(p) && !isMe(p)
     ) : void 0;
     if (clash) {
       throw new ServiceError(
         "conflict",
-        `${clash.displayName} is already working in ${command.repoPath}. Use a separate clone or git worktree -- two agents in one checkout will corrupt each other.`
+        `${clash.displayName} is already working in ${repoPath}. Use a separate clone or git worktree -- two agents in one checkout will corrupt each other.`
       );
     }
-    const returning = [...state.participants.values()].find(
-      (p) => identity.userId ? p.userId === identity.userId : p.githubLogin === identity.githubLogin
-    );
+    const mine = [...state.participants.values()].filter(isMe);
+    const bound = ctx.participantId ? state.participants.get(ctx.participantId) : void 0;
+    const returning = (bound && isMe(bound) && (!repoPath || !bound.repoPath || sameCheckout(bound)) ? bound : void 0) ?? (repoPath ? mine.find(sameCheckout) ?? mine.find((p) => p.repoPath === null) : mine[0]);
     let participantId;
     if (returning) {
       participantId = returning.id;
@@ -65245,11 +65570,13 @@ var SessionService = class {
         participantId,
         connected: true
       });
-      if (command.repoPath && command.repoPath !== returning.repoPath) {
+      const moved = repoPath && (repoPath !== returning.repoPath || machineId !== null && machineId !== returning.machineId);
+      if (moved) {
         this.emit(sessionId, participantId, {
           type: "participant.attached",
           participantId,
-          repoPath: command.repoPath
+          repoPath,
+          machineId
         });
       }
     } else {
@@ -65262,13 +65589,15 @@ var SessionService = class {
         displayName: identity.displayName,
         avatarUrl: identity.avatarUrl,
         colorIndex: state.participants.size % PALETTE_SIZE,
-        repoPath: command.repoPath,
+        repoPath,
+        machineId,
         connected: true,
         activity: { state: "idle", detail: "joined", taskId: null, updatedAt: Date.now() },
         joinedAt: Date.now()
       };
       this.emit(sessionId, participantId, { type: "participant.joined", participant });
     }
+    this.seen(participantId);
     if (state.session && state.session.leadId === null) {
       this.emit(sessionId, participantId, { type: "session.lead", leadId: participantId });
     }
@@ -65419,7 +65748,8 @@ var SessionService = class {
   startTicket(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const ticket = this.requireTicket(state, command.ticketId);
-    if (ticket.decompositionId) return { ticket, plannerId: null };
+    const current = ticket.decompositionId;
+    if (current && state.validations.get(current)?.ok) return { ticket, plannerId: null };
     const plannerId = this.beginSplit(sessionId, participantId, state, ticket);
     return { ticket: this.requireTicket(state, command.ticketId), plannerId };
   }
@@ -65432,8 +65762,15 @@ var SessionService = class {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const ticket = this.requireTicket(state, command.ticketId);
     if (state.tasksOfTicket(ticket.id).length > 0) return { ticket };
-    if (!ticket.decompositionId) {
+    const split = state.splitOfTicket(ticket.id);
+    if (!split) {
       throw new ServiceError("not_ready", "There is no split to start yet.");
+    }
+    if (!state.validations.get(split.id)?.ok || split.status !== "proposed") {
+      throw new ServiceError(
+        "not_ready",
+        `This split cannot be started (${split.status === "proposed" ? "it failed validation" : `it is already ${split.status}`}). Ask for a new one with ss_ticket_start.`
+      );
     }
     if (!ticket.members.includes(participantId)) {
       throw new ServiceError(
@@ -65443,11 +65780,12 @@ var SessionService = class {
     }
     this.emit(sessionId, participantId, {
       type: "decomposition.approval",
+      decompositionId: split.id,
       participantId,
       approvals: ticket.members,
       satisfied: true
     });
-    this.seedTasks(sessionId, participantId, state);
+    this.seedTasks(sessionId, participantId, state, split.id);
     this.refreshTicketStates(sessionId, participantId);
     return { ticket: this.requireTicket(state, command.ticketId) };
   }
@@ -65498,6 +65836,20 @@ var SessionService = class {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const ticket = this.requireTicket(state, command.ticketId);
     const ticketTasks = state.tasksOfTicket(ticket.id);
+    const column = state.ticketStateFor(ticket.id);
+    if (column !== "verify") {
+      throw new ServiceError(
+        "not_ready",
+        column === "review" ? `"${ticket.title}" has already passed. Open the pull request with ss_ship.` : `"${ticket.title}" is not ready to be run yet: it is in ${column}, and a run only means something once every task has landed.`
+      );
+    }
+    const unknown2 = command.broke.filter((id) => !ticketTasks.some((task) => task.id === id));
+    if (unknown2.length > 0) {
+      throw new ServiceError(
+        "bad_request",
+        `Not tasks on "${ticket.title}": ${unknown2.join(", ")}. Its tasks are ${ticketTasks.map((task) => task.id).join(", ")}.`
+      );
+    }
     const named = new Set(command.broke);
     const reopened = command.passed ? [] : ticketTasks.filter((task) => named.size === 0 || named.has(task.id));
     this.emit(sessionId, participantId, {
@@ -65513,6 +65865,14 @@ var SessionService = class {
       }
     });
     for (const task of reopened) {
+      const lease = state.leases.get(task.id);
+      if (lease) {
+        this.emit(sessionId, participantId, {
+          type: "lease.released",
+          taskId: task.id,
+          holderId: lease.holderId
+        });
+      }
       this.emit(sessionId, participantId, {
         type: "task.state",
         taskId: task.id,
@@ -65562,6 +65922,12 @@ var SessionService = class {
   shipTicket(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const ticket = this.requireTicket(state, command.ticketId);
+    if (state.ticketStateFor(ticket.id) !== "review" || !ticket.verification?.passed) {
+      throw new ServiceError(
+        "not_ready",
+        `"${ticket.title}" has not passed a run of the assembled thing yet, so there is nothing to open a pull request for.`
+      );
+    }
     this.emit(sessionId, participantId, {
       type: "ticket.shipped",
       ticketId: ticket.id,
@@ -65571,7 +65937,7 @@ var SessionService = class {
   }
   /** Hands the ticket to a member's agent to split, and moves the card. */
   beginSplit(sessionId, actorId, state, ticket) {
-    const planner = ticket.members.map((id) => state.participants.get(id)).find((p) => p?.repoPath && p.connected);
+    const planner = ticket.members.map((id) => state.participants.get(id)).find((p) => p?.repoPath && this.isPresent(p));
     if (!planner) {
       this.systemMessage(
         sessionId,
@@ -65654,7 +66020,9 @@ ${ticket.body}` : "",
    */
   requestPlan(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
-    const candidates = [...state.participants.values()].filter((p) => p.repoPath && p.connected);
+    const candidates = [...state.participants.values()].filter(
+      (p) => p.repoPath && this.isPresent(p)
+    );
     const requested = command.plannerId ? state.participants.get(command.plannerId) : null;
     if (command.plannerId && !requested) {
       throw new ServiceError("not_found", "That participant is not in this session.");
@@ -65717,12 +66085,24 @@ Issue: ${command.issueRef}` : "",
   }
   propose(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    if (command.ticketId) {
+      const ticket = this.requireTicket(state, command.ticketId);
+      if (state.tasksOfTicket(ticket.id).length > 0) {
+        throw new ServiceError(
+          "conflict",
+          `"${ticket.title}" is already being built from its split. Delete the ticket and open a new one to start over.`
+        );
+      }
+    }
     const validation = validateDecomposition({
       contract: command.contract,
       tasks: command.tasks,
       participantCount: Math.max(command.participantCount, state.participants.size)
     });
-    for (const issue2 of this.crossTicketOverlaps(state, command.tasks, command.ticketId)) {
+    for (const issue2 of [
+      ...this.takenTaskIds(state, command.tasks, command.ticketId),
+      ...this.crossTicketOverlaps(state, command.tasks, command.contract, command.ticketId)
+    ]) {
       validation.issues.push(issue2);
       validation.ok = false;
     }
@@ -65741,17 +66121,24 @@ Issue: ${command.issueRef}` : "",
         status: "proposed",
         approvals: [],
         assignments: [],
+        contractCommit: null,
         createdAt: Date.now()
       },
       validation
     });
-    if (!validation.ok) return { decompositionId, validation };
+    if (!validation.ok) {
+      if (command.ticketId) {
+        this.setTicketState(sessionId, participantId, command.ticketId, "splitting");
+      }
+      return { decompositionId, validation };
+    }
     const ticketId = command.ticketId;
     if (ticketId) {
       const ticket = this.requireTicket(state, ticketId);
       const members = ticket.members.map((id) => state.participants.get(id)).filter((p) => Boolean(p?.repoPath)).sort((a, b) => a.joinedAt - b.joinedAt).map((p) => p.id);
       this.emit(sessionId, participantId, {
         type: "decomposition.assigned",
+        decompositionId,
         assignments: autoAssign({ tasks: command.tasks, participants: members })
       });
       this.setTicketState(sessionId, participantId, ticket.id, "proposed");
@@ -65767,46 +66154,131 @@ Issue: ${command.issueRef}` : "",
       );
       return { decompositionId, validation };
     }
-    this.rebalance(sessionId, participantId, state, []);
+    this.rebalance(sessionId, participantId, state, decompositionId, []);
     return { decompositionId, validation };
   }
-  /** Paths already spoken for by another ticket's unfinished work. */
-  crossTicketOverlaps(state, proposed, ticketId) {
+  /**
+   * Task ids are the session's, not the ticket's: tasks, leases and the DAG all
+   * key on them. Two tickets both proposing `api` meant seeding the second
+   * wrote over the first -- a running task, its owner and its state replaced
+   * by somebody else's card.
+   */
+  takenTaskIds(state, proposed, ticketId) {
     const issues = [];
-    const live = [...state.tasks.values()].filter(
-      (task) => task.state !== "merged" && task.ticketId && task.ticketId !== ticketId
+    const pending = this.otherSplits(state, ticketId).filter((split) => split.status === "proposed");
+    for (const spec of proposed) {
+      const live = state.tasks.get(spec.id);
+      const elsewhere = live && live.ticketId !== ticketId;
+      const queued = pending.find((split) => split.tasks.some((other) => other.id === spec.id));
+      if (!elsewhere && !queued) continue;
+      const owner = (elsewhere ? live.ticketId : queued?.ticketId) ?? null;
+      const title = owner ? state.tickets.get(owner)?.title ?? owner : "an earlier split";
+      issues.push({
+        code: "task_id_taken",
+        severity: "error",
+        message: `There is already a task called "${spec.id}", on "${title}".`,
+        taskIds: [spec.id],
+        repairHint: `Task ids are shared by every ticket in the session. Rename "${spec.id}" -- prefixing it with something from this ticket is enough.`
+      });
+    }
+    return issues;
+  }
+  /**
+   * The splits other tickets are running or are about to: each ticket's
+   * current one, plus an approved split from before tickets existed, whose
+   * contract is just as frozen.
+   */
+  otherSplits(state, ticketId) {
+    return [...state.decompositions.values()].filter((split) => {
+      if (split.ticketId === ticketId || split.status === "rejected") return false;
+      if (split.ticketId === null) return split.status === "approved";
+      return state.tickets.get(split.ticketId)?.decompositionId === split.id;
+    });
+  }
+  /**
+   * Paths already spoken for by another ticket: its unfinished tasks, the
+   * tasks of a split waiting to be started, and its contract files, which are
+   * frozen from the moment they land.
+   */
+  crossTicketOverlaps(state, proposed, contract, ticketId) {
+    const issues = [];
+    const titleOf = (id) => id ? state.tickets.get(id)?.title ?? id : "an earlier split";
+    const owners = [
+      ...[...state.tasks.values()].filter((task) => task.state !== "merged" && task.ticketId && task.ticketId !== ticketId).map((task) => ({ id: task.id, ticketId: task.ticketId, ownedPaths: task.ownedPaths, live: true })),
+      ...this.otherSplits(state, ticketId).filter((split) => split.status === "proposed").flatMap(
+        (split) => split.tasks.map((spec) => ({
+          id: spec.id,
+          ticketId: split.ticketId,
+          ownedPaths: spec.ownedPaths,
+          live: false
+        }))
+      )
+    ];
+    const frozen = this.otherSplits(state, ticketId).flatMap(
+      (split) => split.contract.files.map((file2) => ({ ...file2, ticketId: split.ticketId }))
     );
     for (const spec of proposed) {
-      for (const held of live) {
-        const collision = spec.ownedPaths.find(
-          (glob) => held.ownedPaths.some((other) => globsIntersect(glob, other))
-        );
-        if (!collision) continue;
-        const ticket = held.ticketId ? state.tickets.get(held.ticketId) : null;
+      const owner = owners.find((other) => globSetsIntersect(spec.ownedPaths, other.ownedPaths));
+      if (owner) {
+        const [collision] = globSetsIntersect(spec.ownedPaths, owner.ownedPaths);
         issues.push({
           code: "overlaps_other_ticket",
           severity: "error",
-          message: `"${spec.id}" owns ${collision}, which "${held.id}" already owns on the ticket "${ticket?.title ?? held.ticketId}".`,
+          message: `"${spec.id}" owns ${collision}, which "${owner.id}" ${owner.live ? "already owns" : "is proposed to own"} on the ticket "${titleOf(owner.ticketId)}".`,
           taskIds: [spec.id],
-          repairHint: `Scope this ticket away from ${collision}, or wait for "${ticket?.title ?? "that ticket"}" to land. Two tickets editing one file is the collision the whole split exists to prevent.`
+          repairHint: `Scope this ticket away from ${collision}, or wait for "${titleOf(owner.ticketId)}" to land. Two tickets editing one file is the collision the whole split exists to prevent.`
         });
-        break;
+        continue;
+      }
+      const file2 = frozen.find((other) => pathMatchesAny(other.path, spec.ownedPaths));
+      if (file2) {
+        issues.push({
+          code: "overlaps_other_ticket",
+          severity: "error",
+          message: `"${spec.id}" owns ${file2.path}, which is a contract file of the ticket "${titleOf(file2.ticketId)}".`,
+          taskIds: [spec.id],
+          repairHint: `Contract files are frozen once they land, for every ticket. Narrow "${spec.id}" to leave ${file2.path} alone, and import from it instead.`
+        });
+      }
+    }
+    for (const file2 of contract.files) {
+      const owner = owners.find((other) => pathMatchesAny(file2.path, other.ownedPaths));
+      if (owner) {
+        issues.push({
+          code: "overlaps_other_ticket",
+          severity: "error",
+          message: `The contract writes ${file2.path}, which "${owner.id}" ${owner.live ? "owns" : "is proposed to own"} on the ticket "${titleOf(owner.ticketId)}".`,
+          taskIds: [],
+          repairHint: `Landing this contract would write into another ticket's work. Put the shared piece in a file of its own, or wait for "${titleOf(owner.ticketId)}" to land.`
+        });
+        continue;
+      }
+      const clash = frozen.find((other) => samePath(other.path, file2.path) && other.contents !== file2.contents);
+      if (clash) {
+        issues.push({
+          code: "overlaps_other_ticket",
+          severity: "error",
+          message: `The contract rewrites ${file2.path}, which is already a contract file of the ticket "${titleOf(clash.ticketId)}" with different contents.`,
+          taskIds: [],
+          repairHint: `Import the existing ${file2.path} as it is, or put this ticket's additions in a new contract file.`
+        });
       }
     }
     return issues;
   }
   /** Recomputes the automatic part of the assignment around whatever is pinned. */
-  rebalance(sessionId, actorId, state, pinned) {
-    const ticketId = state.decomposition?.ticketId ?? null;
+  rebalance(sessionId, actorId, state, decompositionId, pinned) {
+    const split = state.decompositions.get(decompositionId);
+    const ticketId = split?.ticketId ?? null;
     const ticket = ticketId ? state.tickets.get(ticketId) : null;
     const eligible = ticket ? ticket.members.map((id) => state.participants.get(id)) : [...state.participants.values()];
     const assignments = autoAssign({
-      tasks: state.decomposition?.tasks ?? [],
+      tasks: split?.tasks ?? [],
       // Board-only watchers are left out: work goes to people with a checkout.
       participants: eligible.filter((p) => Boolean(p?.repoPath)).sort((a, b) => a.joinedAt - b.joinedAt).map((p) => p.id),
       pinned
     });
-    this.emit(sessionId, actorId, { type: "decomposition.assigned", assignments });
+    this.emit(sessionId, actorId, { type: "decomposition.assigned", decompositionId, assignments });
     return assignments;
   }
   /**
@@ -65836,43 +66308,53 @@ Issue: ${command.issueRef}` : "",
         assignments: [...state.tasks.values()].filter((task) => task.assigneeId).map((task) => ({ taskId: task.id, participantId: task.assigneeId }))
       };
     }
-    const decomposition = state.decomposition;
-    if (!decomposition?.tasks.some((task) => task.id === command.taskId)) {
+    const decomposition = [...state.decompositions.values()].reverse().find(
+      (split) => split.status === "proposed" && (split.ticketId === null || state.tickets.get(split.ticketId)?.decompositionId === split.id) && split.tasks.some((task) => task.id === command.taskId)
+    );
+    if (!decomposition) {
       throw new ServiceError("not_found", `No task "${command.taskId}" in this session.`);
     }
     const pinned = decomposition.assignments.filter((a) => a.manual && a.taskId !== command.taskId).concat(
       command.participantId ? [{ taskId: command.taskId, participantId: command.participantId, manual: true }] : []
     );
-    return { assignments: this.rebalance(sessionId, participantId, state, pinned) };
+    return {
+      assignments: this.rebalance(sessionId, participantId, state, decomposition.id, pinned)
+    };
   }
   approve(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
-    const decomposition = state.decomposition;
-    if (!decomposition || decomposition.id !== command.decompositionId) {
+    const decomposition = state.decompositions.get(command.decompositionId);
+    const current = decomposition && (decomposition.ticketId ? state.tickets.get(decomposition.ticketId)?.decompositionId === decomposition.id : [...state.decompositions.values()].findLast((split) => split.ticketId === null) === decomposition);
+    if (!decomposition || !current) {
       throw new ServiceError("conflict", "That decomposition is no longer the current proposal.");
     }
     if (decomposition.status !== "proposed") {
       throw new ServiceError("not_ready", `Decomposition is already ${decomposition.status}.`);
     }
-    if (!state.validation?.ok) {
+    if (decomposition.ticketId && state.tasksOfTicket(decomposition.ticketId).length > 0) {
+      throw new ServiceError("not_ready", "That ticket is already being built.");
+    }
+    if (!state.validations.get(decomposition.id)?.ok) {
       throw new ServiceError(
         "not_ready",
         "Decomposition has blocking validation errors; the planner must repair it first."
       );
     }
     const approvals = decomposition.approvals.includes(participantId) ? decomposition.approvals : [...decomposition.approvals, participantId];
+    this.ensurePresentLead(sessionId, participantId, state);
     const satisfied = this.approvalSatisfied(state, approvals, participantId);
     this.emit(sessionId, participantId, {
       type: "decomposition.approval",
+      decompositionId: decomposition.id,
       participantId,
       approvals,
       satisfied
     });
-    if (satisfied) this.seedTasks(sessionId, participantId, state);
+    if (satisfied) this.seedTasks(sessionId, participantId, state, decomposition.id);
     return { approvals, satisfied };
   }
   approvalSatisfied(state, approvals, approver) {
-    const voters = [...state.participants.values()].filter((p) => p.connected);
+    const voters = [...state.participants.values()].filter((p) => this.isPresent(p));
     if (voters.length > UNANIMOUS_UP_TO) return state.session?.leadId === approver;
     return voters.every((p) => approvals.includes(p.id));
   }
@@ -65881,16 +66363,15 @@ Issue: ${command.issueRef}` : "",
    * can lay out left-to-right, and anything with an unmerged dependency starts
    * blocked rather than claimable.
    */
-  seedTasks(sessionId, actorId, state) {
-    const specs = state.decomposition?.tasks ?? [];
+  seedTasks(sessionId, actorId, state, decompositionId) {
+    const split = state.decompositions.get(decompositionId);
+    const specs = split?.tasks ?? [];
     const { depthByTask } = analyzeDag(specs);
-    const assignedTo = new Map(
-      (state.decomposition?.assignments ?? []).map((a) => [a.taskId, a.participantId])
-    );
+    const assignedTo = new Map((split?.assignments ?? []).map((a) => [a.taskId, a.participantId]));
     const tasks = specs.map((spec) => ({
       ...spec,
       sessionId,
-      ticketId: state.decomposition?.ticketId ?? null,
+      ticketId: split?.ticketId ?? null,
       state: spec.dependsOn.length === 0 ? "ready" : "blocked",
       assigneeId: assignedTo.get(spec.id) ?? null,
       ownerId: null,
@@ -65944,11 +66425,12 @@ Issue: ${command.issueRef}` : "",
   }
   reject(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
-    if (state.decomposition?.id !== command.decompositionId) {
+    if (!state.decompositions.has(command.decompositionId)) {
       throw new ServiceError("conflict", "That decomposition is no longer the current proposal.");
     }
     this.emit(sessionId, participantId, {
       type: "decomposition.rejected",
+      decompositionId: command.decompositionId,
       participantId,
       reason: command.reason
     });
@@ -65956,18 +66438,22 @@ Issue: ${command.issueRef}` : "",
   }
   contractCommitted(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
-    if (state.decomposition?.status !== "approved") {
+    const split = command.ticketId ? state.splitOfTicket(this.requireTicket(state, command.ticketId).id) : state.decomposition;
+    if (split?.status !== "approved") {
       throw new ServiceError("not_ready", "The contract cannot land before the split is approved.");
     }
     this.emit(sessionId, participantId, {
       type: "contract.committed",
+      decompositionId: split.id,
       branch: command.branch,
       commitSha: command.commitSha,
       prNumber: command.prNumber
     });
     for (const [assignee, theirs] of this.tasksByAssignee(state)) {
       if (assignee === participantId) continue;
-      const ready = theirs.filter((task) => task.state === "ready");
+      const ready = theirs.filter(
+        (task) => task.state === "ready" && state.splitOfTask(task)?.id === split.id
+      );
       if (ready.length === 0) continue;
       this.systemDirective(
         sessionId,
@@ -66004,8 +66490,14 @@ Issue: ${command.issueRef}` : "",
       return {
         task: null,
         lease: null,
-        reason: command.taskId ? `No task "${command.taskId}" in this session.` : "Nothing is ready right now -- every remaining task is waiting on a dependency."
+        reason: command.taskId ? `No task "${command.taskId}" in this session.` : state.readyTasks().length > 0 ? "Nothing is claimable right now -- the ready tasks are waiting for their contract to land." : "Nothing is ready right now -- every remaining task is waiting on a dependency."
       };
+    }
+    if (!state.contractLanded(task)) {
+      throw new ServiceError(
+        "not_ready",
+        `"${task.id}" becomes claimable once its ticket's contract has landed (ss_land_contract).`
+      );
     }
     if (!state.isReady(task)) {
       const blockers = task.dependsOn.filter((d) => state.tasks.get(d)?.state !== "merged");
@@ -66044,6 +66536,9 @@ Issue: ${command.issueRef}` : "",
   release(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const task = this.requireOwnedTask(state, command.taskId, participantId);
+    if (task.state === "merged") {
+      throw new ServiceError("conflict", `"${task.id}" has already landed; there is nothing to release.`);
+    }
     this.emit(sessionId, participantId, {
       type: "lease.released",
       taskId: task.id,
@@ -66058,9 +66553,84 @@ Issue: ${command.issueRef}` : "",
     this.refreshBlockedStates(sessionId, participantId, state);
     return { ok: true };
   }
+  /**
+   * Taking a task back from someone who has gone.
+   *
+   * A lease only ever ended when its holder released it or landed it, so a
+   * laptop closed mid-task held its files until someone deleted the whole
+   * ticket. This is the narrow way out: only once the holder has not been
+   * heard from for as long as it takes to stop counting as present -- their
+   * hook checks a lease on every edit, so an agent that is actually working is
+   * never quiet that long -- and only by the lead or someone on the ticket.
+   */
+  forceRelease(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const task = state.tasks.get(command.taskId);
+    if (!task) throw new ServiceError("not_found", `No task "${command.taskId}".`);
+    const holderId = task.ownerId;
+    if (!holderId || task.state === "merged") {
+      throw new ServiceError("conflict", `Nobody is holding "${task.id}".`);
+    }
+    if (holderId === participantId) {
+      throw new ServiceError("bad_request", `You hold "${task.id}" yourself; use ss_release.`);
+    }
+    const holder = state.participants.get(holderId);
+    if (holder && this.isPresent(holder)) {
+      throw new ServiceError(
+        "conflict",
+        `${holder.displayName} is still around. Ask them in the room to release "${task.id}" -- it can only be taken back once they have been gone for ${PRESENT_FOR_MS / 6e4} minutes.`
+      );
+    }
+    const lead = this.ensurePresentLead(sessionId, participantId, state);
+    const ticket = task.ticketId ? state.tickets.get(task.ticketId) : null;
+    const allowed = lead === participantId || (ticket ? ticket.members.includes(participantId) : true);
+    if (!allowed) {
+      throw new ServiceError("forbidden", `Only the lead or someone on "${ticket?.title}" can take this back.`);
+    }
+    if (state.leases.has(task.id)) {
+      this.emit(sessionId, participantId, { type: "lease.released", taskId: task.id, holderId });
+    }
+    this.emit(sessionId, participantId, {
+      type: "task.state",
+      taskId: task.id,
+      state: state.isReady({ ...task, ownerId: null }) ? "ready" : "blocked",
+      ownerId: null
+    });
+    this.refreshBlockedStates(sessionId, participantId, state);
+    this.refreshTicketStates(sessionId, participantId);
+    const by = state.participants.get(participantId)?.displayName ?? "Someone";
+    this.systemMessage(
+      sessionId,
+      participantId,
+      [holderId],
+      `${by} took "${task.id}" back from ${holder?.displayName ?? "someone"}, who had gone quiet. It is claimable again; anything they had not pushed is still on their machine.`
+    );
+    return { ok: true, holderId };
+  }
+  /**
+   * Hands the lead on when the lead has gone. The lead lands stalled tasks and
+   * carries the vote in a big session, so a lead who has walked away used to
+   * leave both with nobody; whoever is here and asking takes it on.
+   */
+  ensurePresentLead(sessionId, actorId, state) {
+    const leadId = state.session?.leadId ?? null;
+    const lead = leadId ? state.participants.get(leadId) : void 0;
+    if (leadId === actorId || lead && this.isPresent(lead)) return leadId;
+    this.emit(sessionId, actorId, { type: "session.lead", leadId: actorId });
+    return actorId;
+  }
   progress(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const task = this.requireOwnedTask(state, command.taskId, participantId);
+    if (command.state && !PROGRESS_STATES.has(command.state)) {
+      throw new ServiceError(
+        "bad_request",
+        `Progress can only move a task between ${[...PROGRESS_STATES].join(", ")}. Use ss_report_test, ss_done or ss_release for the rest.`
+      );
+    }
+    if (command.state && task.state === "merged") {
+      throw new ServiceError("conflict", `"${task.id}" has already landed.`);
+    }
     if (command.state && command.state !== task.state) {
       this.emit(sessionId, participantId, {
         type: "task.state",
@@ -66119,7 +66689,7 @@ Issue: ${command.issueRef}` : "",
     const task = state.tasks.get(command.taskId);
     if (!task) throw new ServiceError("not_found", `No task "${command.taskId}".`);
     if (task.state === "merged") return { unblocked: [] };
-    const isLead = state.session?.leadId === participantId;
+    const isLead = task.ownerId !== participantId && this.ensurePresentLead(sessionId, participantId, state) === participantId;
     if (task.ownerId !== participantId && !isLead) {
       throw new ServiceError("forbidden", `"${command.taskId}" is held by someone else.`);
     }
@@ -66169,10 +66739,10 @@ Issue: ${command.issueRef}` : "",
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const denials = [];
     const granted = this.grantedPaths(state, participantId);
+    const frozen = state.frozenContractPaths();
     for (const path of command.paths) {
-      if (granted.has(path)) continue;
-      const contractFile = state.decomposition?.contract.files.find((f) => f.path === path);
-      if (contractFile && state.session?.contractBranch) {
+      if (granted.some((open) => samePath(open, path))) continue;
+      if (frozen.some((file2) => samePath(file2, path))) {
         denials.push({
           path,
           heldBy: null,
@@ -66204,13 +66774,20 @@ Issue: ${command.issueRef}` : "",
     }
     return { allowed: denials.length === 0, denials };
   }
-  /** Paths another participant has explicitly handed over, path by path. */
+  /**
+   * Paths another participant has explicitly handed over, path by path -- and
+   * only while the grant still means something: the lease it was carved out of
+   * is still held by whoever granted it, and the requester is still holding the
+   * task they asked for it for. The projection expires grants when either lease
+   * is released; this also covers grants logged before that rule existed.
+   */
   grantedPaths(state, participantId) {
-    const granted = /* @__PURE__ */ new Set();
+    const granted = [];
     for (const handoff of state.handoffs.values()) {
-      if (handoff.status === "granted" && handoff.requesterId === participantId) {
-        granted.add(handoff.path);
-      }
+      if (handoff.status !== "granted" || handoff.requesterId !== participantId) continue;
+      if (state.leases.get(handoff.heldByTaskId)?.holderId !== handoff.holderId) continue;
+      const own = handoff.requesterTaskId ? state.leases.get(handoff.requesterTaskId)?.holderId === participantId : [...state.leases.values()].some((lease) => lease.holderId === participantId);
+      if (own) granted.push(handoff.path);
     }
     return granted;
   }
@@ -66223,6 +66800,13 @@ Issue: ${command.issueRef}` : "",
     if (lease.holderId === participantId) {
       throw new ServiceError("bad_request", `You already hold ${command.path}.`);
     }
+    const mine = [...state.leases.values()].find((held) => held.holderId === participantId);
+    if (!mine) {
+      throw new ServiceError(
+        "not_ready",
+        `Claim the task you need ${command.path} for first; a handoff lasts as long as that task does.`
+      );
+    }
     const request = {
       id: randomUUID2(),
       sessionId,
@@ -66230,6 +66814,7 @@ Issue: ${command.issueRef}` : "",
       requesterId: participantId,
       holderId: lease.holderId,
       heldByTaskId: lease.taskId,
+      requesterTaskId: mine.taskId,
       reason: command.reason,
       status: "pending",
       createdAt: Date.now()
@@ -66258,9 +66843,10 @@ Issue: ${command.issueRef}` : "",
   // -- chat ----------------------------------------------------------------
   postChat(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
-    const loginToId = new Map(
-      [...state.participants.values()].map((p) => [p.githubLogin, p.id])
-    );
+    const loginToId = /* @__PURE__ */ new Map();
+    for (const p of state.participants.values()) {
+      loginToId.set(p.githubLogin, [...loginToId.get(p.githubLogin) ?? [], p.id]);
+    }
     const refs = parseTaskRefs(command.body, [...state.tasks.keys()]);
     const message = {
       id: randomUUID2(),
@@ -66278,8 +66864,15 @@ Issue: ${command.issueRef}` : "",
   }
   readChat(command, ctx) {
     const { state } = this.requireParticipant(ctx);
+    const latestId = state.chat.at(-1)?.id ?? null;
+    if (command.afterId) {
+      const index = state.chat.findIndex((m) => m.id === command.afterId);
+      if (index === -1) return { messages: [], latestId, cursorFound: false };
+      const after = state.chat.slice(index + 1).filter((m) => !command.taskRef || m.taskRef === command.taskRef);
+      return { messages: after.slice(0, command.limit), latestId, cursorFound: true };
+    }
     const filtered = command.taskRef ? state.chat.filter((m) => m.taskRef === command.taskRef) : state.chat;
-    return { messages: filtered.slice(-command.limit) };
+    return { messages: filtered.slice(-command.limit), latestId, cursorFound: true };
   }
   /**
    * Attributed to whatever they are holding, so cost lands on the ticket that
@@ -66413,13 +67006,17 @@ var Gateway = class {
   /**
    * A cross-origin WebSocket cannot carry the session cookie over plain http,
    * so the board trades the cookie for a 60-second ticket and presents that.
-   * A connection with no valid ticket is anonymous and can only ping.
+   * A connection with no valid ticket is anonymous and can only ping -- it used
+   * to be able to send `session.join` with any name it liked, which made the
+   * socket a way into any session as anyone.
    */
   onConnection(socket, request) {
     const url2 = new URL(request.url ?? "/ws", "http://localhost");
     const ticket = url2.searchParams.get("ticket");
-    const claims = ticket ? readWsTicket(this.auth, ticket) : null;
+    const checked = ticket ? readWsTicket(this.auth, ticket) : null;
+    const claims = checked?.ok ? checked.claims : null;
     const user = claims ? this.store.findUserById(claims.userId) : null;
+    const refusal = !ticket ? "This socket has no ticket. Fetch one from /api/ws-ticket and reconnect with ?ticket=." : !checked?.ok ? checked?.reason === "expired" ? "That ws ticket expired; tickets last a minute. Fetch a fresh one and reconnect." : "That ws ticket was not signed by this server." : !user ? "That ws ticket names a user this server does not know." : null;
     const connection = {
       socket,
       ctx: {
@@ -66432,24 +67029,30 @@ var Gateway = class {
           avatarUrl: user.avatarUrl
         } : null
       },
-      alive: true
+      alive: true,
+      bound: claims?.sessionId ? { sessionId: claims.sessionId, participantId: claims.participantId ?? null } : null,
+      refusal
     };
     this.connections.add(connection);
     socket.on("pong", () => {
       connection.alive = true;
+      if (connection.ctx.participantId) this.service.seen(connection.ctx.participantId);
     });
     socket.on("message", (raw) => this.onMessage(connection, raw.toString()));
     socket.on("close", () => this.onClose(connection));
     socket.on("error", () => this.onClose(connection));
   }
+  /**
+   * Closing a socket says nothing about whether its participant is still here.
+   * A board tab is one window onto a seat whose agent may be working away over
+   * HTTP -- and recording "disconnected" when the tab closed left that agent
+   * absent for good, since nothing on the HTTP side ever reconnects it, and the
+   * planner then routed work around someone who was right there. Presence is
+   * when a participant was last heard from, on any transport (see
+   * SessionService.isPresent), so there is nothing to record here.
+   */
   onClose(connection) {
-    if (!this.connections.delete(connection)) return;
-    const { sessionId, participantId } = connection.ctx;
-    if (!sessionId || !participantId) return;
-    const stillHere = [...this.connections].some(
-      (other) => other.ctx.participantId === participantId
-    );
-    if (!stillHere) this.service.markDisconnected(sessionId, participantId);
+    this.connections.delete(connection);
   }
   onMessage(connection, raw) {
     let parsed;
@@ -66476,7 +67079,34 @@ var Gateway = class {
     }
     this.runCommand(connection, parsed.reqId, parsed.command);
   }
+  /**
+   * What a socket may not do, whatever the service would say. Null when the
+   * command can go ahead.
+   */
+  refuse(connection, command) {
+    if (!connection.ctx.user) {
+      return new ServiceError("unauthorized", connection.refusal ?? "Authenticate first.");
+    }
+    if (command.type === "session.create") {
+      return new ServiceError("forbidden", "Open a session with POST /api/sessions.");
+    }
+    if (command.type === "session.join" && connection.bound) {
+      const target = this.store.findSessionIdByRef(command.sessionRef);
+      if (target !== connection.bound.sessionId) {
+        return new ServiceError("forbidden", "This socket was opened for another session.");
+      }
+    }
+    return null;
+  }
   runCommand(connection, reqId, command) {
+    const refused = this.refuse(connection, command);
+    if (refused) {
+      send(connection.socket, { kind: "err", reqId, code: refused.code, message: refused.message });
+      return;
+    }
+    if (command.type === "session.join" && connection.bound?.participantId && !connection.ctx.participantId) {
+      connection.ctx.participantId = connection.bound.participantId;
+    }
     try {
       const data = this.service.handle(command, connection.ctx);
       send(connection.socket, { kind: "ack", reqId, data });
@@ -66574,14 +67204,17 @@ var CreateSessionRequest = external_exports.object({
 });
 var JoinRequest = external_exports.object({
   token: external_exports.string().min(1),
-  repoPath: external_exports.string().min(1)
+  repoPath: external_exports.string().min(1),
+  machineId: external_exports.string().min(1).max(100).nullish()
 });
 var PeerJoinRequest = external_exports.object({
   invite: external_exports.string().min(1),
   githubLogin: external_exports.string().min(1),
   displayName: external_exports.string().min(1),
   /** Null when joining from a browser, which has no checkout to lease against. */
-  repoPath: external_exports.string().min(1).nullish()
+  repoPath: external_exports.string().min(1).nullish(),
+  /** Which machine the checkout is on; see Participant.machineId. */
+  machineId: external_exports.string().min(1).max(100).nullish()
 });
 function defaultWebRoot() {
   const here = dirname3(fileURLToPath(import.meta.url));
@@ -66623,18 +67256,35 @@ function createApp(options = {}) {
     }
     return user;
   };
+  const bearerClaims = (request) => {
+    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
+    const claims = bearer ? readParticipantToken(auth, bearer) : null;
+    if (!claims) return null;
+    return service.state(claims.sessionId).participants.has(claims.participantId) ? claims : null;
+  };
+  const isHost = (request) => isHostCredential(auth, request.headers[HOST_HEADER]);
   const logIn = (reply, user, redirectTo) => {
     reply.header("set-cookie", buildCookie(issueCookieValue(auth, user.id), auth.callbackUrl.startsWith("https://")));
     if (redirectTo) return reply.redirect(redirectTo);
     return reply.send({ user: toAuthUser(user) });
   };
-  fastify.get("/healthz", async () => ({
-    ok: true,
-    mode: auth.mode,
-    serverId: serverFingerprint(auth),
-    // Which code is running, so a client can tell a stale daemon from a fresh one.
-    build: buildId()
-  }));
+  fastify.get("/healthz", async () => {
+    const address = fastify.server.address();
+    return {
+      ok: true,
+      mode: auth.mode,
+      serverId: serverFingerprint(auth),
+      // Which code is running, so a client can tell a stale daemon from a fresh one.
+      build: buildId(),
+      /**
+       * Which process this is. A pid written to a file goes stale the moment the
+       * process dies, and the OS hands it to something else -- so the only pid
+       * worth signalling is the one the server reports about itself, right now.
+       */
+      pid: process.pid,
+      host: address && typeof address === "object" ? address.address : null
+    };
+  });
   fastify.get("/auth/github", async (request, reply) => {
     if (!auth.githubClientId) {
       return reply.code(503).send({
@@ -66666,7 +67316,7 @@ function createApp(options = {}) {
     }
   });
   fastify.post("/auth/dev", async (request, reply) => {
-    if (!devLoginAllowed(auth, request.socket.remoteAddress ?? request.ip)) {
+    if (!devLoginAllowed(auth, request.socket.remoteAddress ?? request.ip, request.headers)) {
       return reply.code(404).send({ error: "not_found" });
     }
     const { login } = request.body ?? {};
@@ -66684,20 +67334,30 @@ function createApp(options = {}) {
     return { ok: true };
   });
   fastify.get("/api/me", async (request) => {
-    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-    const claims = bearer ? readParticipantToken(auth, bearer) : null;
+    const claims = bearerClaims(request);
     const user = (claims ? store.findUserById(claims.userId) : null) ?? currentUser(request);
     return {
       mode: auth.mode,
-      user: user ? toAuthUser(user) : null,
+      /**
+       * `participantId` is the seat this token holds. One person can have a
+       * seat per checkout, so "the participant with my user id" is ambiguous;
+       * the token is not.
+       */
+      user: user ? { ...toAuthUser(user), participantId: claims?.participantId ?? null } : null,
       devLogin: auth.devLogin,
       githubConfigured: Boolean(auth.githubClientId)
     };
   });
   fastify.get("/api/ws-ticket", async (request, reply) => {
-    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-    const claims = bearer ? readParticipantToken(auth, bearer) : null;
-    if (claims) return { ticket: issueWsTicket(auth, claims.userId) };
+    const claims = bearerClaims(request);
+    if (claims) {
+      return {
+        ticket: issueWsTicket(auth, claims.userId, {
+          sessionId: claims.sessionId,
+          participantId: claims.participantId
+        })
+      };
+    }
     const user = requireUser(request, reply);
     if (!user) return;
     return { ticket: issueWsTicket(auth, user.id) };
@@ -66706,8 +67366,7 @@ function createApp(options = {}) {
     let visible = null;
     let user = null;
     if (auth.mode === "peer") {
-      const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-      const claims = bearer ? readParticipantToken(auth, bearer) : null;
+      const claims = bearerClaims(request);
       if (!claims) {
         return reply.code(401).send({ error: "unauthorized", message: "Open the board with an invite link." });
       }
@@ -66745,7 +67404,7 @@ function createApp(options = {}) {
   fastify.post("/api/sessions", async (request, reply) => {
     let user = null;
     if (auth.mode === "peer") {
-      if (!isLoopbackRequest(request)) {
+      if (!isHost(request)) {
         return reply.code(403).send({
           error: "forbidden",
           message: "Only the machine hosting this session can create one."
@@ -66774,8 +67433,7 @@ function createApp(options = {}) {
     }
   });
   fastify.get("/sessions/:ref/snapshot", async (request, reply) => {
-    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-    const claims = bearer ? readParticipantToken(auth, bearer) : null;
+    const claims = bearerClaims(request);
     if (!claims && !currentUser(request)) {
       return reply.code(401).send({ error: "unauthorized", message: "Sign in first." });
     }
@@ -66785,6 +67443,7 @@ function createApp(options = {}) {
     if (claims && claims.sessionId !== sessionId) {
       return reply.code(403).send({ error: "forbidden", message: "That token is for another session." });
     }
+    if (claims) service.seen(claims.participantId);
     return service.snapshotOf(sessionId);
   });
   fastify.post("/api/sessions/:ref/join-token", async (request, reply) => {
@@ -66822,6 +67481,7 @@ function createApp(options = {}) {
           githubLogin: user.githubLogin,
           displayName: user.displayName,
           repoPath: parsed.data.repoPath,
+          machineId: parsed.data.machineId ?? null,
           fromSeq: null
         },
         { sessionId: redeemed.sessionId, participantId: null, user: toAuthUser(user) }
@@ -66843,18 +67503,29 @@ function createApp(options = {}) {
     }
   });
   fastify.post("/api/sessions/:ref/invite", async (request, reply) => {
-    if (auth.mode !== "peer") {
+    const { ref } = request.params;
+    const sessionId = store.findSessionIdByRef(ref);
+    if (auth.mode === "peer") {
+      const claims = bearerClaims(request);
+      const allowed = isHost(request) || claims !== null && claims.sessionId === sessionId;
+      if (!allowed) {
+        return reply.code(403).send({
+          error: "forbidden",
+          message: "Only someone already in this session, or its host, can invite people to it."
+        });
+      }
+    } else {
       const user = requireUser(request, reply);
       if (!user) return;
     }
-    const { ref } = request.params;
-    const sessionId = store.findSessionIdByRef(ref);
     if (!sessionId) return reply.code(404).send({ error: "not_found" });
     const state = service.state(sessionId);
     return {
       invite: issueInvite(auth, sessionId),
       sessionRef: state.session?.slug ?? ref,
-      sessionTitle: state.session?.title ?? ref
+      sessionTitle: state.session?.title ?? ref,
+      // So a host resuming by slug can tell its own session from a namesake's.
+      repo: state.session?.repo ?? null
     };
   });
   fastify.post("/api/peer/join", async (request, reply) => {
@@ -66865,14 +67536,9 @@ function createApp(options = {}) {
     if (!parsed.success) {
       return reply.code(400).send({ error: "bad_request", message: parsed.error.message });
     }
-    const claims = readInvite(auth, parsed.data.invite);
-    if (!claims) {
-      return reply.code(401).send({
-        error: "unauthorized",
-        message: `That invite was not signed by this server (${serverFingerprint(auth)}). If a teammate sent it, the address inside it is pointing at your own machine -- ask them to re-run /ss:host so the invite carries their network address.`,
-        serverId: serverFingerprint(auth)
-      });
-    }
+    const checked = readInvite(auth, parsed.data.invite);
+    if (!checked.ok) return reply.code(401).send(inviteRefusal(checked, serverFingerprint(auth)));
+    const claims = checked.claims;
     const state = service.state(claims.sessionId);
     if (!state.session) return reply.code(404).send({ error: "not_found" });
     const record2 = upsertUser(store, {
@@ -66890,6 +67556,7 @@ function createApp(options = {}) {
           githubLogin: user.githubLogin,
           displayName: user.displayName,
           repoPath: parsed.data.repoPath ?? null,
+          machineId: parsed.data.machineId ?? null,
           fromSeq: null
         },
         { sessionId: claims.sessionId, participantId: null, user }
@@ -66915,16 +67582,33 @@ function createApp(options = {}) {
     if (!parsed.success) {
       return reply.code(400).send({ error: "bad_request", message: parsed.error.message });
     }
-    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-    const claims = bearer ? readParticipantToken(auth, bearer) : null;
+    const { command } = parsed.data;
+    if (command.type === "session.create") {
+      return reply.code(403).send({
+        error: "forbidden",
+        message: "Open a session with POST /api/sessions."
+      });
+    }
+    const claims = bearerClaims(request);
     let sessionId = null;
     let participantId = null;
     let user = null;
     if (claims) {
+      const named = [parsed.data.sessionRef, command.type === "session.join" ? command.sessionRef : null];
+      for (const ref of named) {
+        if (!ref) continue;
+        if (store.findSessionIdByRef(ref) !== claims.sessionId) {
+          return reply.code(403).send({
+            error: "forbidden",
+            message: "That token is for another session."
+          });
+        }
+      }
       sessionId = claims.sessionId;
       participantId = claims.participantId;
       const record2 = store.findUserById(claims.userId);
-      user = record2 ? toAuthUser(record2) : null;
+      if (!record2) return reply.code(401).send({ error: "unauthorized", message: "Unknown user." });
+      user = toAuthUser(record2);
     } else {
       const record2 = currentUser(request);
       if (!record2) {
@@ -66941,7 +67625,7 @@ function createApp(options = {}) {
       }
     }
     try {
-      const data = service.handle(parsed.data.command, { sessionId, participantId, user });
+      const data = service.handle(command, { sessionId, participantId, user });
       return { data };
     } catch (error51) {
       return sendServiceError(reply, error51);
@@ -66985,8 +67669,30 @@ function isLoopbackAddress(address) {
   const normalised = address.replace(/^::ffff:/, "");
   return normalised === "127.0.0.1" || normalised === "::1" || normalised.startsWith("127.");
 }
-function isLoopbackRequest(request) {
-  return isLoopbackAddress(request.socket.remoteAddress ?? request.ip);
+function inviteRefusal(checked, serverId) {
+  switch (checked.reason) {
+    case "expired":
+      return {
+        error: "unauthorized",
+        reason: "expired",
+        message: `That invite expired${checked.expiredAt ? ` on ${new Date(checked.expiredAt).toISOString().slice(0, 10)}` : ""}. Ask whoever sent it for a fresh one -- /ss:board or /ss:host on their side mints a new link.`,
+        serverId
+      };
+    case "malformed":
+      return {
+        error: "unauthorized",
+        reason: "malformed",
+        message: "That invite is damaged -- most likely it was cut short or wrapped when it was copied. Ask for it again.",
+        serverId
+      };
+    case "signature":
+      return {
+        error: "unauthorized",
+        reason: "signature",
+        message: `That invite was not signed by this server (${serverId}). If a teammate sent it, the address inside it is pointing at your own machine -- ask them to re-run /ss:host so the invite carries their network address.`,
+        serverId
+      };
+  }
 }
 function countBy(values) {
   const counts = {};
