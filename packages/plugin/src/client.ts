@@ -1,15 +1,26 @@
 import type { ClientCommand, CommandResultMap } from '@session-share/protocol'
 import { machineId } from './daemon.js'
 
+/**
+ * A refusal from the server, with enough of the answer kept to act on. The
+ * message is for people; `status` and `reason` are for code, which used to
+ * have nothing but the message to pattern-match on.
+ */
 export class CommandError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    /** The HTTP status, when the refusal came over HTTP. */
+    readonly status: number | null = null,
+    /** Why a token was refused -- `token_invalid`, `session_gone`, `seat_gone`, `other_session`. */
+    readonly reason: string | null = null,
   ) {
     super(message)
     this.name = 'CommandError'
   }
 }
+
+type Refusal = { error?: string; message?: string; reason?: string }
 
 /**
  * One-shot HTTP client. Deliberately not a WebSocket: the hook is a new process
@@ -50,9 +61,14 @@ export async function peerJoin(
     // The machine makes the checkout: same path, different laptop, different seat.
     body: JSON.stringify({ invite, repoPath, machineId: repoPath ? machineId() : null, ...identity }),
   })
-  const payload = (await response.json()) as PairResult & { error?: string; message?: string }
+  const payload = (await response.json()) as PairResult & Refusal
   if (!response.ok) {
-    throw new CommandError(payload.error ?? 'internal', payload.message ?? 'join failed')
+    throw new CommandError(
+      payload.error ?? 'internal',
+      payload.message ?? 'join failed',
+      response.status,
+      payload.reason ?? null,
+    )
   }
   return payload
 }
@@ -71,8 +87,15 @@ export async function pair(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ token, repoPath, machineId: machineId() }),
   })
-  const payload = (await response.json()) as PairResult & { error?: string; message?: string }
-  if (!response.ok) throw new CommandError(payload.error ?? 'internal', payload.message ?? 'join failed')
+  const payload = (await response.json()) as PairResult & Refusal
+  if (!response.ok) {
+    throw new CommandError(
+      payload.error ?? 'internal',
+      payload.message ?? 'join failed',
+      response.status,
+      payload.reason ?? null,
+    )
+  }
   return payload
 }
 
@@ -97,13 +120,16 @@ export async function runCommand<T extends ClientCommand['type']>(
       signal: controller.signal,
     })
 
-    const payload = (await response.json()) as
-      | { data: CommandResultMap[T] }
-      | { error: string; message?: string }
+    const payload = (await response.json()) as { data: CommandResultMap[T] } | (Refusal & { error: string })
 
     if (!response.ok || 'error' in payload) {
-      const failure = payload as { error: string; message?: string }
-      throw new CommandError(failure.error, failure.message ?? failure.error)
+      const failure = payload as Refusal & { error: string }
+      throw new CommandError(
+        failure.error,
+        failure.message ?? failure.error,
+        response.status,
+        failure.reason ?? null,
+      )
     }
     return payload.data
   } finally {

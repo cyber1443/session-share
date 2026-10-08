@@ -1,7 +1,15 @@
 import { strict as assert } from 'node:assert'
 import { after, before, describe, it } from 'node:test'
 import { createApp } from '../dist/index.js'
-import { HOST_HEADER, devLoginAllowed, encodeToken, hostCredential } from '../dist/auth.js'
+import {
+  HOST_HEADER,
+  devLoginAllowed,
+  encodeToken,
+  hostCredential,
+  issueParticipantToken,
+  readParticipantToken,
+  upsertUser,
+} from '../dist/auth.js'
 import { TestClient, expectError, settle, ticketFor, useApp } from './client.js'
 
 /**
@@ -314,5 +322,113 @@ describe('a refused invite', () => {
   it('calls a mangled one damaged', async () => {
     const joined = await peerJoin('not-even-close', 'erin', null)
     assert.equal(joined.body.reason, 'malformed')
+  })
+})
+
+describe('a handle recorded by an older server', () => {
+  it('keeps its seat after the upgrade, under the same case it was typed in', async () => {
+    const invite = await host('case-upgrade')
+    // The seat as a server that lower-cased handles would have recorded it.
+    const old = upsertUser(app.store, {
+      githubId: 'peer:anesmehagic',
+      githubLogin: 'AnesMehagic',
+      displayName: 'Anes',
+      avatarUrl: null,
+    })
+    const sessionId = app.store.findSessionIdByRef('case-upgrade')
+    const seated = app.service.handle(
+      { type: 'session.join', sessionRef: 'case-upgrade', repoPath: '/repo', machineId: 'm1', fromSeq: null },
+      { sessionId: null, participantId: null, user: { id: old.id, githubLogin: 'AnesMehagic', displayName: 'Anes', avatarUrl: null } },
+    )
+
+    const rejoin = await peerJoin(invite, 'AnesMehagic', '/repo', 'm1')
+    assert.equal(rejoin.status, 200, JSON.stringify(rejoin.body))
+    assert.equal(rejoin.body.participantId, seated.participantId, 'the same seat, not a new one')
+    assert.equal(rejoin.body.githubLogin, 'AnesMehagic')
+    assert.equal(app.service.state(sessionId).participants.size, 1)
+    assert.equal(app.store.findUserByGithubId('peer:AnesMehagic')?.id, old.id, 're-keyed under the exact handle')
+  })
+
+  it('is not handed to someone whose handle only folds to the same thing', async () => {
+    const invite = await host('case-other')
+    const old = upsertUser(app.store, {
+      githubId: 'peer:kim-ray',
+      githubLogin: 'kim-ray',
+      displayName: 'Kim',
+      avatarUrl: null,
+    })
+    const joined = (await peerJoin(invite, 'Kim-Ray', '/elsewhere', 'm2')).body
+    const me = await call('GET', '/api/me', null, bearer(joined.participantToken))
+    assert.notEqual(me.body.user.id, old.id)
+  })
+})
+
+describe('a token the server cannot honour', () => {
+  const sync = (headers, sessionRef) =>
+    call('POST', '/api/commands', { ...(sessionRef ? { sessionRef } : {}), command: { type: 'session.sync', fromSeq: 0 } }, headers)
+
+  it('says it was not signed here', async () => {
+    const refused = await sync(bearer('not.atoken'))
+    assert.equal(refused.status, 401)
+    assert.equal(refused.body.reason, 'token_invalid')
+  })
+
+  it('says the session has gone', async () => {
+    const token = issueParticipantToken(app.auth, {
+      participantId: '00000000-0000-0000-0000-000000000001',
+      sessionId: '00000000-0000-0000-0000-000000000002',
+      userId: 'nobody',
+    })
+    const refused = await sync(bearer(token))
+    assert.equal(refused.status, 404)
+    assert.equal(refused.body.reason, 'session_gone')
+    const snapshot = await call('GET', '/sessions/whatever/snapshot', null, bearer(token))
+    assert.equal(snapshot.body.reason, 'session_gone')
+  })
+
+  it('says the seat has gone', async () => {
+    await host('seat-gone')
+    const token = issueParticipantToken(app.auth, {
+      participantId: '00000000-0000-0000-0000-000000000003',
+      sessionId: app.store.findSessionIdByRef('seat-gone'),
+      userId: 'nobody',
+    })
+    for (const refused of [
+      await sync(bearer(token)),
+      await call('GET', '/sessions/seat-gone/snapshot', null, bearer(token)),
+      await call('GET', '/api/ws-ticket', null, bearer(token)),
+    ]) {
+      assert.equal(refused.status, 404)
+      assert.equal(refused.body.reason, 'seat_gone')
+    }
+  })
+
+  it('says it is for another session', async () => {
+    const invite = await host('other-a')
+    await host('other-b')
+    const alice = (await peerJoin(invite, 'alice', '/tmp/other-a')).body
+    const refused = await sync(bearer(alice.participantToken), 'other-b')
+    assert.equal(refused.status, 403)
+    assert.equal(refused.body.reason, 'other_session')
+  })
+})
+
+describe('a board in a checkout\'s seat', () => {
+  it('gets a token marked as a board, which does not keep the checkout at work', async () => {
+    const invite = await host('board-seat')
+    const checkout = (await peerJoin(invite, 'fay', '/w/fay', 'm1')).body
+    const board = (await peerJoin(invite, 'fay', null)).body
+    assert.equal(board.participantId, checkout.participantId)
+    assert.equal(readParticipantToken(app.auth, board.participantToken).board, true)
+    assert.equal(readParticipantToken(app.auth, checkout.participantToken).board, undefined)
+
+    const id = checkout.participantId
+    app.service.lastWorked.set(id, 0)
+    await call('POST', '/api/commands', { command: { type: 'chat.read' } }, bearer(board.participantToken))
+    await call('GET', '/sessions/board-seat/snapshot', null, bearer(board.participantToken))
+    assert.equal(app.service.lastWorked.get(id), 0, 'the board only watched')
+
+    await call('POST', '/api/commands', { command: { type: 'chat.read' } }, bearer(checkout.participantToken))
+    assert.ok(app.service.lastWorked.get(id) > 0, 'the checkout worked')
   })
 })

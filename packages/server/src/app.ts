@@ -28,13 +28,14 @@ import {
   issueWsTicket,
   isHostCredential,
   loadAuthConfig,
-  peerUserId,
   readInvite,
   readParticipantToken,
   readUserIdFromCookies,
   serverFingerprint,
+  upsertPeerUser,
   upsertUser,
   type AuthConfig,
+  type ParticipantClaims,
   type TokenFailure,
   type User,
 } from './auth.js'
@@ -52,6 +53,45 @@ const STATUS: Record<ErrorCode, number> = {
   not_ready: 409,
   internal: 500,
 }
+
+/**
+ * Why a participant token was not honoured. `reason` is the part to branch
+ * on: the status alone cannot tell "this server never signed it" from "this
+ * server signed it and has since lost what it named".
+ */
+const TOKEN_REFUSALS = {
+  token_invalid: {
+    status: 401,
+    error: 'unauthorized',
+    reason: 'token_invalid',
+    message:
+      'That token was not signed by this server -- it came from another server, or this one restarted with a new secret. Join again with a fresh invite.',
+  },
+  session_gone: {
+    status: 404,
+    error: 'not_found',
+    reason: 'session_gone',
+    message:
+      'This server has no such session -- it was hosted somewhere else, or its database was reset. Ask for a fresh invite.',
+  },
+  seat_gone: {
+    status: 404,
+    error: 'not_found',
+    reason: 'seat_gone',
+    message: 'The seat this token was for is no longer in the session. Join again with the invite.',
+  },
+} as const
+
+const OTHER_SESSION = {
+  error: 'forbidden',
+  reason: 'other_session',
+  message: 'That token is for another session.',
+} as const
+
+type BearerCheck =
+  | { ok: true; claims: ParticipantClaims }
+  | ({ ok: false } & (typeof TOKEN_REFUSALS)[keyof typeof TOKEN_REFUSALS])
+  | null
 
 const OneShotRequest = z.object({
   /** Only needed when authenticating by cookie; a participant token carries it. */
@@ -156,16 +196,50 @@ export function createApp(options: AppOptions = {}): App {
   }
 
   /**
-   * The participant token on a request, if it carries one that still names a
-   * seat in its session. A token whose participant has gone is treated as no
-   * token rather than as a credential for an empty chair.
+   * The participant token on a request, and what is wrong with it if it cannot
+   * be used. A token whose participant has gone is never a credential for an
+   * empty chair -- but it used to read as no token at all, so a server that
+   * had lost the session and one that had never signed the token both said
+   * "sign in", and nothing on the other end could tell which fix it needed.
+   * Each refusal now carries a `reason` a client can branch on.
    */
-  const bearerClaims = (request: FastifyRequest) => {
-    const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, '')
-    const claims = bearer ? readParticipantToken(auth, bearer) : null
-    if (!claims) return null
-    return service.state(claims.sessionId).participants.has(claims.participantId) ? claims : null
+  const bearer = (request: FastifyRequest): BearerCheck => {
+    const presented = request.headers.authorization?.replace(/^Bearer\s+/i, '')
+    if (!presented) return null
+    const claims = readParticipantToken(auth, presented)
+    if (!claims) return { ok: false, ...TOKEN_REFUSALS.token_invalid }
+    const state = service.state(claims.sessionId)
+    if (!state.session) return { ok: false, ...TOKEN_REFUSALS.session_gone }
+    if (!state.participants.has(claims.participantId)) return { ok: false, ...TOKEN_REFUSALS.seat_gone }
+    return { ok: true, claims }
   }
+
+  const bearerClaims = (request: FastifyRequest) => {
+    const checked = bearer(request)
+    return checked?.ok ? checked.claims : null
+  }
+
+  /**
+   * Answers a request that had no usable credential: with what was wrong with
+   * the token it presented, if it presented one, and otherwise with `fallback`.
+   */
+  const refuse = (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    fallback: { status: number; body: Record<string, unknown> },
+  ) => {
+    const checked = bearer(request)
+    if (checked && !checked.ok) {
+      return reply
+        .code(checked.status)
+        .send({ error: checked.error, reason: checked.reason, message: checked.message })
+    }
+    return reply.code(fallback.status).send(fallback.body)
+  }
+
+  /** A cookie is a browser's, and so is a token minted without a checkout. */
+  const via = (claims: ParticipantClaims | null): 'board' | 'checkout' =>
+    claims && !claims.board ? 'checkout' : 'board'
 
   /** Whoever runs this server. See hostCredential for why this is not an address check. */
   const isHost = (request: FastifyRequest) => isHostCredential(auth, request.headers[HOST_HEADER])
@@ -300,8 +374,13 @@ export function createApp(options: AppOptions = {}): App {
       }
     }
 
-    const user = requireUser(request, reply)
-    if (!user) return
+    const user = currentUser(request)
+    if (!user) {
+      return refuse(request, reply, {
+        status: 401,
+        body: { error: 'unauthorized', message: 'Sign in first.' },
+      })
+    }
     return { ticket: issueWsTicket(auth, user.id) }
   })
 
@@ -319,9 +398,10 @@ export function createApp(options: AppOptions = {}): App {
     if (auth.mode === 'peer') {
       const claims = bearerClaims(request)
       if (!claims) {
-        return reply
-          .code(401)
-          .send({ error: 'unauthorized', message: 'Open the board with an invite link.' })
+        return refuse(request, reply, {
+          status: 401,
+          body: { error: 'unauthorized', message: 'Open the board with an invite link.' },
+        })
       }
       visible = [claims.sessionId]
     } else {
@@ -400,17 +480,26 @@ export function createApp(options: AppOptions = {}): App {
   fastify.get('/sessions/:ref/snapshot', async (request, reply) => {
     const claims = bearerClaims(request)
     if (!claims && !currentUser(request)) {
-      return reply.code(401).send({ error: 'unauthorized', message: 'Sign in first.' })
+      return refuse(request, reply, {
+        status: 401,
+        body: { error: 'unauthorized', message: 'Sign in first.' },
+      })
     }
 
     const { ref } = request.params as { ref: string }
     const sessionId = store.findSessionIdByRef(ref)
-    if (!sessionId) return reply.code(404).send({ error: 'not_found' })
+    if (!sessionId) {
+      const { error, reason, message } = TOKEN_REFUSALS.session_gone
+      return reply.code(404).send({ error, reason, message })
+    }
     if (claims && claims.sessionId !== sessionId) {
-      return reply.code(403).send({ error: 'forbidden', message: 'That token is for another session.' })
+      return reply.code(403).send(OTHER_SESSION)
     }
     // Reading the session is being here: an agent that only polls is still present.
-    if (claims) service.seen(claims.participantId)
+    if (claims) {
+      if (via(claims) === 'checkout') service.worked(claims.participantId)
+      else service.seen(claims.participantId)
+    }
     return service.snapshotOf(sessionId)
   })
 
@@ -505,9 +594,12 @@ export function createApp(options: AppOptions = {}): App {
       const claims = bearerClaims(request)
       const allowed = isHost(request) || (claims !== null && claims.sessionId === sessionId)
       if (!allowed) {
-        return reply.code(403).send({
-          error: 'forbidden',
-          message: 'Only someone already in this session, or its host, can invite people to it.',
+        return refuse(request, reply, {
+          status: 403,
+          body: {
+            error: 'forbidden',
+            message: 'Only someone already in this session, or its host, can invite people to it.',
+          },
         })
       }
     } else {
@@ -552,8 +644,7 @@ export function createApp(options: AppOptions = {}): App {
 
     // Recorded like any other user so presence, ws tickets and rejoins all work
     // the same; the difference is only that nothing verified this name.
-    const record = upsertUser(store, {
-      githubId: peerUserId(parsed.data.githubLogin),
+    const record = upsertPeerUser(store, {
       githubLogin: parsed.data.githubLogin,
       displayName: parsed.data.displayName,
       avatarUrl: null,
@@ -571,7 +662,12 @@ export function createApp(options: AppOptions = {}): App {
           machineId: parsed.data.machineId ?? null,
           fromSeq: null,
         },
-        { sessionId: claims.sessionId, participantId: null, user },
+        {
+          sessionId: claims.sessionId,
+          participantId: null,
+          user,
+          via: parsed.data.repoPath ? 'checkout' : 'board',
+        },
       )
 
       return {
@@ -580,6 +676,7 @@ export function createApp(options: AppOptions = {}): App {
           participantId: result.participantId,
           sessionId: claims.sessionId,
           userId: user.id,
+          ...(parsed.data.repoPath ? {} : { board: true }),
         }),
         sessionRef: state.session.slug,
         sessionTitle: state.session.title,
@@ -635,10 +732,7 @@ export function createApp(options: AppOptions = {}): App {
       for (const ref of named) {
         if (!ref) continue
         if (store.findSessionIdByRef(ref) !== claims.sessionId) {
-          return reply.code(403).send({
-            error: 'forbidden',
-            message: 'That token is for another session.',
-          })
+          return reply.code(403).send(OTHER_SESSION)
         }
       }
       sessionId = claims.sessionId
@@ -649,9 +743,12 @@ export function createApp(options: AppOptions = {}): App {
     } else {
       const record = currentUser(request)
       if (!record) {
-        return reply.code(401).send({
-          error: 'unauthorized',
-          message: 'Sign in, or attach this checkout with /ss:join <code>.',
+        return refuse(request, reply, {
+          status: 401,
+          body: {
+            error: 'unauthorized',
+            message: 'Sign in, or attach this checkout with /ss:join <code>.',
+          },
         })
       }
       user = toAuthUser(record)
@@ -665,7 +762,12 @@ export function createApp(options: AppOptions = {}): App {
     }
 
     try {
-      const data = service.handle(command as never, { sessionId, participantId, user })
+      const data = service.handle(command as never, {
+        sessionId,
+        participantId,
+        user,
+        via: via(claims),
+      })
       return { data }
     } catch (error) {
       return sendServiceError(reply, error)

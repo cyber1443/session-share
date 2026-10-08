@@ -140,6 +140,13 @@ export interface ParticipantClaims {
   participantId: ParticipantId
   sessionId: SessionId
   userId: string
+  /**
+   * Set on a token minted for a browser, which has no checkout. It may sit in
+   * a checkout's seat, but what it sends is someone watching, not the
+   * checkout working -- see SessionService.isWorking. Absent on every token
+   * minted before the distinction, all of which were checkouts' own.
+   */
+  board?: boolean
 }
 
 export interface WsTicketClaims {
@@ -247,6 +254,30 @@ export function readInvite(config: AuthConfig, invite: string): TokenCheck<Invit
  */
 export function peerUserId(githubLogin: string): string {
   return `peer:${githubLogin}`
+}
+
+/**
+ * Finds or creates the record for a peer handle, carrying over one written by
+ * an older server. Those folded the handle to lower case, so "AnesMehagic"
+ * was stored as `peer:anesmehagic` -- and looking only under the exact handle
+ * after an upgrade made a new user for the same person, whose old seat still
+ * held the lead and the leases while the new one was refused its own checkout
+ * as somebody else's.
+ *
+ * The folded record is only taken over when the login it last recorded is
+ * this exact handle. That is the case-sensitive name the person actually
+ * typed, so "Sam-Lee" does not inherit a record "sam-lee" left behind. Once
+ * taken over it is re-keyed under the exact handle, so the folded id is free
+ * again and this lookup only ever happens once.
+ */
+export function upsertPeerUser(store: Store, profile: Omit<User, 'id' | 'githubId'>): User {
+  const githubId = peerUserId(profile.githubLogin)
+  if (!store.findUserByGithubId(githubId)) {
+    const folded = peerUserId(profile.githubLogin.toLowerCase())
+    const legacy = folded === githubId ? null : store.findUserByGithubId(folded)
+    if (legacy && legacy.githubLogin === profile.githubLogin) store.rekeyUser(legacy.id, githubId)
+  }
+  return upsertUser(store, { ...profile, githubId })
 }
 
 /**

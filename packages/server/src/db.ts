@@ -176,6 +176,11 @@ export class Store {
       .run(user.id, user.githubId, user.githubLogin, user.displayName, user.avatarUrl)
   }
 
+  /** Moves a user to a new identity key, keeping their id and so every seat they hold. */
+  rekeyUser(id: string, githubId: string): void {
+    this.db.prepare('UPDATE users SET github_id = ? WHERE id = ?').run(githubId, id)
+  }
+
   findUserByGithubId(githubId: string): User | null {
     const row = this.db.prepare('SELECT * FROM users WHERE github_id = ?').get(githubId) as
       | UserRow

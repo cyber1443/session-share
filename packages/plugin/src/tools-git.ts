@@ -143,6 +143,8 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       try {
         const config = ctx.config()
         attached = true
+        // The token first, through the client that keeps the server's status and reason.
+        await runCommand(config, { type: 'session.sync', fromSeq: 0 })
         const state = await ctx.snapshot(config)
         const mine = state.participants.find((p) => p.id === config.participantId)
         lines.push(`session    "${state.session.title}" — phase ${state.session.phase}`)
@@ -154,20 +156,25 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
         /**
          * "Did not answer" was said about every failure, including the server
          * answering perfectly clearly that it does not know this token. Those
-         * need different fixes, so they get different words.
+         * need different fixes, so they get different words -- chosen by the
+         * status and reason the server sent, not by searching its prose.
          */
         const message = error instanceof Error ? error.message : String(error)
-        const status = Number(message.match(/\b(401|403|404)\b/)?.[1] ?? 0)
+        const refusal = error as { status?: number | null; reason?: string | null }
+        const status = typeof refusal.status === 'number' ? refusal.status : 0
+        const reason = refusal.reason ?? null
         lines.push(
           !attached
             ? 'session    this checkout is not attached — run /ss:host or /ss:join'
-            : status === 401
-              ? 'session    attached, but the server does not accept this checkout\'s token — it was minted by a different server or a different secret. Join again with a fresh invite'
-              : status === 403
-                ? 'session    attached, but the token is for a different session than the one configured here. Join again with a fresh invite'
-                : status === 404
-                  ? 'session    the server answered but has no such session — it was hosted on another server, or its database was reset. Ask for a fresh invite'
-                  : `session    attached, but the server did not answer: ${message}`,
+            : reason === 'seat_gone'
+              ? 'session    the session is there, but this checkout\'s seat has left it. Join again with the invite'
+              : reason === 'session_gone' || status === 404
+                ? 'session    the server answered but has no such session — it was hosted on another server, or its database was reset. Ask for a fresh invite'
+                : reason === 'other_session' || status === 403
+                  ? 'session    attached, but the token is for a different session than the one configured here. Join again with a fresh invite'
+                  : reason === 'token_invalid' || status === 401
+                    ? 'session    attached, but the server does not accept this checkout\'s token — it was minted by a different server or a different secret. Join again with a fresh invite'
+                    : `session    attached, but the server did not answer: ${message}`,
         )
       }
 

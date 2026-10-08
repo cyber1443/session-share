@@ -118,6 +118,8 @@ export class Gateway {
               avatarUrl: user.avatarUrl,
             }
           : null,
+        // Only a browser holds a socket; checkouts speak over HTTP.
+        via: 'board',
       },
       alive: true,
       bound: claims?.sessionId
