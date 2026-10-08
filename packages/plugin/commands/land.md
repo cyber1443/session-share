@@ -1,6 +1,6 @@
 ---
 description: Create the session branch and commit the approved contract
-allowed-tools: Bash, mcp__session-share__ss_land_contract, mcp__session-share__ss_status
+allowed-tools: Bash, mcp__session-share__ss_land_contract, mcp__plugin_ss_session-share__ss_land_contract, mcp__session-share__ss_status, mcp__plugin_ss_session-share__ss_status
 ---
 
 Land the contract so the work can start.

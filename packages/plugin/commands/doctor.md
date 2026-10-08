@@ -1,6 +1,6 @@
 ---
 description: Check this machine is ready for a real session, before blaming the session
-allowed-tools: Bash, mcp__session-share__ss_doctor
+allowed-tools: Bash, mcp__session-share__ss_doctor, mcp__plugin_ss_session-share__ss_doctor
 ---
 
 Call `ss_doctor` and report what it says.

@@ -1,6 +1,6 @@
 ---
 description: Show the session board as text - phase, people, task DAG, blockers
-allowed-tools: mcp__session-share__ss_status, mcp__session-share__ss_get_my_task
+allowed-tools: mcp__session-share__ss_status, mcp__plugin_ss_session-share__ss_status, mcp__session-share__ss_get_my_task, mcp__plugin_ss_session-share__ss_get_my_task
 ---
 
 Call `ss_status`, then `ss_get_my_task`.

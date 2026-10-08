@@ -1,6 +1,6 @@
 ---
 description: Open the pull request for the finished session
-allowed-tools: Bash, mcp__session-share__ss_ship, mcp__session-share__ss_status
+allowed-tools: Bash, mcp__session-share__ss_ship, mcp__plugin_ss_session-share__ss_ship, mcp__session-share__ss_status, mcp__plugin_ss_session-share__ss_status
 ---
 
 Call `ss_ship`.

@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert'
 import { spawn } from 'node:child_process'
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -130,7 +130,9 @@ let bobCookie
 let stateDir
 
 before(async () => {
-  app = createApp({ dbPath: ':memory:', auth: { devLogin: true, secret: 'test-secret' } })
+  // The hosted flow -- cookies and join codes -- so the server has to be in the
+  // mode that verifies people; peer mode only lets the host open sessions.
+  app = createApp({ dbPath: ':memory:', auth: { mode: 'oauth', devLogin: true, secret: 'test-secret' } })
   baseUrl = await app.listen(0)
 
   aliceRepo = mkdtempSync(join(tmpdir(), 'ss-alice-'))
@@ -187,6 +189,23 @@ describe('path handling', () => {
     assert.deepEqual(extractPaths({ notebook_path: 'nb.ipynb' }), ['nb.ipynb'])
     assert.deepEqual(extractPaths({}), [])
     assert.deepEqual(extractPaths(undefined), [])
+  })
+
+  it('sees through a symlink and the case a path was typed in', () => {
+    const real = mkdtempSync(join(tmpdir(), 'ss-canonical-'))
+    mkdirSync(join(real, 'src'))
+    writeFileSync(join(real, 'src', 'secret.ts'), '')
+    const link = `${real}-link`
+    symlinkSync(real, link)
+
+    assert.equal(toRepoRelative(real, link, 'src/secret.ts'), 'src/secret.ts')
+    assert.equal(toRepoRelative(link, real, 'src/new-file.ts'), 'src/new-file.ts')
+    if (existsSync(join(real, 'SRC', 'SECRET.TS'))) {
+      // A case-insensitive volume: the spelling on disk is what gets checked.
+      assert.equal(toRepoRelative(real, real, 'SRC/SECRET.TS'), 'src/secret.ts')
+    }
+    rmSync(link)
+    rmSync(real, { recursive: true, force: true })
   })
 
   it('rewrites an absolute path to repo-relative', () => {
@@ -289,6 +308,8 @@ describe('the hook against a live session', () => {
 
   it('opens the path once the holder grants a handoff', async () => {
     const path = 'src/components/theme-toggle/index.tsx'
+    // A handoff lasts as long as the task it was asked for, so Bob holds one.
+    await command(bobRepo, { type: 'task.claim', taskId: 'theme-persist' })
     const { request } = await command(bobRepo, {
       type: 'handoff.request',
       path,
@@ -412,6 +433,22 @@ describe('directives from the room', () => {
     assert.deepEqual(await pendingDirectives(config), [], 'and then it is handed over exactly once')
   })
 
+  /**
+   * The room is read in pages from the last message handed over, in the
+   * server's order. A window of "the latest fifty" lost any directive that
+   * fifty ordinary messages had buried by the time the turn ended.
+   */
+  it('does not lose a directive buried under a busy room', async () => {
+    await say(aliceRepo, 'the buried instruction', { directive: true })
+    for (let i = 0; i < 60; i++) await say(aliceRepo, `chatter ${i}`)
+    await say(aliceRepo, 'the latest instruction', { directive: true })
+
+    const output = await stop(bobRepo)
+    assert.match(output.reason, /the buried instruction/)
+    assert.match(output.reason, /the latest instruction/)
+    assert.equal(await stop(bobRepo), null)
+  })
+
   it('fails open when the server cannot be reached', async () => {
     const orphan = mkdtempSync(join(tmpdir(), 'ss-orphan-room-'))
     writeConfig(orphan, {
@@ -468,6 +505,34 @@ describe('reading what a turn cost', () => {
 
     writeFileSync(transcript, line({ input_tokens: 1, output_tokens: 7 }))
     assert.equal(usageSince(transcript).outputTokens, 7)
+  })
+
+  /**
+   * The offset is in bytes. Slicing a decoded string by it drifted by one for
+   * every multi-byte character before it, and then every later turn counted
+   * nothing at all.
+   */
+  it('counts correctly after text that is not ASCII', async () => {
+    const { usageSince } = await import('../dist/usage.js')
+    const transcript = join(stateDir, 'unicode.jsonl')
+    writeFileSync(
+      transcript,
+      `${JSON.stringify({ type: 'user', message: { content: 'em \u2014 dash \u00e9\u00e8 \ud83d\ude00' } })}\n` +
+        line({ input_tokens: 1, output_tokens: 100 }),
+    )
+    assert.equal(usageSince(transcript).outputTokens, 100)
+    appendFileSync(transcript, line({ input_tokens: 1, output_tokens: 1000 }))
+    assert.equal(usageSince(transcript).outputTokens, 1000)
+  })
+
+  it('leaves a line that is still being written for the next read', async () => {
+    const { usageSince } = await import('../dist/usage.js')
+    const transcript = join(stateDir, 'growing.jsonl')
+    const whole = line({ input_tokens: 1, output_tokens: 7 })
+    writeFileSync(transcript, whole.slice(0, 20))
+    assert.equal(usageSince(transcript).outputTokens, 0)
+    appendFileSync(transcript, whole.slice(20))
+    assert.equal(usageSince(transcript).outputTokens, 7, 'the finished line is not skipped')
   })
 
   it('survives a half-written line and a file that is not there', async () => {
@@ -528,6 +593,25 @@ describe('autopilot', () => {
     assert.match(refused.reason, /splits only/)
   })
 
+  it('does not call a run that had its tools refused a success', async () => {
+    const { readOutcome } = await import('../dist/autopilot.js')
+    const ran = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'done', permission_denials: [] })
+    assert.equal(readOutcome(ran).ok, true)
+
+    const refused = JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      result: 'I could not edit',
+      permission_denials: [{ tool_name: 'Edit' }, { tool_name: 'Edit' }],
+    })
+    assert.equal(readOutcome(refused).ok, false)
+    assert.match(readOutcome(refused).detail, /Edit/)
+
+    assert.equal(readOutcome(JSON.stringify({ subtype: 'error_max_turns', is_error: true })).ok, false)
+    assert.equal(readOutcome('not json').ok, false)
+  })
+
   it('counts spend per day and forgets yesterday', async () => {
     const { readSpend, addSpend } = await import('../dist/autopilot.js')
     process.env.SESSION_SHARE_HOME = stateDir
@@ -558,10 +642,18 @@ describe('autopilot', () => {
     // Make sure it is visible to bob before the run is attempted.
     assert.equal((await peekDirectives(readConfig(bobRepo))).length >= 1, true)
 
+    // A turn in flight in the interactive session wins; nothing starts beside it.
+    const { markBusy, markIdle } = await import('../dist/busy.js')
+    markBusy(readConfig(bobRepo).repoPath)
+    const busy = await tickOnce({ command: 'definitely-not-claude', graceMs: 0 })
+    assert.equal(busy.ran, false)
+    assert.match(busy.reason, /mid-turn/)
+    markIdle(readConfig(bobRepo).repoPath)
+
     // No `claude` on PATH for this run, so the spawn fails the way it would
     // on a machine where it is missing.
     const result = await tickOnce({ command: 'definitely-not-claude', graceMs: 0 })
-    assert.equal(result.ran, true, 'it should have tried')
+    assert.equal(result.ran, true, `it should have tried: ${result.reason}`)
     assert.equal(result.ok, false)
 
     assert.equal(

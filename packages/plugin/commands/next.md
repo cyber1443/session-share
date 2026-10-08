@@ -1,7 +1,7 @@
 ---
 description: Claim the next ready task and start working it
 argument-hint: [task-id]
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash, mcp__session-share__ss_claim, mcp__session-share__ss_get_my_task, mcp__session-share__ss_get_contract, mcp__session-share__ss_report_progress, mcp__session-share__ss_report_test, mcp__session-share__ss_chat_read, mcp__session-share__ss_chat_post
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash, mcp__session-share__ss_claim, mcp__plugin_ss_session-share__ss_claim, mcp__session-share__ss_get_my_task, mcp__plugin_ss_session-share__ss_get_my_task, mcp__session-share__ss_get_contract, mcp__plugin_ss_session-share__ss_get_contract, mcp__session-share__ss_report_progress, mcp__plugin_ss_session-share__ss_report_progress, mcp__session-share__ss_report_test, mcp__plugin_ss_session-share__ss_report_test, mcp__session-share__ss_chat_read, mcp__plugin_ss_session-share__ss_chat_read, mcp__session-share__ss_chat_post, mcp__plugin_ss_session-share__ss_chat_post
 ---
 
 Take the next piece of work. $ARGUMENTS

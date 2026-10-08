@@ -1,6 +1,6 @@
 ---
 description: Pull whatever your teammates have landed on the contract branch
-allowed-tools: Bash, mcp__session-share__ss_sync, mcp__session-share__ss_status
+allowed-tools: Bash, mcp__session-share__ss_sync, mcp__plugin_ss_session-share__ss_sync, mcp__session-share__ss_status, mcp__plugin_ss_session-share__ss_status
 ---
 
 Call `ss_sync`, then `ss_status`.

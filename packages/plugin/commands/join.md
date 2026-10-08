@@ -1,7 +1,7 @@
 ---
 description: Attach this checkout to a session using the invite you were sent
 argument-hint: <ssx_ invite or ssj_ code>
-allowed-tools: Bash, mcp__session-share__ss_join, mcp__session-share__ss_status
+allowed-tools: Bash, mcp__session-share__ss_join, mcp__plugin_ss_session-share__ss_join, mcp__session-share__ss_status, mcp__plugin_ss_session-share__ss_status
 ---
 
 Attach this checkout: **$ARGUMENTS**

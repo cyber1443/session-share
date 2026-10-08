@@ -75,9 +75,20 @@ export function usageSince(transcriptPath: string | undefined): UsageDelta {
   const from = seen > size ? 0 : seen
   if (from === size) return EMPTY
 
+  /**
+   * Sliced as bytes, not as a decoded string: the offset is a byte count, and
+   * any multi-byte character before it would shift a string slice off the start
+   * of the next line. Only whole lines are consumed, so a line still being
+   * written is read in full next time rather than skipped.
+   */
   let text: string
+  let consumed: number
   try {
-    text = readFileSync(transcriptPath, 'utf8').slice(from)
+    const bytes = readFileSync(transcriptPath).subarray(from)
+    const lastNewline = bytes.lastIndexOf(0x0a)
+    if (lastNewline === -1) return EMPTY
+    consumed = from + lastNewline + 1
+    text = bytes.subarray(0, lastNewline + 1).toString('utf8')
   } catch {
     return EMPTY
   }
@@ -89,7 +100,7 @@ export function usageSince(transcriptPath: string | undefined): UsageDelta {
     try {
       entry = JSON.parse(line)
     } catch {
-      continue // a half-written last line; the next read picks it up
+      continue // not a JSON line; nothing to count
     }
     const usage = entry.message?.usage
     if (!usage) continue
@@ -101,6 +112,6 @@ export function usageSince(transcriptPath: string | undefined): UsageDelta {
     delta.turns += 1
   }
 
-  writeOffset(transcriptPath, size)
+  writeOffset(transcriptPath, consumed)
   return delta
 }

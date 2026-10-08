@@ -1,7 +1,7 @@
 ---
 description: Finish the task you hold - commit, push, PR, and merge it into the contract
 argument-hint: [what you did]
-allowed-tools: Bash, Read, mcp__session-share__ss_get_my_task, mcp__session-share__ss_report_test, mcp__session-share__ss_done, mcp__session-share__ss_chat_post
+allowed-tools: Bash, Read, mcp__session-share__ss_get_my_task, mcp__plugin_ss_session-share__ss_get_my_task, mcp__session-share__ss_report_test, mcp__plugin_ss_session-share__ss_report_test, mcp__session-share__ss_done, mcp__plugin_ss_session-share__ss_done, mcp__session-share__ss_chat_post, mcp__plugin_ss_session-share__ss_chat_post
 ---
 
 Finish the current task. $ARGUMENTS

@@ -1,6 +1,6 @@
 ---
 description: Pick up whatever the session has queued for you and do it
-allowed-tools: mcp__session-share__ss_inbox, mcp__session-share__ss_tickets, mcp__session-share__ss_claim, mcp__session-share__ss_propose, mcp__session-share__ss_chat_post, Read, Grep, Glob, Bash, Edit, Write
+allowed-tools: mcp__session-share__ss_inbox, mcp__plugin_ss_session-share__ss_inbox, mcp__session-share__ss_tickets, mcp__plugin_ss_session-share__ss_tickets, mcp__session-share__ss_claim, mcp__plugin_ss_session-share__ss_claim, mcp__session-share__ss_propose, mcp__plugin_ss_session-share__ss_propose, mcp__session-share__ss_chat_post, mcp__plugin_ss_session-share__ss_chat_post, Read, Grep, Glob, Bash, Edit, Write
 ---
 
 Take the queued work.

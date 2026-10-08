@@ -1,7 +1,7 @@
 ---
 description: Ask the current holder for a file outside your lease
 argument-hint: <path> [why]
-allowed-tools: mcp__session-share__ss_check_lease, mcp__session-share__ss_request_handoff, mcp__session-share__ss_chat_post
+allowed-tools: mcp__session-share__ss_check_lease, mcp__plugin_ss_session-share__ss_check_lease, mcp__session-share__ss_request_handoff, mcp__plugin_ss_session-share__ss_request_handoff, mcp__session-share__ss_chat_post, mcp__plugin_ss_session-share__ss_chat_post
 ---
 
 Request access to: **$ARGUMENTS**

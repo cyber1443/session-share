@@ -1,7 +1,7 @@
 ---
 description: Make a second working tree so this repo can be in two sessions at once
 argument-hint: <what the other session is for>
-allowed-tools: mcp__session-share__ss_worktree
+allowed-tools: mcp__session-share__ss_worktree, mcp__plugin_ss_session-share__ss_worktree
 ---
 
 Set up a parallel session for: **$ARGUMENTS**

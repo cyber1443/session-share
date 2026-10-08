@@ -1,7 +1,7 @@
 ---
 description: Show the ticket board, or open and join tickets from the terminal
 argument-hint: [what you want to open]
-allowed-tools: mcp__session-share__ss_tickets, mcp__session-share__ss_ticket_create, mcp__session-share__ss_ticket_join, mcp__session-share__ss_ticket_start
+allowed-tools: mcp__session-share__ss_tickets, mcp__plugin_ss_session-share__ss_tickets, mcp__session-share__ss_ticket_create, mcp__plugin_ss_session-share__ss_ticket_create, mcp__session-share__ss_ticket_join, mcp__plugin_ss_session-share__ss_ticket_join, mcp__session-share__ss_ticket_start, mcp__plugin_ss_session-share__ss_ticket_start
 ---
 
 Tickets: **$ARGUMENTS**

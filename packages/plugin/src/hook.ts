@@ -1,7 +1,9 @@
-import { relative, resolve } from 'node:path'
+import { realpathSync } from 'node:fs'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import type { SessionSnapshot } from '@session-share/protocol'
 import { readConfig, type SessionConfig } from './config.js'
 import { runCommand } from './client.js'
+import { markBusy, markIdle } from './busy.js'
 import { describeDirectives, pendingDirectives } from './inbox.js'
 import { readPreferences } from './preferences.js'
 import { usageSince } from './usage.js'
@@ -63,10 +65,32 @@ export function extractPaths(toolInput: Record<string, unknown> | undefined): st
   return paths
 }
 
+/**
+ * The path as the filesystem itself spells it: symlinks resolved, and on a
+ * case-insensitive volume, the case on disk. Without this `/tmp/repo/src` and
+ * `/private/tmp/repo/src`, or `SRC/a.ts` and `src/a.ts`, are different strings
+ * for the same file, and only one of them would be checked. A file that does
+ * not exist yet is resolved through its deepest existing ancestor.
+ */
+export function canonical(path: string): string {
+  const tail: string[] = []
+  let current = resolve(path)
+  for (;;) {
+    try {
+      return join(realpathSync.native(current), ...tail.reverse())
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return resolve(path)
+      tail.push(basename(current))
+      current = parent
+    }
+  }
+}
+
 /** Repo-relative, because that is the shape every ownedPaths glob is written in. */
 export function toRepoRelative(repoPath: string, cwd: string, filePath: string): string {
-  const absolute = resolve(cwd, filePath)
-  return relative(repoPath, absolute).split('\\').join('/')
+  const absolute = canonical(resolve(cwd, filePath))
+  return relative(canonical(repoPath), absolute).split('\\').join('/')
 }
 
 export async function decide(input: HookInput): Promise<DenyOutput | null> {
@@ -123,6 +147,12 @@ export async function collectRoom(input: HookInput): Promise<string | null> {
   const config = readConfig(input.cwd ?? process.cwd())
   if (!config) return null
   if (!readPreferences().acceptDirectives) return null
+  /**
+   * A headless autopilot run was started *for* the directives it was handed.
+   * Its own hooks taking more would either consume them before it reports back
+   * or run them twice; the autopilot moves the cursor itself when it is done.
+   */
+  if (process.env.SESSION_SHARE_AUTOPILOT === 'child') return null
 
   let pending
   try {
@@ -167,14 +197,20 @@ export async function route(
     case 'Stop': {
       // Whose account paid for the turn that just ended, and for what.
       await reportUsage(input)
-      if (input.stop_hook_active) return null // we already spoke this turn
-      const reason = await collectRoom(input)
+      const config = readConfig(input.cwd ?? process.cwd())
+      const reason = input.stop_hook_active ? null : await collectRoom(input) // we already spoke this turn
+      // Handing over a directive keeps the turn going; otherwise the agent is idle now.
+      if (config && !reason && process.env.SESSION_SHARE_AUTOPILOT !== 'child') markIdle(config.repoPath)
       return reason ? { decision: 'block', reason } : null
     }
 
     // The human is already talking to the agent; ride along rather than interrupt.
     case 'UserPromptSubmit':
     case 'SessionStart': {
+      if (event === 'UserPromptSubmit' && process.env.SESSION_SHARE_AUTOPILOT !== 'child') {
+        const config = readConfig(input.cwd ?? process.cwd())
+        if (config) markBusy(config.repoPath)
+      }
       const additionalContext = await collectRoom(input)
       return additionalContext
         ? { hookSpecificOutput: { hookEventName: event, additionalContext } }

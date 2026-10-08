@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { z } from 'zod'
 
 /**
@@ -50,6 +51,30 @@ export function readConfig(startDir: string): SessionConfig | null {
 export function writeConfig(repoPath: string, config: SessionConfig): string {
   const path = join(repoPath, CONFIG_RELATIVE_PATH)
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`)
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
+  excludeFromGit(repoPath)
   return path
+}
+
+/**
+ * The config holds a bearer token, so it must never be committed -- and one
+ * `git add -A` is all that takes. `.git/info/exclude` keeps it out without
+ * touching a tracked `.gitignore` that would then show up in everyone's diff.
+ * Worktrees share the main checkout's exclude file, hence the common dir.
+ */
+export function excludeFromGit(repoPath: string): void {
+  try {
+    const common = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+      cwd: repoPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    const exclude = join(isAbsolute(common) ? common : join(repoPath, common), 'info', 'exclude')
+    const current = existsSync(exclude) ? readFileSync(exclude, 'utf8') : ''
+    if (current.split('\n').some((line) => line.trim() === '.session-share/')) return
+    mkdirSync(dirname(exclude), { recursive: true })
+    appendFileSync(exclude, `${current && !current.endsWith('\n') ? '\n' : ''}.session-share/\n`)
+  } catch {
+    // Not a git repository, or git is missing; nothing to protect from a commit.
+  }
 }

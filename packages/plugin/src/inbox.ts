@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { ChatMessage } from '@session-share/protocol'
+import type { ChatMessage, MessageId } from '@session-share/protocol'
 import { runCommand } from './client.js'
 import type { SessionConfig } from './config.js'
 
@@ -25,7 +25,17 @@ function stateDir(): string {
 
 const inboxFile = () => join(stateDir(), 'inbox.json')
 
-type Cursors = Record<string, number>
+/**
+ * The id of the last room message this checkout has been through, in the
+ * server's order. An empty string means the room was empty when we caught up,
+ * so everything in it is new. Older versions stored a local timestamp here;
+ * a number is treated as no cursor at all, since comparing it to the server's
+ * clock is the bug it was replaced for.
+ */
+type Cursors = Record<string, string | number>
+
+/** The most messages one read returns; the inbox pages until it has them all. */
+const PAGE = 200
 
 function cursorKey(config: SessionConfig): string {
   return `${config.serverUrl}|${config.sessionRef}|${config.participantId}`
@@ -41,55 +51,118 @@ function readCursors(): Cursors {
   }
 }
 
-function writeCursor(key: string, value: number): void {
+function readCursor(key: string): string | undefined {
+  const value = readCursors()[key]
+  return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * Written to a temporary file and renamed into place, so a hook and the MCP
+ * server writing at once can lose an update but never leave half a file --
+ * which would reset every cursor in it.
+ */
+function writeCursor(key: string, value: string): void {
   mkdirSync(stateDir(), { recursive: true })
-  writeFileSync(inboxFile(), `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}\n`)
+  const path = inboxFile()
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`
+  writeFileSync(temporary, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}\n`)
+  renameSync(temporary, path)
 }
 
 /**
- * Draws the line at "now". Called on join, and on the first pull for a checkout
- * that predates this file -- without it, attaching to a long-running session
- * would replay every directive ever sent into a fresh agent at once.
+ * Draws the line at whatever the room holds right now. Called on join, and on
+ * the first pull for a checkout that has no cursor -- without it, attaching to
+ * a long-running session would replay every directive ever sent into a fresh
+ * agent at once. Never throws: a missing cursor is retried on the next pull.
  */
-export function markCaughtUp(config: SessionConfig, at = Date.now()): void {
-  writeCursor(cursorKey(config), at)
+export async function markCaughtUp(config: SessionConfig, timeoutMs = 2500): Promise<void> {
+  try {
+    const { latestId } = await runCommand(
+      config,
+      { type: 'chat.read', limit: 1, beforeSeq: null, taskRef: null, afterId: null },
+      timeoutMs,
+    )
+    writeCursor(cursorKey(config), latestId ?? '')
+  } catch {
+    // Retried on the next pull.
+  }
+}
+
+export interface Inbox {
+  messages: ChatMessage[]
+  /** The cursor this read started from. */
+  from: string
+  /** Where the cursor goes once these have been handed over. */
+  to: string
+}
+
+const addressedTo = (config: SessionConfig) => (message: ChatMessage) =>
+  message.directive &&
+  message.authorId !== config.participantId &&
+  (message.mentions.length === 0 || message.mentions.includes(config.participantId as never))
+
+/**
+ * Directives addressed to this participant that they have not been handed yet,
+ * without taking them. Your own messages never come back to you, and a
+ * directive with mentions goes only to those mentioned.
+ */
+export async function readInbox(config: SessionConfig, timeoutMs = 2500): Promise<Inbox> {
+  const key = cursorKey(config)
+  const from = readCursor(key)
+  if (from === undefined) {
+    await markCaughtUp(config, timeoutMs)
+    return { messages: [], from: readCursor(key) ?? '', to: readCursor(key) ?? '' }
+  }
+
+  const deadline = Date.now() + timeoutMs
+  const messages: ChatMessage[] = []
+  let cursor = from
+  for (;;) {
+    const remaining = Math.max(deadline - Date.now(), 250)
+    const page = await runCommand(
+      config,
+      { type: 'chat.read', limit: PAGE, beforeSeq: null, taskRef: null, afterId: (cursor || null) as MessageId | null },
+      remaining,
+    )
+    if (cursor && !page.cursorFound) {
+      // The room this cursor belongs to is gone (a reset server). Start from now.
+      return { messages: [], from, to: page.latestId ?? '' }
+    }
+    /**
+     * Without a cursor the server returns the newest page, not the oldest, so
+     * this is the whole read. Anything older than a full page since an empty
+     * room is past saving and not worth replaying.
+     */
+    if (!cursor) {
+      return { messages: page.messages.filter(addressedTo(config)), from, to: page.latestId ?? '' }
+    }
+    messages.push(...page.messages.filter(addressedTo(config)))
+    if (page.messages.length > 0) cursor = page.messages.at(-1)!.id
+    if (page.messages.length < PAGE) break
+  }
+  return { messages, from, to: cursor }
 }
 
 /**
- * Directives addressed to this participant that they have not been handed yet.
- * Your own messages never come back to you, and a directive with mentions goes
- * only to those mentioned.
+ * Moves the cursor to `inbox.to`, but only if nobody else moved it since the
+ * read. A headless run and the interactive session can both be holding the
+ * same read; whichever hands it over second must not drag the cursor back.
  */
+export function acknowledge(config: SessionConfig, inbox: Inbox): void {
+  const key = cursorKey(config)
+  if ((readCursor(key) ?? '') !== inbox.from) return
+  if (inbox.to !== inbox.from) writeCursor(key, inbox.to)
+}
+
+/** Reads and takes, in one step: what the hooks and ss_inbox deliver. */
 export async function pendingDirectives(
   config: SessionConfig,
   timeoutMs = 2500,
   consume = true,
 ): Promise<ChatMessage[]> {
-  const key = cursorKey(config)
-  const cursor = readCursors()[key]
-  if (cursor === undefined) {
-    markCaughtUp(config)
-    return []
-  }
-
-  const { messages } = await runCommand(
-    config,
-    { type: 'chat.read', limit: 50, beforeSeq: null, taskRef: null },
-    timeoutMs,
-  )
-
-  const pending = messages.filter(
-    (message) =>
-      message.directive &&
-      message.createdAt > cursor &&
-      message.authorId !== config.participantId &&
-      (message.mentions.length === 0 || message.mentions.includes(config.participantId as never)),
-  )
-
-  if (consume && pending.length > 0) {
-    writeCursor(key, Math.max(...pending.map((message) => message.createdAt)))
-  }
-  return pending
+  const inbox = await readInbox(config, timeoutMs)
+  if (consume) acknowledge(config, inbox)
+  return inbox.messages
 }
 
 /**

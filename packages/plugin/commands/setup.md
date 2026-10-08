@@ -1,6 +1,6 @@
 ---
 description: Choose how session-share is allowed to touch your machine and your repo
-allowed-tools: mcp__session-share__ss_settings
+allowed-tools: mcp__session-share__ss_settings, mcp__plugin_ss_session-share__ss_settings
 ---
 
 Walk the user through the choices, then store them with `ss_settings`. $ARGUMENTS

@@ -1,7 +1,7 @@
 ---
 description: Split a GitHub issue into a contract plus standalone, testable tasks for everyone in the session
 argument-hint: <issue-url-or-description>
-allowed-tools: Read, Grep, Glob, Bash, mcp__session-share__ss_status, mcp__session-share__ss_chat_post
+allowed-tools: Read, Grep, Glob, Bash, mcp__session-share__ss_status, mcp__plugin_ss_session-share__ss_status, mcp__session-share__ss_chat_post, mcp__plugin_ss_session-share__ss_chat_post, mcp__session-share__ss_propose, mcp__plugin_ss_session-share__ss_propose
 ---
 
 Decompose this work so several developers and their agents can attack it in parallel without colliding: **$ARGUMENTS**

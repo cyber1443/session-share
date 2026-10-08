@@ -1,6 +1,6 @@
 ---
 description: Stop the coordination server running on this machine
-allowed-tools: mcp__session-share__ss_stop_host, mcp__session-share__ss_doctor
+allowed-tools: mcp__session-share__ss_stop_host, mcp__plugin_ss_session-share__ss_stop_host, mcp__session-share__ss_doctor, mcp__plugin_ss_session-share__ss_doctor
 ---
 
 Stop hosting.

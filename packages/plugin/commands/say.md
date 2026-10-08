@@ -1,7 +1,7 @@
 ---
 description: Post to the session room without leaving the terminal
 argument-hint: <message>
-allowed-tools: mcp__session-share__ss_chat_post, mcp__session-share__ss_chat_read
+allowed-tools: mcp__session-share__ss_chat_post, mcp__plugin_ss_session-share__ss_chat_post, mcp__session-share__ss_chat_read, mcp__plugin_ss_session-share__ss_chat_read
 ---
 
 Post to the room: **$ARGUMENTS**

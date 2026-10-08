@@ -1,6 +1,6 @@
 ---
 description: Open the live board for this session in the browser
-allowed-tools: mcp__session-share__ss_board, mcp__session-share__ss_status
+allowed-tools: mcp__session-share__ss_board, mcp__plugin_ss_session-share__ss_board, mcp__session-share__ss_status, mcp__plugin_ss_session-share__ss_status
 ---
 
 Open the board.

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { basename, resolve } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -14,7 +15,7 @@ import {
 } from '@session-share/protocol'
 import { CommandError, pair, peerJoin, runCommand } from './client.js'
 import { readConfig, writeConfig, type SessionConfig } from './config.js'
-import { ensureDaemon, probe, stopDaemon } from './daemon.js'
+import { HOST_HEADER, ensureDaemon, hostKey, probe, publicUrlOverride, stopDaemon } from './daemon.js'
 import { describeDirectives, markCaughtUp, peekDirectives, pendingDirectives } from './inbox.js'
 import { startAutopilot } from './autopilot.js'
 import { boardUrl, openInBrowser } from './open.js'
@@ -48,7 +49,8 @@ async function createSession(
 ): Promise<{ sessionId: string; slug: string; invite: string | null }> {
   const response = await fetch(new URL('/api/sessions', serverUrl), {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    // Opening a session is the host's alone; see server/auth.ts hostCredential.
+    headers: { 'content-type': 'application/json', [HOST_HEADER]: hostKey() },
     body: JSON.stringify(input),
   })
   const payload = (await response.json()) as {
@@ -67,13 +69,29 @@ async function createSession(
 }
 
 /** Re-mints an invite for a session that already exists on this server. */
-async function mintInvite(serverUrl: string, slug: string): Promise<string> {
-  const response = await fetch(new URL(`/api/sessions/${slug}/invite`, serverUrl), { method: 'POST' })
-  const payload = (await response.json()) as { invite?: string; message?: string; error?: string }
+async function mintInvite(
+  serverUrl: string,
+  slug: string,
+): Promise<{ invite: string; repo: RepoRef | null }> {
+  const response = await fetch(new URL(`/api/sessions/${slug}/invite`, serverUrl), {
+    method: 'POST',
+    headers: { [HOST_HEADER]: hostKey() },
+  })
+  const payload = (await response.json()) as {
+    invite?: string
+    repo?: RepoRef | null
+    message?: string
+    error?: string
+  }
   if (!response.ok || !payload.invite) {
     throw new Error(payload.message ?? payload.error ?? 'could not mint an invite')
   }
-  return payload.invite
+  return { invite: payload.invite, repo: payload.repo ?? null }
+}
+
+/** Short and stable: enough to tell two folders of the same name apart. */
+function shortHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 6)
 }
 
 /**
@@ -192,9 +210,15 @@ export function createServer(): McpServer {
           .describe(
             'lan lets teammates on the same network connect; loopback is this machine only. Defaults to your saved preference.',
           ),
+        publicUrl: z
+          .string()
+          .nullish()
+          .describe(
+            'The address teammates should dial when it is not one this machine can see: a tunnel (https://x.trycloudflare.com), a Tailscale name, a port forward. Defaults to SESSION_SHARE_PUBLIC_URL.',
+          ),
       },
     },
-    async ({ title: given, issueRef, expose }) => {
+    async ({ title: given, issueRef, expose, publicUrl: givenPublicUrl }) => {
       const root = await repoRoot(REPO_ROOT)
       /**
        * A session is the repository, not a piece of work -- tickets are the
@@ -204,34 +228,67 @@ export function createServer(): McpServer {
        */
       const title = given?.trim() || basename(root)
       const identity = await localIdentity()
+      const publicUrl = publicUrlOverride(givenPublicUrl)
       const daemon = await ensureDaemon({ expose: expose ?? readPreferences().expose })
       const loopback = `http://127.0.0.1:${daemon.port}`
+      // What goes in the invite: what the host said, else what this machine can see.
+      const dialUrl = publicUrl ?? daemon.url
 
       const remote = await repoRemote(root)
-      const slug = slugify(title)
+      const repo: RepoRef = {
+        owner: remote?.owner ?? 'local',
+        name: remote?.name ?? basename(root),
+        baseBranch: await currentBranch(root),
+        remoteUrl: remote?.remoteUrl ?? root,
+      }
+
+      /**
+       * The slug names the repository, so it comes from what identifies one:
+       * the remote, or failing that the path. The folder name alone does not --
+       * two unrelated checkouts both called `app` used to share a slug, and the
+       * second host silently resumed the first one's session.
+       */
+      const slug = given?.trim()
+        ? slugify(title)
+        : remote
+          ? slugify(`${remote.owner}-${remote.name}`)
+          : `${slugify(basename(root)).slice(0, 33)}-${shortHash(root)}`
+      const sameRepo = (stored: RepoRef | null) =>
+        Boolean(stored) &&
+        (remote
+          ? stored!.owner === repo.owner && stored!.name === repo.name
+          : stored!.remoteUrl === repo.remoteUrl)
 
       /**
        * Hosting the same thing twice rejoins it rather than failing. The host's
        * machine sleeping is a normal way for a session to pause, and the
-       * documented recovery is to run this again -- so it has to work.
+       * documented recovery is to run this again -- so it has to work. But only
+       * for the same repository: a slug that is taken by some other repo gets a
+       * suffix, not that repo's session.
        */
-      let created: { invite: string | null; resumed: boolean }
-      try {
-        const fresh = await createSession(loopback, {
-          slug,
-          title,
-          repo: {
-            owner: remote?.owner ?? 'local',
-            name: remote?.name ?? basename(root),
-            baseBranch: await currentBranch(root),
-            remoteUrl: remote?.remoteUrl ?? root,
-          },
-          issueRef: issueRef ?? null,
-        })
-        created = { invite: fresh.invite, resumed: false }
-      } catch (error) {
-        if (!String(error).includes('is taken')) throw error
-        created = { invite: await mintInvite(loopback, slug), resumed: true }
+      const open = async (candidate: string) => {
+        try {
+          const fresh = await createSession(loopback, {
+            slug: candidate,
+            title,
+            repo,
+            issueRef: issueRef ?? null,
+          })
+          return { invite: fresh.invite, resumed: false, slug: candidate }
+        } catch (error) {
+          if (!String(error).includes('is taken')) throw error
+          const existing = await mintInvite(loopback, candidate)
+          return sameRepo(existing.repo) ? { invite: existing.invite, resumed: true, slug: candidate } : null
+        }
+      }
+      const created =
+        (await open(slug)) ??
+        (await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`)) ??
+        null
+      if (!created) {
+        throw new Error(
+          `Sessions named "${slug}" on this server belong to other repositories. Pass a title to name this one.`,
+        )
       }
 
       if (!created.invite) {
@@ -242,7 +299,7 @@ export function createServer(): McpServer {
       // and which server minted it so they can tell if they reached the wrong one.
       const health = await probe(loopback)
       const packed = packInvite({
-        url: daemon.url,
+        url: dialUrl,
         token: created.invite,
         serverId: health?.serverId ?? null,
       })
@@ -258,11 +315,12 @@ export function createServer(): McpServer {
         repoPath: root,
       }
       writeConfig(root, cfg)
-      markCaughtUp(cfg) // the room starts here; do not replay an old session at the agent
+      await markCaughtUp(cfg) // the room starts here; do not replay an old session at the agent
 
-      const board = boardUrl(daemon.url, packed, joined.githubLogin)
+      // The host's own browser is on this machine; the tunnel is for everyone else.
+      const board = boardUrl(publicUrl ? loopback : daemon.url, packed, joined.githubLogin)
       const opened = readPreferences().openBoard && openInBrowser(board)
-      const loopbackOnly = isLoopbackUrl(daemon.url)
+      const loopbackOnly = isLoopbackUrl(dialUrl)
 
       return text(
         [
@@ -284,7 +342,9 @@ export function createServer(): McpServer {
                     ? ' -- and check you are on a network, because no LAN address was found.'
                     : ' to let a teammate on your network in.'),
               ].join('\n')
-            : `Reachable on your network at ${daemon.url}. Anyone who has the invite can join; anyone who does not, cannot.`,
+            : publicUrl
+              ? `Teammates dial ${publicUrl}. Anyone who has the invite can join; anyone who does not, cannot.`
+              : `Reachable on your network at ${daemon.url}. Anyone who has the invite can join; anyone who does not, cannot.`,
           '',
           `Every edit in ${basename(root)} is now checked against this session's file leases.`,
         ].join('\n'),
@@ -302,7 +362,9 @@ export function createServer(): McpServer {
         serverUrl: z
           .string()
           .nullish()
-          .describe('Only for ssj_ codes on a server that is not the default'),
+          .describe(
+            'For ssj_ codes, the server to redeem at. For ssx_ invites, an address to dial instead of the one inside the invite -- for when the host is behind a tunnel or on Tailscale and the invite names an address you cannot reach.',
+          ),
       },
     },
     async ({ code, serverUrl }) => {
@@ -316,14 +378,22 @@ export function createServer(): McpServer {
           'That looks like an invite but it is damaged -- most likely it was cut short or wrapped when it was copied. Ask for it again, or have the host re-run /ss:host.',
         )
       }
-      if (packed) await checkReachable(packed.url, packed.serverId ?? null)
+      /**
+       * The invite names the address the host could see. Across a tunnel or a
+       * tailnet that may be one the guest cannot reach, and the only fix used
+       * to be a re-host -- so the guest can say where to dial instead. The
+       * invite's server id still has to match, so this cannot point a guest at
+       * the wrong server unnoticed.
+       */
+      const dial = packed ? (serverUrl ? publicUrlOverride(serverUrl)! : packed.url) : null
+      if (packed) await checkReachable(dial!, packed.serverId ?? null)
 
       const result = packed
-        ? await peerJoin(packed.url, packed.token, await localIdentity(), root)
+        ? await peerJoin(dial!, packed.token, await localIdentity(), root)
         : await pair(serverUrl ?? DEFAULT_SERVER_URL, trimmed, root)
 
       const cfg: SessionConfig = {
-        serverUrl: packed?.url ?? serverUrl ?? DEFAULT_SERVER_URL,
+        serverUrl: dial ?? serverUrl ?? DEFAULT_SERVER_URL,
         sessionRef: result.sessionRef,
         participantId: result.participantId,
         participantToken: result.participantToken,
@@ -332,9 +402,15 @@ export function createServer(): McpServer {
         repoPath: root,
       }
       const path = writeConfig(root, cfg)
-      markCaughtUp(cfg)
+      await markCaughtUp(cfg)
 
-      const board = packed ? boardUrl(packed.url, trimmed, result.githubLogin) : null
+      const board = packed
+        ? boardUrl(
+            dial!,
+            dial === packed.url ? trimmed : packInvite({ ...packed, url: dial! }),
+            result.githubLogin,
+          )
+        : null
       const opened = Boolean(board) && readPreferences().openBoard && openInBrowser(board!)
 
       return text(
@@ -431,7 +507,12 @@ export function createServer(): McpServer {
         'Stop the coordination server running on this machine. Everyone loses the session until it is started again; the event log survives.',
       inputSchema: {},
     },
-    async () => text(stopDaemon() ? 'Stopped.' : 'Nothing was running.'),
+    async () =>
+      text(
+        (await stopDaemon()) === 'stopped'
+          ? 'Stopped.'
+          : 'Nothing was running. (Any stale record of one has been cleared.)',
+      ),
   )
 
   server.registerTool(
@@ -472,7 +553,8 @@ export function createServer(): McpServer {
     async () => {
       const cfg = config()
       const state = await snapshot(cfg)
-      const mine = state.tasks.find((t) => t.ownerId === cfg.participantId)
+      // Merged tasks keep their owner for the record; only what is still in hand counts.
+      const mine = state.tasks.find((t) => t.ownerId === cfg.participantId && t.state !== 'merged')
       if (!mine) return text('You hold no task. Use ss_claim to take the next ready one.')
       return text({
         id: mine.id,
@@ -497,10 +579,18 @@ export function createServer(): McpServer {
     async () => {
       const cfg = config()
       const state = await snapshot(cfg)
-      if (!state.decomposition) return text('No decomposition yet.')
+      /**
+       * Each ticket has its own split, so the contract that matters is the one
+       * behind the task in hand. With nothing held, the session's newest one.
+       */
+      const held = state.tasks.find((t) => t.ownerId === cfg.participantId && t.state !== 'merged')
+      const ticket = held?.ticketId ? state.tickets.find((t) => t.id === held.ticketId) : undefined
+      const split =
+        (ticket?.decompositionId && state.decompositions?.[ticket.decompositionId]) || state.decomposition
+      if (!split) return text('No decomposition yet.')
       return text({
-        summary: state.decomposition.contract.summary,
-        files: state.decomposition.contract.files.map((f) => ({
+        summary: split.contract.summary,
+        files: split.contract.files.map((f) => ({
           path: f.path,
           purpose: f.purpose,
         })),
@@ -788,7 +878,7 @@ export function createServer(): McpServer {
           decompositionId: result.decompositionId,
           maxParallel: result.validation.maxFrontier,
           warnings: result.validation.issues,
-          assigned: (after.decomposition?.assignments ?? []).map((a) => ({
+          assigned: (after.decompositions?.[result.decompositionId]?.assignments ?? after.decomposition?.assignments ?? []).map((a) => ({
             task: a.taskId,
             to: names.get(a.participantId) ?? a.participantId,
           })),
@@ -870,11 +960,24 @@ export function createServer(): McpServer {
   server.registerTool(
     'ss_release',
     {
-      description: 'Give a task back to the ready pool and drop its lease.',
-      inputSchema: { taskId: z.string() },
+      description:
+        'Give a task back to the ready pool and drop its lease. With abandoned: true, take it back from someone else who has gone quiet (not heard from for 10 minutes) -- the lead or anyone on its ticket may do that, so a vanished teammate cannot hold files hostage.',
+      inputSchema: {
+        taskId: z.string(),
+        abandoned: z
+          .boolean()
+          .nullish()
+          .describe('The task is held by someone else who has disappeared; reclaim it for the pool'),
+      },
     },
-    async ({ taskId }) => {
+    async ({ taskId, abandoned }) => {
       const cfg = config()
+      if (abandoned) {
+        const { holderId } = await runCommand(cfg, { type: 'task.forceRelease', taskId: taskId as never })
+        const state = await snapshot(cfg)
+        const holder = state.participants.find((p) => p.id === holderId)?.displayName ?? 'its holder'
+        return text(`Took ${taskId} back from ${holder}; it is claimable again and their lease is gone.`)
+      }
       await runCommand(cfg, { type: 'task.release', taskId: taskId as never })
       return text(`Released ${taskId}.`)
     },
@@ -889,7 +992,7 @@ export function createServer(): McpServer {
         taskId: z.string(),
         activityLine: z.string().max(120),
         state: z
-          .enum(['claimed', 'running', 'testing', 'pr', 'failed'])
+          .enum(['claimed', 'running', 'testing'])
           .nullish()
           .describe('Only when the task actually changes phase'),
       },
@@ -967,6 +1070,15 @@ export function createServer(): McpServer {
         taskId: taskId as never,
         result: { passed, command, exitCode, summary, ranAt: Date.now() },
       })
+      /**
+       * `auto-on-green` is a standing instruction from the person, so the
+       * agent is told to finish now rather than wait to be asked for /ss:done.
+       */
+      if (passed && readPreferences().commitPolicy === 'auto-on-green') {
+        return text(
+          `Recorded. Commits are set to happen on green, so finish it now: call ss_done with taskId "${taskId}" and a one-line summary.`,
+        )
+      }
       return text('Recorded.')
     },
   )
@@ -1021,6 +1133,7 @@ export function createServer(): McpServer {
         limit,
         beforeSeq: null,
         taskRef: (taskRef ?? null) as never,
+        afterId: null,
       })
       return text(
         messages
