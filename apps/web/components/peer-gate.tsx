@@ -104,7 +104,7 @@ export function PeerGate({
         <h1 className="text-lg tracking-tight">Join the session</h1>
         <p className="mt-2 text-sm leading-relaxed text-mute">
           Your name is how the others tell you apart. Use the same handle you use in Claude Code and
-          your browser seat and your checkout become one participant.
+          the board acts as your checkout&apos;s seat, under one name.
         </p>
       </div>
 
