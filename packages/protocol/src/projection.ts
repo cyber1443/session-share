@@ -587,7 +587,17 @@ export class SessionState {
     for (const [id, report] of Object.entries(reports)) {
       this.validations.set(id as DecompositionId, report)
     }
-    this.latestDecompositionId = [...this.decompositions.keys()].at(-1) ?? null
+    /**
+     * Carried by the snapshot rather than guessed from it. Folding the log can
+     * leave the newest proposal unset -- its ticket was deleted -- while older
+     * splits are still in the map, and guessing "the last one" then made a
+     * hydrated client and a replayed one disagree about which split was live.
+     * Only a snapshot from before the field existed is left to the guess.
+     */
+    this.latestDecompositionId =
+      snapshot.latestDecompositionId !== undefined
+        ? snapshot.latestDecompositionId
+        : ([...this.decompositions.keys()].at(-1) ?? null)
     this.tasks.clear()
     for (const task of snapshot.tasks) this.tasks.set(task.id, task)
     this.leases.clear()
@@ -623,6 +633,7 @@ export class SessionState {
       validation: this.validation,
       decompositions: Object.fromEntries(this.decompositions),
       validations: Object.fromEntries(this.validations),
+      latestDecompositionId: this.latestDecompositionId,
       tasks: [...this.tasks.values()],
       leases: [...this.leases.values()],
       handoffs: [...this.handoffs.values()],

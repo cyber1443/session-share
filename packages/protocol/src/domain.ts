@@ -467,6 +467,12 @@ export const SessionSnapshot = z.object({
    */
   decompositions: z.record(z.string(), Decomposition).default({}),
   validations: z.record(z.string(), ValidationReport).default({}),
+  /**
+   * The newest proposal still standing, which is what a split-less command
+   * acts on. Optional: an older server does not send it, and hydrating then
+   * falls back to the newest split in `decompositions`.
+   */
+  latestDecompositionId: DecompositionId.nullable().optional(),
   tasks: z.array(Task),
   leases: z.array(Lease),
   handoffs: z.array(HandoffRequest),

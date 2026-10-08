@@ -400,3 +400,42 @@ describe('SessionState: one split per ticket', () => {
     assert.equal(state.handoffs.get('h2').status, 'expired')
   })
 })
+
+describe('SessionState: a snapshot round trip', () => {
+  /**
+   * Hydrating a snapshot has to land where folding the log did. Deleting the
+   * ticket with the newest proposal clears the latest split on a fold, and
+   * hydrate used to guess it back as "whichever split is last in the map".
+   */
+  it('agrees with the fold on the latest split after its ticket is deleted', () => {
+    const folded = new SessionState()
+    folded.apply(envelope(0, { type: 'session.created', session: { ...SESSION, contractBranch: null } }))
+    folded.apply(envelope(1, { type: 'ticket.created', ticket: ticket('A') }))
+    folded.apply(envelope(2, { type: 'ticket.created', ticket: ticket('B') }))
+    folded.apply(envelope(3, { type: 'decomposition.proposed', decomposition: split('dA', 'A', 'src/a/c.ts', [spec('a1', ['src/a/x/**'])]), validation: ok }))
+    folded.apply(envelope(4, { type: 'decomposition.proposed', decomposition: split('dB', 'B', 'src/b/c.ts', [spec('b1', ['src/b/x/**'])]), validation: ok }))
+    folded.apply(envelope(5, { type: 'ticket.deleted', ticketId: 'B' }))
+    assert.equal(folded.latestDecompositionId, null)
+
+    const snapshot = folded.snapshot()
+    assert.equal(snapshot.latestDecompositionId, null)
+
+    const hydrated = new SessionState()
+    hydrated.hydrate(snapshot)
+    assert.equal(hydrated.latestDecompositionId, folded.latestDecompositionId)
+    assert.deepEqual(hydrated.snapshot(), snapshot)
+  })
+
+  it('still guesses from the splits for a snapshot that predates the field', () => {
+    const folded = new SessionState()
+    folded.apply(envelope(0, { type: 'session.created', session: { ...SESSION, contractBranch: null } }))
+    folded.apply(envelope(1, { type: 'ticket.created', ticket: ticket('A') }))
+    folded.apply(envelope(2, { type: 'decomposition.proposed', decomposition: split('dA', 'A', 'src/a/c.ts', [spec('a1', ['src/a/x/**'])]), validation: ok }))
+    const { latestDecompositionId, ...old } = folded.snapshot()
+    assert.equal(latestDecompositionId, 'dA')
+
+    const hydrated = new SessionState()
+    hydrated.hydrate(old)
+    assert.equal(hydrated.latestDecompositionId, 'dA')
+  })
+})
