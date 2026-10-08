@@ -1,6 +1,15 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { createHash, createHmac, randomBytes } from 'node:crypto'
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -17,6 +26,7 @@ import { isLoopbackUrl } from '@session-share/protocol'
 export const STATE_DIR = process.env.SESSION_SHARE_HOME ?? join(homedir(), '.session-share')
 const DAEMON_FILE = join(STATE_DIR, 'daemon.json')
 const SECRET_FILE = join(STATE_DIR, 'secret')
+const MACHINE_FILE = join(STATE_DIR, 'machine-id')
 const DB_FILE = join(STATE_DIR, 'sessions.db')
 const LOG_FILE = join(STATE_DIR, 'server.log')
 
@@ -41,11 +51,45 @@ function ensureStateDir(): void {
  * checkout. A regenerated secret silently logs everyone out.
  */
 export function hostSecret(): string {
+  return readOrCreate(SECRET_FILE, () => randomBytes(32).toString('hex'), 0o600)
+}
+
+/**
+ * Created exclusively. Two Claude Codes hosting at the same moment would
+ * otherwise each write their own value, and whichever lost the race would go on
+ * signing with a secret that no longer matches the file -- or the server.
+ */
+function readOrCreate(path: string, make: () => string, mode: number): string {
   ensureStateDir()
-  if (existsSync(SECRET_FILE)) return readFileSync(SECRET_FILE, 'utf8').trim()
-  const secret = randomBytes(32).toString('hex')
-  writeFileSync(SECRET_FILE, `${secret}\n`, { mode: 0o600 })
-  return secret
+  if (!existsSync(path)) {
+    try {
+      writeFileSync(path, `${make()}\n`, { mode, flag: 'wx' })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+  }
+  return readFileSync(path, 'utf8').trim()
+}
+
+/**
+ * Names this machine to the server. A checkout is a path on a machine, and the
+ * same absolute path on two laptops is two checkouts -- so without this the
+ * server would refuse the second as "two agents in one working tree".
+ */
+export function machineId(): string {
+  return readOrCreate(MACHINE_FILE, () => randomUUID(), 0o644)
+}
+
+/**
+ * The credential that says "this request is from the host", for opening
+ * sessions and minting invites. Mirrors server/auth.ts hostCredential; derived
+ * from the secret so only this machine can produce it, wherever the request is
+ * routed from -- a tunnel makes every guest look like loopback.
+ */
+export const HOST_HEADER = 'x-session-share-host'
+
+export function hostKey(): string {
+  return createHmac('sha256', hostSecret()).update('session-share/host-key').digest('hex')
 }
 
 /**
@@ -83,6 +127,10 @@ export interface Health {
   serverId?: string
   /** Identifies the code, so a client can tell a stale daemon from a fresh one. */
   build?: string
+  /** The process answering. The only pid safe to signal; see stopDaemon. */
+  pid?: number
+  /** The address it is bound to: 0.0.0.0 for lan, 127.0.0.1 for loopback. */
+  host?: string | null
 }
 
 /**
@@ -138,28 +186,53 @@ export async function isHealthy(url: string, timeoutMs = 1200): Promise<boolean>
 
 /**
  * Interfaces that exist but are never the answer: VPN tunnels, AirDrop links,
- * container and VM bridges. Handing a guest one of these produces an address
- * that looks plausible and refuses every connection.
+ * container and VM bridges (docker0, br-<id> for compose networks, veth pairs),
+ * WireGuard. Handing a guest one of these produces an address that looks
+ * plausible and refuses every connection.
  */
-const SKIP_INTERFACE = /^(utun|awdl|llw|bridge|vmnet|docker|veth|tun|tap|ap\d)/i
+const SKIP_INTERFACE = /^(utun|awdl|llw|bridge|br-|vmnet|docker|veth|virbr|tun|tap|wg|tailscale|zt|ap\d)/i
 const PRIVATE_LAN = /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/
+/** Tailscale (and other CGNAT overlays) hand out 100.64.0.0/10. */
+const TAILSCALE = /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./
 
 /**
- * The address a teammate on the same network can actually dial. `127.0.0.1` is
- * the one address guaranteed not to work for them, and the first non-internal
- * interface is frequently a VPN -- so prefer a private LAN address on a real
- * interface, and only fall back to whatever is left.
+ * The address a teammate can actually dial. `127.0.0.1` is the one address
+ * guaranteed not to work for them, and the first non-internal interface is
+ * frequently a VPN -- so prefer a private LAN address on a real interface, then
+ * anything else on a real interface, and only then a Tailscale address. That
+ * last one is skipped as a VPN in the first pass but is exactly what two people
+ * on different networks who share a tailnet should dial when there is no LAN.
  */
-export function lanAddress(): string | null {
-  const candidates: string[] = []
-  for (const [name, addresses] of Object.entries(networkInterfaces())) {
-    if (SKIP_INTERFACE.test(name)) continue
+export function lanAddress(
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+): string | null {
+  const real: string[] = []
+  const overlay: string[] = []
+  for (const [name, addresses] of Object.entries(interfaces)) {
     for (const address of addresses ?? []) {
       if (address.family !== 'IPv4' || address.internal) continue
-      candidates.push(address.address)
+      if (TAILSCALE.test(address.address)) overlay.push(address.address)
+      else if (!SKIP_INTERFACE.test(name)) real.push(address.address)
     }
   }
-  return candidates.find((address) => PRIVATE_LAN.test(address)) ?? candidates[0] ?? null
+  return real.find((address) => PRIVATE_LAN.test(address)) ?? real[0] ?? overlay[0] ?? null
+}
+
+/**
+ * An address the host has said to hand out instead of the one found here: a
+ * tunnel (`https://x.trycloudflare.com`), a Tailscale name, a port forward.
+ * Nothing on this machine can discover those, so it has to be told.
+ */
+export function publicUrlOverride(given?: string | null): string | null {
+  const value = (given ?? process.env.SESSION_SHARE_PUBLIC_URL ?? '').trim()
+  if (!value) return null
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('not http')
+    return url.origin
+  } catch {
+    throw new Error(`"${value}" is not an http(s) URL, so it cannot be put in an invite.`)
+  }
 }
 
 function serverEntrypoint(): string {
@@ -196,46 +269,53 @@ export interface StartOptions {
 export async function ensureDaemon(options: StartOptions = {}): Promise<DaemonInfo> {
   const port = options.port ?? DEFAULT_PORT
   const expose = options.expose ?? 'lan'
-
   const mine = expectedServerId()
-  const existing = readDaemon()
-  if (existing) {
-    const health = await probe(`http://127.0.0.1:${existing.port}`)
-    // No serverId at all means a server from before fingerprints: ours, but old.
-    if (health && (!health.serverId || health.serverId === mine)) {
-      /**
-       * Two reasons to replace a server that is running perfectly well:
-       *
-       * - It is bound to loopback and a guest is expected. No amount of
-       *   re-hosting changes that from the outside, and reusing it is how a
-       *   host hands out `127.0.0.1` invites that work on no machine but
-       *   their own.
-       * - It is running code the plugin no longer ships. The daemon outlives
-       *   the Claude Code that started it, so it also outlives an update --
-       *   and then new tools talk to an old server, and the board it serves
-       *   is the old board. Updating the plugin and seeing nothing change is
-       *   the worst kind of bug, because it looks like the fix did not work.
-       */
-      const current = health.build === expectedBuild()
-      if (current && health.serverId && existing.expose === expose) return refreshAddress(existing)
-
-      stopDaemon()
-      await waitUntilDown(`http://127.0.0.1:${existing.port}`)
-    }
-  }
+  const wanted = expectedBuild()
 
   /**
-   * Something answering on the port that is not ours would be adopted silently
-   * by a plain health check, and every invite minted afterwards would be signed
-   * by a key the other process does not have.
+   * Ask whatever is on the port, not the file. daemon.json records what was
+   * true when it was written; a crash, a reboot, or two hosts racing each other
+   * all leave it describing a process that is not the one answering.
    */
-  const squatter = await probe(`http://127.0.0.1:${port}`)
-  if (squatter && squatter.serverId !== mine) {
-    throw new Error(
-      `Port ${port} is already serving a different session-share (id ${squatter.serverId ?? 'unknown'}).\n` +
-        'It is not this machine\'s server, so invites from it cannot be redeemed here. ' +
-        `Stop it, or pick another port with SESSION_SHARE_PORT.`,
-    )
+  const existing = readDaemon()
+  for (const candidate of new Set([existing?.port, port].filter((p): p is number => Boolean(p)))) {
+    const health = await probe(`http://127.0.0.1:${candidate}`)
+    if (!health) continue
+
+    if (health.serverId && health.serverId !== mine) {
+      if (candidate !== port) continue // not ours, and not where we are starting one
+      throw new Error(
+        `Port ${port} is already serving a different session-share (id ${health.serverId}).\n` +
+          'It is not this machine\'s server, so invites from it cannot be redeemed here. ' +
+          `Stop it, or pick another port with SESSION_SHARE_PORT.`,
+      )
+    }
+
+    /**
+     * Two reasons to replace a server that is running perfectly well:
+     *
+     * - It is bound to loopback and a guest is expected. No amount of
+     *   re-hosting changes that from the outside, and reusing it is how a
+     *   host hands out `127.0.0.1` invites that work on no machine but
+     *   their own.
+     * - It is running code the plugin no longer ships. The daemon outlives
+     *   the Claude Code that started it, so it also outlives an update --
+     *   and then new tools talk to an old server, and the board it serves
+     *   is the old board. Updating the plugin and seeing nothing change is
+     *   the worst kind of bug, because it looks like the fix did not work.
+     */
+    const boundTo = health.host
+      ? health.host === '127.0.0.1' || health.host === '::1'
+        ? 'loopback'
+        : 'lan'
+      : existing?.port === candidate
+        ? existing.expose
+        : null
+    if (health.serverId && health.build === wanted && boundTo === expose && candidate === port) {
+      return adopt(port, expose, health, existing)
+    }
+
+    await stopServerAt(candidate, health)
   }
 
   ensureStateDir()
@@ -258,17 +338,29 @@ export async function ensureDaemon(options: StartOptions = {}): Promise<DaemonIn
   const loopback = `http://127.0.0.1:${port}`
   const deadline = Date.now() + 15_000
   while (Date.now() < deadline) {
-    if (await isHealthy(loopback)) {
-      const ip = expose === 'lan' ? lanAddress() : null
-      const info: DaemonInfo = {
-        port,
-        url: ip ? `http://${ip}:${port}` : loopback,
-        expose,
-        pid: child.pid ?? -1,
-        startedAt: Date.now(),
+    const health = await probe(loopback)
+    if (health) {
+      if (health.serverId && health.serverId !== mine) {
+        throw new Error(
+          `Something else took port ${port} while this server was starting (id ${health.serverId}). See ${LOG_FILE}`,
+        )
       }
-      writeDaemon(info)
-      return info
+      /**
+       * Fail here rather than hand back a server that is not the one asked
+       * for. If an old build is still answering after it was told to stop, it
+       * is holding the port and the new one could not bind -- and carrying on
+       * would quietly serve yesterday's code, which is the bug this replaces.
+       */
+      if (health.build !== wanted) {
+        throw new Error(
+          [
+            `Port ${port} is still answered by build ${health.build ?? 'unknown'} after a restart; the installed build is ${wanted}.`,
+            `The old server did not stop${health.pid ? ` (pid ${health.pid})` : ''}. Stop it by hand and host again.`,
+            `See ${LOG_FILE}`,
+          ].join('\n'),
+        )
+      }
+      return adopt(port, expose, health, null)
     }
     await sleep(250)
   }
@@ -277,18 +369,40 @@ export async function ensureDaemon(options: StartOptions = {}): Promise<DaemonIn
 }
 
 /**
- * The process survives a change of network; the address it was reachable at
- * does not. Re-derive it rather than handing out yesterday's DHCP lease.
+ * Records the server that is actually answering. The pid comes from the server
+ * itself: when two hosts start at once, each spawns a process, one of them wins
+ * the port, and the other exits -- so the pid of the child *this* call spawned
+ * is a coin toss, and writing it down is how a dead pid ended up on record.
  */
-function refreshAddress(info: DaemonInfo): DaemonInfo {
-  if (info.expose !== 'lan') return info
-  const ip = lanAddress()
-  const url = ip ? `http://${ip}:${info.port}` : `http://127.0.0.1:${info.port}`
-  if (url === info.url) return info
-  const updated = { ...info, url }
-  writeDaemon(updated)
-  return updated
+function adopt(
+  port: number,
+  expose: 'lan' | 'loopback',
+  health: Health,
+  existing: DaemonInfo | null,
+): DaemonInfo {
+  const ip = expose === 'lan' ? lanAddress() : null
+  const info: DaemonInfo = {
+    port,
+    url: ip ? `http://${ip}:${port}` : `http://127.0.0.1:${port}`,
+    expose,
+    pid: health.pid ?? existing?.pid ?? -1,
+    startedAt: existing?.port === port && existing.pid === health.pid ? existing.startedAt : Date.now(),
+  }
+  const same =
+    existing &&
+    existing.port === info.port &&
+    existing.url === info.url &&
+    existing.expose === info.expose &&
+    existing.pid === info.pid
+  if (!same) writeDaemon(info)
+  return same ? existing : info
 }
+
+/*
+ * The process survives a change of network; the address it was reachable at
+ * does not. `adopt` re-derives it every time rather than handing out
+ * yesterday's DHCP lease.
+ */
 
 async function waitUntilDown(url: string, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -298,15 +412,46 @@ async function waitUntilDown(url: string, timeoutMs = 5000): Promise<void> {
   }
 }
 
-export function stopDaemon(): boolean {
+/**
+ * Stops this machine's server, if it is running, and forgets it.
+ *
+ * Never signals a pid on the file's say-so. daemon.json outlives the process
+ * it describes -- a crash or a reboot leaves it behind -- and the OS recycles
+ * pids, so the number in it can belong to anything by now: an editor, a build,
+ * someone's shell. The server is asked who it is first, and only a server
+ * signed with this machine's key, reporting its own pid, is stopped.
+ */
+export async function stopDaemon(): Promise<'stopped' | 'not-running'> {
   const info = readDaemon()
-  if (!info) return false
+  const port = info?.port ?? DEFAULT_PORT
+  const health = await probe(`http://127.0.0.1:${port}`)
+  let stopped = false
+  if (health && health.serverId === expectedServerId()) {
+    stopped = await stopServerAt(port, health, info)
+  }
+  forgetDaemon()
+  return stopped ? 'stopped' : 'not-running'
+}
+
+async function stopServerAt(port: number, health: Health, info: DaemonInfo | null = readDaemon()): Promise<boolean> {
+  /**
+   * A server from before /healthz reported its pid. It answered with this
+   * machine's key, so it is ours; the recorded pid is the only lead there is,
+   * and only when the record is for this port.
+   */
+  const pid = health.pid ?? (info?.port === port ? info.pid : null)
+  if (!pid || pid <= 0) return false
   try {
-    process.kill(info.pid)
-    return true
+    process.kill(pid)
   } catch {
     return false
   }
+  await waitUntilDown(`http://127.0.0.1:${port}`)
+  return true
+}
+
+function forgetDaemon(): void {
+  rmSync(DAEMON_FILE, { force: true })
 }
 
 function openLog(): number {
@@ -315,4 +460,4 @@ function openLog(): number {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-export const paths = { STATE_DIR, DAEMON_FILE, SECRET_FILE, DB_FILE, LOG_FILE }
+export const paths = { STATE_DIR, DAEMON_FILE, SECRET_FILE, MACHINE_FILE, DB_FILE, LOG_FILE }

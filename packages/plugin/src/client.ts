@@ -1,4 +1,5 @@
 import type { ClientCommand, CommandResultMap } from '@session-share/protocol'
+import { machineId } from './daemon.js'
 
 export class CommandError extends Error {
   constructor(
@@ -46,7 +47,8 @@ export async function peerJoin(
   const response = await fetch(new URL('/api/peer/join', serverUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ invite, repoPath, ...identity }),
+    // The machine makes the checkout: same path, different laptop, different seat.
+    body: JSON.stringify({ invite, repoPath, machineId: repoPath ? machineId() : null, ...identity }),
   })
   const payload = (await response.json()) as PairResult & { error?: string; message?: string }
   if (!response.ok) {
@@ -67,7 +69,7 @@ export async function pair(
   const response = await fetch(new URL('/api/join', serverUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ token, repoPath }),
+    body: JSON.stringify({ token, repoPath, machineId: machineId() }),
   })
   const payload = (await response.json()) as PairResult & { error?: string; message?: string }
   if (!response.ok) throw new CommandError(payload.error ?? 'internal', payload.message ?? 'join failed')
