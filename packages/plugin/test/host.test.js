@@ -90,3 +90,22 @@ describe('hosting two repositories with the same folder name', () => {
     assert.equal(sessionOf(work), workSession)
   })
 })
+
+/**
+ * Before 0.10 a session was named after the bare folder. Re-hosting is the
+ * documented way to resume, so after an upgrade it has to land back in that
+ * session -- not open an empty one beside it while every guest stays put.
+ */
+describe('re-hosting a session from before the slug changed', () => {
+  it('resumes it by its old name', async () => {
+    const legacy = repo('legacy')
+    const host = await claudeCode(legacy)
+    assert.match(await host('ss_host', { expose: 'loopback', title: 'app' }), /^Hosting|^Resumed/)
+    const original = sessionOf(legacy)
+    rmSync(join(legacy, '.session-share'), { recursive: true, force: true })
+
+    const again = await (await claudeCode(legacy))('ss_host', { expose: 'loopback' })
+    assert.match(again, /^Resumed/)
+    assert.equal(sessionOf(legacy), original)
+  })
+})

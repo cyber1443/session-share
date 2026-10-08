@@ -21,6 +21,7 @@ import { startAutopilot } from './autopilot.js'
 import { boardUrl, openInBrowser } from './open.js'
 import {
   addWorktree,
+  baseBranch,
   checkoutBranch,
   contractBranch,
   fetch as gitFetch,
@@ -28,7 +29,7 @@ import {
 } from './git.js'
 import { readPreferences } from './preferences.js'
 import { registerGitTools } from './tools-git.js'
-import { currentBranch, localIdentity, repoRemote, repoRoot } from './identity.js'
+import { localIdentity, repoRemote, repoRoot } from './identity.js'
 
 const DEFAULT_SERVER_URL = process.env.SESSION_SHARE_URL ?? 'http://127.0.0.1:4310'
 
@@ -238,7 +239,7 @@ export function createServer(): McpServer {
       const repo: RepoRef = {
         owner: remote?.owner ?? 'local',
         name: remote?.name ?? basename(root),
-        baseBranch: await currentBranch(root),
+        baseBranch: await baseBranch(root),
         remoteUrl: remote?.remoteUrl ?? root,
       }
 
@@ -281,7 +282,25 @@ export function createServer(): McpServer {
           return sameRepo(existing.repo) ? { invite: existing.invite, resumed: true, slug: candidate } : null
         }
       }
+      /**
+       * Only ever resumes. Before 0.10 the slug was the bare folder name, and
+       * this checkout may already be attached to a session under some other
+       * name; re-hosting has to land back in it, not open an empty one beside
+       * it while every guest stays on the old one.
+       */
+      const resume = async (candidate: string | undefined) => {
+        if (!candidate) return null
+        try {
+          const existing = await mintInvite(loopback, candidate)
+          return sameRepo(existing.repo) ? { invite: existing.invite, resumed: true, slug: candidate } : null
+        } catch {
+          return null
+        }
+      }
+      const attached = readConfig(root)
       const created =
+        (given?.trim() ? null : await resume(attached?.sessionRef)) ??
+        (given?.trim() ? null : await resume(slugify(basename(root)))) ??
         (await open(slug)) ??
         (await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`)) ??
         null
@@ -480,7 +499,7 @@ export function createServer(): McpServer {
        * concurrent session needs a second directory -- and a worktree is the
        * cheap version of that.
        */
-      const created = await addWorktree(root, path, branch, await currentBranch(root))
+      const created = await addWorktree(root, path, branch, await baseBranch(root))
 
       return text(
         [
