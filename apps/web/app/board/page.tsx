@@ -256,6 +256,9 @@ function Board({ slug }: { slug: string }) {
                 }),
               )
             }
+            onReclaim={(taskId) =>
+              act(() => send({ type: 'task.forceRelease', taskId: taskId as never }))
+            }
             // Closing first: the panel is about to be describing a card that
             // no longer exists.
             onDelete={() =>

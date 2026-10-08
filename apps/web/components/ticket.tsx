@@ -45,6 +45,7 @@ export function TicketPanel({
   onStart,
   onApprove,
   onAssign,
+  onReclaim,
   onDelete,
 }: {
   ticket: Ticket
@@ -57,6 +58,8 @@ export function TicketPanel({
   onStart: () => Promise<void>
   onApprove: () => Promise<void>
   onAssign: (taskId: string, participantId: string | null) => Promise<void>
+  /** Takes a task back from a holder who has gone quiet; the server decides who has. */
+  onReclaim: (taskId: string) => Promise<void>
   onDelete: () => Promise<void>
 }) {
   /**
@@ -356,7 +359,18 @@ export function TicketPanel({
                     {owner ? (
                       <span className={`h-2 w-2 rounded-full ${DOT[owner.colorIndex % DOT.length]}`} />
                     ) : null}
-                    {task.ownerId ? (
+                    {task.ownerId && owner && !owner.connected && task.state !== 'merged' ? (
+                      <>
+                        <span className="text-mute">{owner.displayName} has gone quiet</span>
+                        <button
+                          className="btn ml-auto px-1.5 py-0 text-[10px]"
+                          title="Return it to ready so someone else can claim it. Allowed once its holder has not been heard from for ten minutes."
+                          onClick={() => void onReclaim(task.id)}
+                        >
+                          take it back
+                        </button>
+                      </>
+                    ) : task.ownerId ? (
                       <span className="text-mute">{owner?.displayName} is on it</span>
                     ) : (
                       <select
