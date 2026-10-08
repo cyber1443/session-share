@@ -10,14 +10,18 @@ import {
   checkoutBranch,
   commit,
   contractBranch,
+  currentBranch,
   dirtyFiles,
   existingPullRequest,
+  foreignChanges,
+  insideRepo,
   fetch as gitFetch,
   hasRemote,
   mergeInto,
   openPullRequest,
   push,
   taskBranch,
+  updateLocalBranch,
   writeFiles,
 } from './git.js'
 import { describePreferences, readPreferences, writePreferences, PREFERENCES_FILE } from './preferences.js'
@@ -147,10 +151,23 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
         )
         lines.push(`server url ${config.serverUrl} — reachable`)
       } catch (error) {
+        /**
+         * "Did not answer" was said about every failure, including the server
+         * answering perfectly clearly that it does not know this token. Those
+         * need different fixes, so they get different words.
+         */
+        const message = error instanceof Error ? error.message : String(error)
+        const status = Number(message.match(/\b(401|403|404)\b/)?.[1] ?? 0)
         lines.push(
-          attached
-            ? `session    attached, but the server did not answer: ${error instanceof Error ? error.message : error}`
-            : 'session    this checkout is not attached — run /ss:host or /ss:join',
+          !attached
+            ? 'session    this checkout is not attached — run /ss:host or /ss:join'
+            : status === 401
+              ? 'session    attached, but the server does not accept this checkout\'s token — it was minted by a different server or a different secret. Join again with a fresh invite'
+              : status === 403
+                ? 'session    attached, but the token is for a different session than the one configured here. Join again with a fresh invite'
+                : status === 404
+                  ? 'session    the server answered but has no such session — it was hosted on another server, or its database was reset. Ask for a fresh invite'
+                  : `session    attached, but the server did not answer: ${message}`,
         )
       }
 
@@ -174,16 +191,24 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       const preferences = readPreferences()
       const state = await ctx.snapshot(config)
 
-      if (!state.decomposition) throw new Error('There is no decomposition yet. Run /ss:plan first.')
-      if (state.decomposition.status !== 'approved') {
-        throw new Error('The split has not been approved yet. Approve it on the board first.')
-      }
       /**
        * Runs once per ticket, not once per session. Every ticket brings its own
-       * seam and they all land on the same branch, so this checks out whatever
-       * is already there and adds to it -- writing the same files twice commits
-       * nothing, which is what makes it safe to be told to do this again.
+       * seam and they all land on the same branch, so this lands every approved
+       * split that has not landed yet, in one commit -- and writing the same
+       * files twice commits nothing, which is what makes it safe to be told to
+       * do this again.
        */
+      const splits = Object.values(state.decompositions ?? {}).filter(
+        (split) => split.status === 'approved' && !split.contractCommit,
+      )
+      if (splits.length === 0 && state.decomposition?.status === 'approved') splits.push(state.decomposition)
+      if (splits.length === 0) {
+        throw new Error(
+          state.decomposition
+            ? 'No approved split is waiting to land. Approve one on the board first.'
+            : 'There is no decomposition yet. Run /ss:plan first.',
+        )
+      }
 
       /**
        * session-share's own wiring is not work in progress, and refusing to
@@ -201,14 +226,14 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       }
 
       const branch = contractBranch(state.session.slug)
+      const files = splits.flatMap((split) => split.contract.files)
+      const summary = splits.map((split) => split.contract.summary).join('\n\n')
+      // Validate every path before switching branches, so a bad split moves nothing.
+      for (const file of files) insideRepo(root, file.path)
       await checkoutBranch(root, branch, state.session.repo.baseBranch)
 
-      const written = await writeFiles(root, state.decomposition.contract.files)
-      const sha = await commit(
-        root,
-        written,
-        `contract: ${state.session.title}\n\n${state.decomposition.contract.summary}`,
-      )
+      const written = await writeFiles(root, files)
+      const sha = await commit(root, written, `contract: ${state.session.title}\n\n${summary}`)
 
       const pushed = preferences.push ? await push(root, branch) : false
 
@@ -220,21 +245,24 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
             head: branch,
             base: state.session.repo.baseBranch,
             title: state.session.title,
-            body: `${state.decomposition.contract.summary}\n\nTasks land on this branch as they finish.`,
+            body: `${summary}\n\nTasks land on this branch as they finish.`,
             draft: true,
           }))
       }
 
-      await runCommand(config, {
-        type: 'contract.committed',
-        branch,
-        commitSha: sha ?? 'unchanged',
-        prNumber,
-      })
+      for (const split of splits) {
+        await runCommand(config, {
+          type: 'contract.committed',
+          branch,
+          commitSha: sha ?? 'unchanged',
+          prNumber,
+          ticketId: split.ticketId,
+        })
+      }
 
       return ctx.text(
         [
-          `Contract landed on ${branch}.`,
+          `Contract landed on ${branch}${splits.length > 1 ? ` for ${splits.length} tickets` : ''}.`,
           written.length > 0 ? `  ${written.join('\n  ')}` : '  (files already present)',
           '',
           pushed ? 'Pushed to origin.' : 'Not pushed — your teammate cannot see it yet.',
@@ -292,6 +320,7 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       const task = state.tasks.find((t) => t.id === taskId)
       if (!task) throw new Error(`No task "${taskId}" in this session.`)
       if (task.ownerId !== config.participantId) throw new Error(`You do not hold "${taskId}".`)
+      if (task.state === 'merged') return ctx.text(`"${taskId}" is already merged into the contract.`)
 
       /**
        * A task is done when the command that proves it passes. Landing on an
@@ -318,6 +347,23 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       const branch = taskBranch(state.session.slug, taskId)
       const contract = contractBranch(state.session.slug)
 
+      /**
+       * Finishing switches branches and merges, and git stops partway through
+       * either when tracked files outside the task are modified. Better to say
+       * so before anything moves than to leave someone stranded mid-way.
+       */
+      const foreign = await foreignChanges(root, task.ownedPaths, OWN_ARTIFACTS)
+      if (foreign.length > 0) {
+        return ctx.text(
+          [
+            `These changes are outside "${taskId}" and would block switching branches:`,
+            ...foreign.slice(0, 10).map((path) => `  ${path}`),
+            '',
+            'They are not part of this task, so they are not committed with it. Commit them elsewhere, stash them, or unstage them, then finish again.',
+          ].join('\n'),
+        )
+      }
+
       await checkoutBranch(root, branch, contract)
       const sha = await commit(root, task.ownedPaths, `${taskId}: ${summary}`)
 
@@ -343,14 +389,13 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
        * of the contract branch and the second push is rejected -- which strands
        * their task as far as the session is concerned.
        */
-      if (preferences.push) {
-        await gitFetch(root)
+      if (preferences.push && (await updateLocalBranch(root, contract)) === 'diverged') {
         const caughtUp = await mergeInto(root, contract, `origin/${contract}`)
         if (!caughtUp.merged) {
           await checkoutBranch(root, branch, contract)
           return ctx.text(
             [
-              `${contract} has moved on and cannot be fast-forwarded here:`,
+              `${contract} has moved on and your local copy cannot be merged with it:`,
               ...caughtUp.conflicts.map((path) => `  ${path}`),
               '',
               'Run /ss:sync, resolve that, then finish again.',
@@ -408,15 +453,19 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       const state = await ctx.snapshot(config)
       const contract = contractBranch(state.session.slug)
 
-      if (!(await hasRemote(root))) return ctx.text('No origin remote, so there is nothing to sync.')
-
-      await gitFetch(root)
-      const merge = await mergeInto(root, contract, `origin/${contract}`)
-      return ctx.text(
-        merge.merged
-          ? `${contract} is up to date with origin.`
-          : `Could not fast-forward ${contract}: ${merge.conflicts.join(', ')}`,
-      )
+      const outcome = await updateLocalBranch(root, contract)
+      const messages = {
+        'no-remote': `origin has no ${contract} yet (or there is no origin), so there is nothing to sync.`,
+        unchanged: `${contract} is already up to date with origin.`,
+        updated: `${contract} now matches origin.`,
+        diverged: `${contract} has commits origin does not, and origin has commits it does not. Merge origin/${contract} into it by hand.`,
+      } as const
+      const here = await currentBranch(root)
+      const hint =
+        outcome === 'updated' && here !== contract
+          ? `\nYou are still on ${here}. Run \`git merge ${contract}\` there if you need what landed.`
+          : ''
+      return ctx.text(`${messages[outcome]}${hint}`)
     },
   )
 
@@ -446,7 +495,18 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       }
 
       const contract = contractBranch(state.session.slug)
+      const synced = await updateLocalBranch(root, contract)
+      if (synced === 'diverged') {
+        return ctx.text(
+          `${contract} has diverged from origin. Run /ss:sync and merge origin/${contract} into it before shipping.`,
+        )
+      }
       if (preferences.push) await push(root, contract)
+      if (!preferences.openPullRequests) {
+        return ctx.text(
+          `Everything is merged into ${contract}. Opening pull requests is off in /ss:setup, so open ${contract} → ${state.session.repo.baseBranch} yourself.`,
+        )
+      }
 
       const body = [
         state.decomposition?.contract.summary ?? '',
