@@ -54,6 +54,8 @@ export function useLiveSession(sessionRef: string) {
    * beat, and rides along on each published snapshot.
    */
   const autopilotsRef = useRef<SessionSnapshot['autopilots']>(undefined)
+  /** What each seat's Claude is doing now; same delivery as autopilots. */
+  const doingRef = useRef<SessionSnapshot['doing']>(undefined)
   const socketRef = useRef<WebSocket | null>(null)
   const pendingRef = useRef(new Map<string, Pending>())
   const reqCounter = useRef(0)
@@ -61,7 +63,7 @@ export function useLiveSession(sessionRef: string) {
 
   const publish = useCallback(() => {
     if (!stateRef.current.session) return
-    setSnapshot({ ...stateRef.current.snapshot(), autopilots: autopilotsRef.current })
+    setSnapshot({ ...stateRef.current.snapshot(), autopilots: autopilotsRef.current, doing: doingRef.current })
   }, [])
 
   const send = useCallback(<T extends ClientCommand['type']>(
@@ -151,6 +153,7 @@ export function useLiveSession(sessionRef: string) {
               if (result.snapshot) {
                 stateRef.current.hydrate(result.snapshot)
                 autopilotsRef.current = result.snapshot.autopilots
+                doingRef.current = result.snapshot.doing
               }
               setStatus('live')
               setError(null)
@@ -196,6 +199,7 @@ export function useLiveSession(sessionRef: string) {
                 participants.set(id, { ...participant, connected: present.has(id) })
               }
               if (message.autopilots) autopilotsRef.current = message.autopilots
+              if (message.doing) doingRef.current = message.doing
               publish()
               break
             }

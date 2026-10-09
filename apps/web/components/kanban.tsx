@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import type { Participant, SessionSnapshot, Task, Ticket, TicketState } from '@session-share/protocol'
+import { workingNow } from '@/lib/now'
 
 const DOT = [
   'bg-emerald-400',
@@ -127,6 +128,7 @@ export function Kanban({
                     ticket={ticket}
                     tasks={snapshot.tasks.filter((task) => task.ticketId === ticket.id)}
                     participants={snapshot.participants}
+                    doing={snapshot.doing}
                     meId={meId}
                     selected={selected === ticket.id}
                     onOpen={() => onOpen(ticket.id)}
@@ -150,6 +152,7 @@ function Card({
   ticket,
   tasks,
   participants,
+  doing,
   meId,
   selected,
   onOpen,
@@ -158,6 +161,7 @@ function Card({
   ticket: Ticket
   tasks: Task[]
   participants: Participant[]
+  doing: SessionSnapshot['doing']
   meId: string | null
   selected: boolean
   onOpen: () => void
@@ -210,6 +214,16 @@ function Card({
             : `handed to ${members.find((m) => m.repoPath)?.displayName ?? 'an agent'}`}
         </p>
       ) : null}
+
+      {/* What the agents on it are doing this minute. */}
+      {workingNow(members, doing).map(({ member, doing: now }) => (
+        <p key={member.id} className="flex items-baseline gap-1.5 text-[10px] text-neutral-400" title={now.text}>
+          <span className={`h-1.5 w-1.5 shrink-0 animate-pulse rounded-full ${DOT[member.colorIndex % DOT.length]}`} />
+          <span className="truncate">
+            <span className="text-neutral-300">{member.displayName}</span> {now.text}
+          </span>
+        </p>
+      ))}
 
       {tasks.length > 0 ? (
         <div className="flex items-center gap-2 text-[10px] text-mute">

@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import type { Participant, SessionSnapshot, Ticket } from '@session-share/protocol'
 import { tokens } from '@/lib/tokens'
+import { ago, isBusy } from '@/lib/now'
 
 const DOT = [
   'bg-emerald-400',
@@ -190,6 +191,94 @@ export function TicketPanel({
           </span>
         </div>
       </div>
+
+      {/* -- who is doing what, this minute ---------------------------------- */}
+      {workers.length > 0 ? (
+        <div className="space-y-1.5">
+          <p className="text-[10px] uppercase tracking-wider text-mute">Now</p>
+          {workers.map((worker) => {
+            const now = snapshot.doing?.[worker.id]
+            const autopilot = snapshot.autopilots?.[worker.id]
+            const theirs = tasks.filter((task) => task.ownerId === worker.id || (!task.ownerId && task.assigneeId === worker.id))
+            const busy = isBusy(now)
+            return (
+              <div key={worker.id} className="panel space-y-1 p-2">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`h-2 w-2 shrink-0 rounded-full ${DOT[worker.colorIndex % DOT.length]} ${busy ? 'animate-pulse' : 'opacity-40'}`}
+                  />
+                  <span className="text-neutral-200">{worker.displayName}</span>
+                  <span className="ml-auto text-[10px] text-mute">
+                    {snapshot.autopilots
+                      ? autopilot
+                        ? `Claude Code open · autopilot ${autopilot}`
+                        : 'Claude Code closed'
+                      : ''}
+                  </span>
+                </div>
+                <p className={`break-words text-[11px] ${busy ? 'text-neutral-300' : 'text-mute'}`}>
+                  {now ? (
+                    <>
+                      {now.text} <span className="text-mute">· {ago(now.at)}</span>
+                    </>
+                  ) : (
+                    'nothing reported yet'
+                  )}
+                </p>
+                {theirs.map((task) => (
+                  <p key={task.id} className="flex gap-2 text-[10px] text-mute">
+                    <span className="truncate text-neutral-400">{task.title}</span>
+                    <span className="ml-auto shrink-0">
+                      {task.state}
+                      {task.lastTest ? (
+                        <span className={task.lastTest.passed ? ' text-emerald-400' : ' text-red-400'}>
+                          {' '}· tests {task.lastTest.passed ? 'pass' : 'fail'}
+                        </span>
+                      ) : null}
+                    </span>
+                  </p>
+                ))}
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
+
+      {/* -- what has been said about it lately ---------------------------- */}
+      {(() => {
+        const taskIds = new Set(tasks.map((task) => task.id as string))
+        const about = snapshot.chat
+          .filter(
+            (message) =>
+              (message.taskRef && taskIds.has(message.taskRef)) ||
+              message.body.includes(ticket.id) ||
+              message.body.includes(`"${ticket.title}"`) ||
+              [...taskIds].some((id) => message.body.includes(`#${id}`)),
+          )
+          .slice(-8)
+          .reverse()
+        if (about.length === 0) return null
+        return (
+          <div className="space-y-1.5">
+            <p className="text-[10px] uppercase tracking-wider text-mute">Recent</p>
+            {about.map((message) => {
+              const author = snapshot.participants.find((p) => p.id === message.authorId)
+              return (
+                <div key={message.id} className="border-l border-edge pl-2">
+                  <p className="text-[10px] text-mute">
+                    {message.authorKind === 'system' ? 'session' : (author?.displayName ?? 'someone')}
+                    {message.authorKind === 'agent' ? "'s Claude" : ''}
+                    {message.directive ? ' · instruction' : ''} · {ago(message.createdAt)}
+                  </p>
+                  <p className="line-clamp-3 whitespace-pre-line break-words text-[11px] text-neutral-400">
+                    {message.body.replace(new RegExp(ticket.id, 'g'), '').trim()}
+                  </p>
+                </div>
+              )
+            })}
+          </div>
+        )
+      })()}
 
       {/* -- what happens next ---------------------------------------------- */}
       {ticket.state === 'plan' ? (
