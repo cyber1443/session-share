@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import {
   Assignment,
+  Attachment,
+  HumanCheck,
   ChatMessage,
   Ticket,
   TicketState,
@@ -90,6 +92,9 @@ export const EventBody = z.discriminatedUnion('type', [
    * branch, and nothing here would be honest if it claimed otherwise.
    */
   z.object({ type: z.literal('ticket.deleted'), ticketId: TicketId }),
+  z.object({ type: z.literal('ticket.attached'), ticketId: TicketId, attachments: z.array(Attachment) }),
+  z.object({ type: z.literal('ticket.needsHuman'), ticketId: TicketId, value: z.boolean() }),
+  z.object({ type: z.literal('ticket.humanCheck'), ticketId: TicketId, check: HumanCheck.nullable() }),
   /** Its pull request was merged -- from the board or on GitHub. The ticket is done. */
   z.object({
     type: z.literal('ticket.merged'),

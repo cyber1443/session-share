@@ -133,7 +133,29 @@ export class SessionState {
       }
       case 'ticket.verified': {
         const ticket = this.tickets.get(body.ticketId)
-        if (ticket) this.tickets.set(body.ticketId, { ...ticket, verification: body.verification })
+        // A new run is new evidence: any earlier human look was at something else.
+        if (ticket) this.tickets.set(body.ticketId, { ...ticket, verification: body.verification, humanCheck: null })
+        break
+      }
+      case 'ticket.attached': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) {
+          const known = new Set(ticket.attachments.map((a) => a.id))
+          this.tickets.set(body.ticketId, {
+            ...ticket,
+            attachments: [...ticket.attachments, ...body.attachments.filter((a) => !known.has(a.id))],
+          })
+        }
+        break
+      }
+      case 'ticket.needsHuman': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) this.tickets.set(body.ticketId, { ...ticket, needsHuman: body.value })
+        break
+      }
+      case 'ticket.humanCheck': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) this.tickets.set(body.ticketId, { ...ticket, humanCheck: body.check })
         break
       }
       case 'ticket.merged': {
@@ -531,7 +553,9 @@ export class SessionState {
        * together -- and a split makes that failure more likely, not less. So
        * the assembled thing gets run before anyone calls it done.
        */
-      return ticket.verification?.passed ? 'review' : 'verify'
+      if (!ticket.verification?.passed) return 'verify'
+      // Asked for a person's look as well: it waits here until someone has had one.
+      return !ticket.needsHuman || ticket.humanCheck?.passed ? 'review' : 'verify'
     }
     // A split exists but nothing has been seeded: it is waiting to be accepted.
     if (ticket.decompositionId) return 'proposed'

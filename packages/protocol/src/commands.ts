@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   Assignment,
+  Attachment,
   AutopilotMode,
   ChatMessage,
   Contract,
@@ -64,7 +65,29 @@ export const ClientCommand = z.discriminatedUnion('type', [
     type: z.literal('ticket.create'),
     title: z.string().min(1).max(200),
     body: z.string().max(4000).default(''),
+    /** Files already uploaded to the session, to go with the brief. */
+    attachments: z.array(Attachment).max(20).default([]),
+    needsHuman: z.boolean().default(false),
   }),
+  /** Adds files to a ticket: more of the brief, or screenshots from a run. */
+  z.object({
+    type: z.literal('ticket.attach'),
+    ticketId: TicketId,
+    attachments: z.array(Attachment).min(1).max(20),
+  }),
+  z.object({ type: z.literal('ticket.needsHuman'), ticketId: TicketId, value: z.boolean() }),
+  /**
+   * A person has clicked through the running thing. Passing lets it ship;
+   * failing is `ticket.verified` with `passed: false`, which reopens work.
+   */
+  z.object({
+    type: z.literal('ticket.humanCheck'),
+    ticketId: TicketId,
+    passed: z.boolean(),
+    note: z.string().max(2000).default(''),
+  }),
+  /** Asks the caller's own Claude Code to start the ticket's branch locally for them to try. */
+  z.object({ type: z.literal('ticket.runLocally'), ticketId: TicketId }),
   /** Opting in. This is the consent step -- there is no separate approval. */
   z.object({ type: z.literal('ticket.join'), ticketId: TicketId }),
   z.object({ type: z.literal('ticket.leave'), ticketId: TicketId }),
@@ -300,6 +323,10 @@ export interface CommandResultMap {
   'ticket.approve': { ticket: Ticket }
   'ticket.verified': { ticket: Ticket }
   'ticket.shipped': { ticket: Ticket }
+  'ticket.attach': { ticket: Ticket }
+  'ticket.needsHuman': { ticket: Ticket }
+  'ticket.humanCheck': { ticket: Ticket }
+  'ticket.runLocally': { asked: ParticipantId | null }
   'plan.request': { plannerId: ParticipantId; goal: string }
   'decomposition.propose': ProposeResult
   'task.assign': { assignments: Assignment[] }

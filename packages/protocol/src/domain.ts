@@ -154,6 +154,32 @@ export type TicketState = z.infer<typeof TicketState>
  * in. A ticket owns its own split, so several can run at once without a
  * session-wide plan-and-approve ceremony between them.
  */
+/**
+ * A file stored with the session -- a picture in a ticket's brief, or a
+ * screenshot from running the assembled thing. The bytes live on the server;
+ * this is the reference the log carries.
+ */
+export const Attachment = z.object({
+  id: z.string().min(1).max(64),
+  name: z.string().min(1).max(200),
+  type: z.string().min(1).max(100),
+  size: z.number().int().nonnegative(),
+  /** `brief` came with the ticket; `verify` is evidence from a run of it. */
+  kind: z.enum(['brief', 'verify']).default('brief'),
+  /** Optional words about what it shows. */
+  caption: z.string().max(300).default(''),
+})
+export type Attachment = z.infer<typeof Attachment>
+
+/** A person's look at the running thing, for tickets that ask for one. */
+export const HumanCheck = z.object({
+  passed: z.boolean(),
+  note: z.string().max(2000).default(''),
+  by: ParticipantId,
+  at: Timestamp,
+})
+export type HumanCheck = z.infer<typeof HumanCheck>
+
 export const Ticket = z.object({
   id: TicketId,
   sessionId: SessionId,
@@ -180,6 +206,14 @@ export const Ticket = z.object({
   prNumber: z.number().int().nullable().default(null),
   /** When its pull request was merged; a merged ticket is done. */
   mergedAt: Timestamp.nullable().default(null),
+  attachments: z.array(Attachment).default([]),
+  /**
+   * Whether a person has to look at the running thing before it can ship. The
+   * automated run always happens; this holds the ticket in verify after it
+   * passes until someone has clicked through it too.
+   */
+  needsHuman: z.boolean().default(false),
+  humanCheck: HumanCheck.nullable().default(null),
   createdAt: Timestamp,
 })
 export type Ticket = z.infer<typeof Ticket>
