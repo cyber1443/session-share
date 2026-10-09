@@ -28,8 +28,6 @@ const DOT = [
   'bg-indigo-400',
 ]
 
-const PHASES = ['plan', 'build', 'integrate', 'done'] as const
-
 const VIEWS = ['board', 'history', 'usage', 'github'] as const
 type View = (typeof VIEWS)[number]
 
@@ -88,9 +86,6 @@ function Board({ slug }: { slug: string }) {
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-edge px-4 py-2">
         <div className="flex items-baseline gap-3">
-          <Link href="/" className="text-xs text-mute hover:text-neutral-300">
-            ←
-          </Link>
           <h1 className="text-sm">{snapshot.session.title}</h1>
           <span className="text-xs text-mute">
             {snapshot.session.repo.owner}/{snapshot.session.repo.name}
@@ -120,22 +115,7 @@ function Board({ slug }: { slug: string }) {
         {/* rail */}
         <aside className="flex w-56 shrink-0 flex-col gap-6 border-r border-edge p-4">
           <div>
-            <p className="text-[10px] uppercase tracking-wider text-mute">Phase</p>
-            <div className="mt-2 space-y-1">
-              {PHASES.map((phase) => (
-                <div
-                  key={phase}
-                  className={`text-xs ${phase === snapshot.session.phase ? 'text-accent' : 'text-mute'}`}
-                >
-                  {phase === snapshot.session.phase ? '▸ ' : '  '}
-                  {phase}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <p className="text-[10px] uppercase tracking-wider text-mute">Who</p>
+            <p className="text-[10px] uppercase tracking-wider text-mute">Team members</p>
             <ul className="mt-2 space-y-2">
               {people.map((participant) => (
                 <li key={participant.id} className="text-xs">
@@ -241,7 +221,7 @@ function Board({ slug }: { slug: string }) {
           ) : null}
           {view === 'github' ? (
             <div className="min-h-0 flex-1">
-              <GitHubView slug={slug} />
+              <GitHubView slug={slug} snapshot={snapshot} />
             </div>
           ) : null}
           <div className={`relative min-h-0 flex-1 border-b border-edge ${view === 'board' ? '' : 'hidden'}`}>
@@ -273,6 +253,7 @@ function Board({ slug }: { slug: string }) {
           <TicketPanel
             ticket={ticket}
             snapshot={snapshot}
+            slug={slug}
             meId={mine?.id ?? null}
             activity={activity}
             onClose={() => setOpenTicket(null)}
