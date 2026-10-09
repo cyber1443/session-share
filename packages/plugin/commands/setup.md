@@ -11,9 +11,10 @@ Call `ss_settings` with no arguments first and show them what is currently set. 
 2. **When work gets committed.** `explicit` means nothing is committed until they run `/ss:done`. `auto-on-green` means the agent commits and merges as soon as it reports a passing acceptance test.
 3. **Pushing.** On, branches go to `origin`, which is what lets two clones exchange code at all. Off, nothing leaves their machine.
 4. **Pull requests.** On, one PR per task plus one for the finished session. Off, branches only.
-5. **Hosting reach.** `lan` lets a teammate on the same network connect. `loopback` is this machine only, and needs a tunnel for anyone else.
+5. **Hosting reach.** `lan` lets a teammate on the same network connect. `loopback` is this machine only. `tunnel` on makes `/ss:host` open a Cloudflare quick tunnel (needs `cloudflared`) so teammates on any network can join; the address changes each time the tunnel restarts, so a fresh invite goes out then.
 6. **Opening the board.** On, hosting or joining opens the live board in their browser.
 7. **Letting the room drive this agent.** On, a message sent from the board in `run` mode is delivered here and acted on. Off, the room is read-only for them.
 8. **Saving the session to the repository.** On, the session's event log -- tickets, splits, tasks, the room, usage -- is pushed to the repository's `session-share/log` branch every couple of minutes and when the host stops, so `/ss:host` on any machine carries on where it left off. Off, it lives only on the hosting machine. Say plainly that on a public repository the room's messages become public too.
+9. **Terse replies.** On by default: every Claude in the session is asked to skip preamble and recaps, which cuts the output tokens a long session burns. Code, commits and files stay normal.
 
 The cautious options are not all the defaults: autopilot ships on, because a session that stops whenever someone steps away is the problem this exists to solve. Everything else errs toward doing less.

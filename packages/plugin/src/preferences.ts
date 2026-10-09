@@ -46,6 +46,17 @@ export const Preferences = z.object({
    * repository, that is public.
    */
   mirror: z.boolean().default(true),
+  /**
+   * Whether hosting opens a public Cloudflare quick tunnel, so teammates on
+   * other networks can join. The invite is still the only way in.
+   */
+  tunnel: z.boolean().default(false),
+  /**
+   * Whether every Claude in a session is asked to answer tersely. Output is
+   * the expensive half of a token bill, and a session with autopilot on writes
+   * a lot of it that nobody reads.
+   */
+  terse: z.boolean().default(true),
   /** Set once the setup questions have been answered. */
   configured: z.boolean().default(false),
 })
@@ -72,6 +83,19 @@ export function writePreferences(update: Partial<Preferences>): Preferences {
 export const PREFERENCES_FILE = PREFERENCES_PATH
 
 /** Human-readable summary, so a tool can show what it is about to do. */
+/**
+ * The style every Claude in a session is asked to write in, when `terse` is on.
+ * Output tokens cost several times what input does, and most of what an agent
+ * says in a long session is narration nobody reads.
+ */
+export const TERSE_STYLE = [
+  'session-share asks for terse replies in this repository, to save tokens:',
+  'no preamble, no restating the task, no recap of what you just did unless asked;',
+  'short sentences, fragments are fine, drop filler words.',
+  'Code, commit messages, PR text and anything written to files stay normal and complete.',
+  'Security warnings and questions that need a decision stay clear and complete.',
+].join(' ')
+
 export function describePreferences(preferences: Preferences): string {
   return [
     `commits:  ${preferences.commitPolicy === 'explicit' ? 'only when you run /ss:done' : 'automatically when the acceptance test passes'}`,
@@ -80,6 +104,8 @@ export function describePreferences(preferences: Preferences): string {
     `hosting:  ${preferences.expose === 'lan' ? 'reachable on your local network' : 'this machine only'}`,
     `board:    ${preferences.openBoard ? 'opens in your browser on host and join' : 'never opened for you'}`,
     `room:     ${preferences.acceptDirectives ? 'directives from the room run in this session' : 'read-only; nothing from the room reaches your agent'}`,
+    `tunnel:   ${preferences.tunnel ? 'hosting opens a public tunnel, so teammates on any network can join' : 'hosting is reachable as set above; pass tunnel: true to /ss:host for other networks'}`,
+    `replies:  ${preferences.terse ? 'terse, to save tokens (code and commits stay normal)' : 'normal length'}`,
     `memory:   ${preferences.mirror ? 'the session log is saved to the repo\'s session-share/log branch, so it survives this machine' : 'the session lives only on the hosting machine'}`,
     `autopilot: ${
       preferences.autopilot === 'off'
