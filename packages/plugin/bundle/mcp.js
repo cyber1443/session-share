@@ -31052,6 +31052,10 @@ var ParticipantActivity = external_exports.object({
   updatedAt: Timestamp
 });
 var AutopilotMode = external_exports.enum(["off", "splits", "full"]);
+var Doing = external_exports.object({
+  text: external_exports.string().max(200),
+  at: external_exports.number()
+});
 var Participant = external_exports.object({
   id: ParticipantId,
   sessionId: SessionId,
@@ -31370,6 +31374,8 @@ var SessionSnapshot = external_exports.object({
    * is missing here is closed (or on a plugin too old to say).
    */
   autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
+  /** What each seat's Claude is doing now; see Doing. */
+  doing: external_exports.record(external_exports.string(), Doing).optional(),
   seq: external_exports.number().int().nonnegative()
 });
 
@@ -31749,6 +31755,11 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("agent.heartbeat"),
     autopilot: AutopilotMode
+  }),
+  /** A line for the board's "now": what this checkout's Claude just started doing. */
+  external_exports.object({
+    type: external_exports.literal("agent.doing"),
+    text: external_exports.string().max(200)
   })
 ]);
 var LeaseDenial = external_exports.object({
@@ -31883,7 +31894,8 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
     kind: external_exports.literal("presence"),
     present: external_exports.array(ParticipantId),
     /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
-    autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional()
+    autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
+    doing: external_exports.record(external_exports.string(), Doing).optional()
   })
 ]);
 
@@ -32616,6 +32628,17 @@ var Preferences = external_exports.object({
    * repository, that is public.
    */
   mirror: external_exports.boolean().default(true),
+  /**
+   * Whether hosting opens a public Cloudflare quick tunnel, so teammates on
+   * other networks can join. The invite is still the only way in.
+   */
+  tunnel: external_exports.boolean().default(false),
+  /**
+   * Whether every Claude in a session is asked to answer tersely. Output is
+   * the expensive half of a token bill, and a session with autopilot on writes
+   * a lot of it that nobody reads.
+   */
+  terse: external_exports.boolean().default(true),
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });
@@ -32636,6 +32659,13 @@ function writePreferences(update) {
   return merged;
 }
 var PREFERENCES_FILE = PREFERENCES_PATH;
+var TERSE_STYLE = [
+  "session-share asks for terse replies in this repository, to save tokens:",
+  "no preamble, no restating the task, no recap of what you just did unless asked;",
+  "short sentences, fragments are fine, drop filler words.",
+  "Code, commit messages, PR text and anything written to files stay normal and complete.",
+  "Security warnings and questions that need a decision stay clear and complete."
+].join(" ");
 function describePreferences(preferences) {
   return [
     `commits:  ${preferences.commitPolicy === "explicit" ? "only when you run /ss:done" : "automatically when the acceptance test passes"}`,
@@ -32644,6 +32674,8 @@ function describePreferences(preferences) {
     `hosting:  ${preferences.expose === "lan" ? "reachable on your local network" : "this machine only"}`,
     `board:    ${preferences.openBoard ? "opens in your browser on host and join" : "never opened for you"}`,
     `room:     ${preferences.acceptDirectives ? "directives from the room run in this session" : "read-only; nothing from the room reaches your agent"}`,
+    `tunnel:   ${preferences.tunnel ? "hosting opens a public tunnel, so teammates on any network can join" : "hosting is reachable as set above; pass tunnel: true to /ss:host for other networks"}`,
+    `replies:  ${preferences.terse ? "terse, to save tokens (code and commits stay normal)" : "normal length"}`,
     `memory:   ${preferences.mirror ? "the session log is saved to the repo's session-share/log branch, so it survives this machine" : "the session lives only on the hosting machine"}`,
     `autopilot: ${preferences.autopilot === "off" ? "off \u2014 queued work waits for you" : preferences.autopilot === "splits" ? `planning runs itself when you are idle (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)` : `everything runs itself when you are idle, including writing and pushing code (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)`}`
   ].join("\n");
@@ -32835,7 +32867,7 @@ async function tickOnce(options = {}) {
   try {
     const result = await runHeadless(
       config3,
-      describeDirectives(waiting, /* @__PURE__ */ new Map()),
+      [describeDirectives(waiting, /* @__PURE__ */ new Map()), preferences.terse ? TERSE_STYLE : ""].filter(Boolean).join("\n\n"),
       planningOnly,
       options.command ?? "claude"
     );
@@ -33018,15 +33050,106 @@ async function pushLog(cwd, source, attempts = 3) {
   return { pushed: false, reason: "gave up after repeated push races" };
 }
 
-// packages/plugin/src/mirror-sync.ts
-import { appendFileSync as appendFileSync3, mkdirSync as mkdirSync7 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
+// packages/plugin/src/tunnel.ts
+import { execFile, spawn as spawn4 } from "node:child_process";
+import { closeSync, existsSync as existsSync6, mkdirSync as mkdirSync7, openSync as openSync2, readFileSync as readFileSync6, rmSync as rmSync4, writeFileSync as writeFileSync7 } from "node:fs";
 import { join as join8 } from "node:path";
+import { promisify } from "node:util";
+var run = promisify(execFile);
+var TUNNEL_FILE = join8(STATE_DIR, "tunnel.json");
+var TUNNEL_LOG = join8(STATE_DIR, "tunnel.log");
+var QUICK_URL = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/;
+var alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+function readRecord() {
+  try {
+    return JSON.parse(readFileSync6(TUNNEL_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function registered() {
+  try {
+    return /Registered tunnel connection/.test(readFileSync6(TUNNEL_LOG, "utf8"));
+  } catch {
+    return false;
+  }
+}
+var wait = (ms) => new Promise((resolve5) => setTimeout(resolve5, ms));
+async function ensureTunnel(port) {
+  const existing = readRecord();
+  if (existing && existing.port === port && alive(existing.pid) && registered()) {
+    return existing.url;
+  }
+  if (existing && alive(existing.pid)) {
+    try {
+      process.kill(existing.pid);
+    } catch {
+    }
+  }
+  try {
+    await run("cloudflared", ["--version"], { timeout: 5e3 });
+  } catch {
+    throw new Error(
+      "Tunnelling needs cloudflared, which is not installed here. Install it (macOS: `brew install cloudflared`; others: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and host again, or use Tailscale and pass its address as publicUrl."
+    );
+  }
+  mkdirSync7(STATE_DIR, { recursive: true });
+  writeFileSync7(TUNNEL_LOG, "");
+  const log3 = openSync2(TUNNEL_LOG, "a");
+  const child = spawn4(
+    "cloudflared",
+    ["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${port}`],
+    { detached: true, stdio: ["ignore", log3, log3] }
+  );
+  child.unref();
+  closeSync(log3);
+  const deadline = Date.now() + 3e4;
+  let url2 = null;
+  while (Date.now() < deadline) {
+    const found = readFileSync6(TUNNEL_LOG, "utf8").match(QUICK_URL);
+    if (found && registered()) {
+      url2 = found[0];
+      break;
+    }
+    if (child.pid && !alive(child.pid)) break;
+    await wait(500);
+  }
+  if (!url2 || !child.pid) {
+    if (child.pid && alive(child.pid)) process.kill(child.pid);
+    throw new Error(`cloudflared did not come up with an address. Its log is at ${TUNNEL_LOG}.`);
+  }
+  writeFileSync7(TUNNEL_FILE, `${JSON.stringify({ pid: child.pid, url: url2, port })}
+`);
+  return url2;
+}
+function stopTunnel() {
+  const record2 = readRecord();
+  if (existsSync6(TUNNEL_FILE)) rmSync4(TUNNEL_FILE, { force: true });
+  if (!record2 || !alive(record2.pid)) return false;
+  try {
+    process.kill(record2.pid);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// packages/plugin/src/mirror-sync.ts
+import { appendFileSync as appendFileSync3, mkdirSync as mkdirSync8 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { join as join9 } from "node:path";
 var MIRROR_MS = Number(process.env.SESSION_SHARE_MIRROR_MS ?? 2 * 6e4);
-var logFile2 = () => join8(process.env.SESSION_SHARE_HOME ?? join8(homedir5(), ".session-share"), "mirror.log");
+var logFile2 = () => join9(process.env.SESSION_SHARE_HOME ?? join9(homedir5(), ".session-share"), "mirror.log");
 function log2(line) {
   try {
-    mkdirSync7(join8(logFile2(), ".."), { recursive: true });
+    mkdirSync8(join9(logFile2(), ".."), { recursive: true });
     appendFileSync3(logFile2(), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
   } catch {
@@ -33136,12 +33259,12 @@ async function catchUpFromMirror(root, serverUrl, slug) {
 }
 
 // packages/plugin/src/open.ts
-import { spawn as spawn4 } from "node:child_process";
+import { spawn as spawn5 } from "node:child_process";
 function openInBrowser(url2) {
   if (process.env.SESSION_SHARE_NO_OPEN === "1") return false;
   const [command, args] = process.platform === "darwin" ? ["open", [url2]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url2]] : ["xdg-open", [url2]];
   try {
-    const child = spawn4(command, args, {
+    const child = spawn5(command, args, {
       detached: true,
       stdio: "ignore"
     });
@@ -33158,11 +33281,11 @@ function boardUrl(serverUrl, packedInvite, as) {
 }
 
 // packages/plugin/src/git.ts
-import { execFile } from "node:child_process";
-import { existsSync as existsSync6, mkdirSync as mkdirSync8, writeFileSync as writeFileSync7 } from "node:fs";
+import { execFile as execFile2 } from "node:child_process";
+import { existsSync as existsSync7, mkdirSync as mkdirSync9, writeFileSync as writeFileSync8 } from "node:fs";
 import { dirname as dirname4, isAbsolute as isAbsolute2, relative, resolve as resolve3 } from "node:path";
-import { promisify } from "node:util";
-var run = promisify(execFile);
+import { promisify as promisify2 } from "node:util";
+var run2 = promisify2(execFile2);
 var GitError = class extends Error {
   constructor(message, stderr) {
     super(message);
@@ -33175,7 +33298,7 @@ var contractBranch = (slug) => `ss/${slug}/contract`;
 var taskBranch = (slug, taskId) => `ss/${slug}/${taskId}`;
 async function git2(cwd, args) {
   try {
-    const { stdout } = await run("git", args, { cwd, timeout: 6e4, maxBuffer: 10 * 1024 * 1024 });
+    const { stdout } = await run2("git", args, { cwd, timeout: 6e4, maxBuffer: 10 * 1024 * 1024 });
     return stdout.trim();
   } catch (error51) {
     const failure = error51;
@@ -33340,8 +33463,8 @@ async function writeFiles(cwd, files) {
   const written = [];
   for (const [index, file2] of files.entries()) {
     const absolute = targets[index];
-    mkdirSync8(dirname4(absolute), { recursive: true });
-    writeFileSync7(absolute, file2.contents);
+    mkdirSync9(dirname4(absolute), { recursive: true });
+    writeFileSync8(absolute, file2.contents);
     written.push(file2.path);
   }
   return written;
@@ -33353,7 +33476,7 @@ async function foreignChanges(cwd, patterns, ignore) {
   return (await statusEntries(cwd)).filter((entry) => entry.status !== "??").map((entry) => entry.path).filter((path) => !pathMatchesAny(path, patterns) && !ignore.some((prefix) => path.startsWith(prefix)));
 }
 async function statusEntries(cwd) {
-  const { stdout } = await run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
+  const { stdout } = await run2("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
     cwd,
     timeout: 6e4,
     maxBuffer: 10 * 1024 * 1024
@@ -33408,7 +33531,7 @@ async function openPullRequest(cwd, options) {
       options.body
     ];
     if (options.draft) args.push("--draft");
-    const { stdout } = await run("gh", args, { cwd, timeout: 6e4 });
+    const { stdout } = await run2("gh", args, { cwd, timeout: 6e4 });
     const match = stdout.trim().match(/\/pull\/(\d+)/);
     return match ? Number(match[1]) : null;
   } catch {
@@ -33417,7 +33540,7 @@ async function openPullRequest(cwd, options) {
 }
 async function existingPullRequest(cwd, head) {
   try {
-    const { stdout } = await run("gh", ["pr", "list", "--head", head, "--json", "number"], {
+    const { stdout } = await run2("gh", ["pr", "list", "--head", head, "--json", "number"], {
       cwd,
       timeout: 3e4
     });
@@ -33428,7 +33551,7 @@ async function existingPullRequest(cwd, head) {
   }
 }
 async function addWorktree(cwd, path, branch, from) {
-  if (existsSync6(path)) return "existing";
+  if (existsSync7(path)) return "existing";
   await fetch2(cwd);
   const base = await remoteBranchExists(cwd, from) ? `origin/${from}` : from;
   const args = await branchExists(cwd, branch) ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, base];
@@ -33460,9 +33583,9 @@ async function canPush(cwd) {
 }
 
 // packages/plugin/src/identity.ts
-import { execFile as execFile2 } from "node:child_process";
-import { promisify as promisify2 } from "node:util";
-var run2 = promisify2(execFile2);
+import { execFile as execFile3 } from "node:child_process";
+import { promisify as promisify3 } from "node:util";
+var run3 = promisify3(execFile3);
 async function localIdentity() {
   const override = process.env.SESSION_SHARE_LOGIN?.trim();
   if (override) {
@@ -33484,7 +33607,7 @@ async function localIdentity() {
 }
 async function tryGh() {
   try {
-    const { stdout } = await run2("gh", ["api", "user", "--jq", "{login: .login, name: .name}"], {
+    const { stdout } = await run3("gh", ["api", "user", "--jq", "{login: .login, name: .name}"], {
       timeout: 5e3
     });
     const parsed = JSON.parse(stdout);
@@ -33500,7 +33623,7 @@ async function tryGh() {
 }
 async function gitConfig(key) {
   try {
-    const { stdout } = await run2("git", ["config", "--get", key], { timeout: 3e3 });
+    const { stdout } = await run3("git", ["config", "--get", key], { timeout: 3e3 });
     return stdout.trim() || null;
   } catch {
     return null;
@@ -33508,7 +33631,7 @@ async function gitConfig(key) {
 }
 async function repoRoot(cwd) {
   try {
-    const { stdout } = await run2("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 3e3 });
+    const { stdout } = await run3("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 3e3 });
     return stdout.trim() || cwd;
   } catch {
     return cwd;
@@ -33516,7 +33639,7 @@ async function repoRoot(cwd) {
 }
 async function repoRemote(cwd) {
   try {
-    const { stdout } = await run2("git", ["remote", "get-url", "origin"], { cwd, timeout: 3e3 });
+    const { stdout } = await run3("git", ["remote", "get-url", "origin"], { cwd, timeout: 3e3 });
     const remoteUrl = stdout.trim();
     const match = remoteUrl.match(/[:/]([^/:]+)\/([^/]+?)(?:\.git)?$/);
     if (!match) return null;
@@ -33535,7 +33658,7 @@ function registerGitTools(server, ctx) {
   server.registerTool(
     "ss_settings",
     {
-      description: "Read or change how session-share touches this machine: whether queued work runs itself while you are idle (autopilot) and what it may spend, when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, whether the room can drive this agent, and whether the session log is saved to the repository (mirror).",
+      description: "Read or change how session-share touches this machine: whether queued work runs itself while you are idle (autopilot) and what it may spend, when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, whether the room can drive this agent, whether the session log is saved to the repository (mirror), whether hosting opens a public tunnel, and whether agents reply tersely to save tokens.",
       inputSchema: {
         commitPolicy: external_exports.enum(["explicit", "auto-on-green"]).nullish(),
         push: external_exports.boolean().nullish(),
@@ -33545,7 +33668,9 @@ function registerGitTools(server, ctx) {
         acceptDirectives: external_exports.boolean().nullish(),
         autopilot: external_exports.enum(["off", "splits", "full"]).nullish(),
         autopilotBudget: external_exports.number().int().min(0).nullish(),
-        mirror: external_exports.boolean().nullish()
+        mirror: external_exports.boolean().nullish(),
+        tunnel: external_exports.boolean().nullish(),
+        terse: external_exports.boolean().nullish()
       }
     },
     async (input) => {
@@ -34010,16 +34135,21 @@ function createServer() {
         ),
         publicUrl: external_exports.string().nullish().describe(
           "The address teammates should dial when it is not one this machine can see: a tunnel (https://x.trycloudflare.com), a Tailscale name, a port forward. Defaults to SESSION_SHARE_PUBLIC_URL."
+        ),
+        tunnel: external_exports.boolean().nullish().describe(
+          "Open a Cloudflare quick tunnel so teammates on any network can join, and put its public address in the invite. Needs cloudflared installed. Defaults to your saved preference."
         )
       }
     },
-    async ({ title: given, issueRef, expose, publicUrl: givenPublicUrl }) => {
+    async ({ title: given, issueRef, expose, publicUrl: givenPublicUrl, tunnel }) => {
       const root = await repoRoot(REPO_ROOT);
       const title = given?.trim() || basename(root);
       const identity = await localIdentity();
-      const publicUrl = publicUrlOverride(givenPublicUrl);
-      const daemon = await ensureDaemon({ expose: expose ?? readPreferences().expose });
+      let publicUrl = publicUrlOverride(givenPublicUrl);
+      const tunnelled = !publicUrl && (tunnel ?? readPreferences().tunnel);
+      const daemon = await ensureDaemon({ expose: expose ?? (tunnelled ? "loopback" : readPreferences().expose) });
       const loopback = `http://127.0.0.1:${daemon.port}`;
+      if (tunnelled) publicUrl = await ensureTunnel(daemon.port);
       const dialUrl = publicUrl ?? daemon.url;
       const remote = await repoRemote(root);
       const repo = {
@@ -34234,6 +34364,7 @@ function createServer() {
     async () => {
       const attached = readConfig(await repoRoot(REPO_ROOT));
       const saved = attached ? await mirrorOnce(attached).catch(() => null) : null;
+      stopTunnel();
       const note = saved?.pushed ? ` The session is saved on the ${LOG_BRANCH} branch; /ss:host on any machine picks it up from there.` : "";
       return text(
         await stopDaemon() === "stopped" ? `Stopped.${note}` : `Nothing was running. (Any stale record of one has been cleared.)${note}`
@@ -34519,7 +34650,7 @@ function createServer() {
             estimateMinutes: external_exports.number().int().min(5).max(240)
           })
         ).min(1),
-        ticketId: external_exports.string().nullish().describe("The ticket being split. Given to you in the request; a ticket split needs no approval and starts at once.")
+        ticketId: external_exports.string().nullish().describe("The ticket being split. Given to you in the request; a valid ticket split needs no approval and starts at once.")
       }
     },
     async ({ contract, tasks, ticketId }) => {
@@ -34546,7 +34677,7 @@ function createServer() {
             task: a.taskId,
             to: names.get(a.participantId) ?? a.participantId
           })),
-          next: ticketId ? "On the board now, with the proposed assignment. Anyone in the ticket can change who does what and press start; that is when the work begins." : "The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns."
+          next: ticketId ? "The work has started -- a valid split needs no approval. Land the contract now with ss_land_contract if you can (you will also be sent this as an instruction), then claim your own tasks. Who does what can still be changed on the board." : "The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns."
         });
       }
       return text({

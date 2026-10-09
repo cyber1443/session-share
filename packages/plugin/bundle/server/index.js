@@ -63152,6 +63152,10 @@ var ParticipantActivity = external_exports.object({
   updatedAt: Timestamp
 });
 var AutopilotMode = external_exports.enum(["off", "splits", "full"]);
+var Doing = external_exports.object({
+  text: external_exports.string().max(200),
+  at: external_exports.number()
+});
 var Participant = external_exports.object({
   id: ParticipantId,
   sessionId: SessionId,
@@ -63470,6 +63474,8 @@ var SessionSnapshot = external_exports.object({
    * is missing here is closed (or on a plugin too old to say).
    */
   autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
+  /** What each seat's Claude is doing now; see Doing. */
+  doing: external_exports.record(external_exports.string(), Doing).optional(),
   seq: external_exports.number().int().nonnegative()
 });
 
@@ -63849,6 +63855,11 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("agent.heartbeat"),
     autopilot: AutopilotMode
+  }),
+  /** A line for the board's "now": what this checkout's Claude just started doing. */
+  external_exports.object({
+    type: external_exports.literal("agent.doing"),
+    text: external_exports.string().max(200)
   })
 ]);
 var LeaseDenial = external_exports.object({
@@ -63983,7 +63994,8 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
     kind: external_exports.literal("presence"),
     present: external_exports.array(ParticipantId),
     /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
-    autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional()
+    autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
+    doing: external_exports.record(external_exports.string(), Doing).optional()
   })
 ]);
 
@@ -65512,6 +65524,13 @@ var SessionService = class {
    * a Claude Code is open right now is not history worth a log entry a minute.
    */
   autopilots = /* @__PURE__ */ new Map();
+  /** What each seat's Claude is doing now. Memory only; see Doing. */
+  doing = /* @__PURE__ */ new Map();
+  /**
+   * Told when something boards show live (but that is not an event) changed,
+   * so it reaches them now rather than on the next heartbeat. Set by the gateway.
+   */
+  onLive = null;
   // -- state access --------------------------------------------------------
   /** Folds the log on first touch; afterwards the map is the live projection. */
   state(sessionId) {
@@ -65606,6 +65625,21 @@ var SessionService = class {
     }
     return open;
   }
+  /** What every seat in a session is doing now, for seats that have said. */
+  doingIn(sessionId) {
+    const out = {};
+    for (const participant of this.state(sessionId).participants.values()) {
+      const doing = this.doing.get(participant.id);
+      if (doing) out[participant.id] = doing;
+    }
+    return out;
+  }
+  /** Records what a seat is doing and lets open boards know at once. */
+  setDoing(sessionId, participantId, text) {
+    const previous = this.doing.get(participantId);
+    this.doing.set(participantId, { text: text.slice(0, 200), at: Date.now() });
+    if (previous?.text !== text) this.onLive?.(sessionId);
+  }
   /**
    * The snapshot everyone actually reads, with presence resolved from when each
    * participant was last heard from rather than from a flag nobody clears.
@@ -65627,7 +65661,8 @@ var SessionService = class {
         // agent that was still working over HTTP as gone, permanently.
         connected: this.isPresent(participant, now)
       })),
-      autopilots: this.autopilotsIn(sessionId)
+      autopilots: this.autopilotsIn(sessionId),
+      doing: this.doingIn(sessionId)
     };
   }
   readEvents(sessionId, fromSeq, limit) {
@@ -65706,6 +65741,12 @@ var SessionService = class {
         return this.reportActivity(command, ctx);
       case "agent.heartbeat":
         return this.heartbeat(command, ctx);
+      case "agent.doing": {
+        const { sessionId, participantId } = this.requireParticipant(ctx);
+        if (ctx.via === "board") throw new ServiceError("forbidden", "Only a checkout reports what its Claude is doing.");
+        this.setDoing(sessionId, participantId, command.text);
+        return { ok: true };
+      }
     }
   }
   // -- sessions ------------------------------------------------------------
@@ -66373,17 +66414,15 @@ Issue: ${command.issueRef}` : "",
         decompositionId,
         assignments: autoAssign({ tasks: command.tasks, participants: members })
       });
-      this.setTicketState(sessionId, participantId, ticket.id, "proposed");
-      this.systemDirective(
-        sessionId,
+      this.emit(sessionId, participantId, {
+        type: "decomposition.approval",
+        decompositionId,
         participantId,
-        ticket.members,
-        [
-          `The split for "${ticket.title}" is ready: ${command.tasks.length} task(s).`,
-          "Look it over, change who does what if you disagree, then start it with",
-          `ss_ticket_approve (ticketId: ${ticket.id}). Starting it hands everyone their tasks.`
-        ].join("\n")
-      );
+        approvals: ticket.members,
+        satisfied: true
+      });
+      this.seedTasks(sessionId, participantId, state, decompositionId);
+      this.refreshTicketStates(sessionId, participantId);
       return { decompositionId, validation };
     }
     this.rebalance(sessionId, participantId, state, decompositionId, []);
@@ -66536,6 +66575,15 @@ Issue: ${command.issueRef}` : "",
         taskId: command.taskId,
         assigneeId: command.participantId
       });
+      if (command.participantId && command.participantId !== live.assigneeId && live.state !== "merged") {
+        const by = state.participants.get(participantId)?.displayName ?? "Someone";
+        this.systemDirective(
+          sessionId,
+          participantId,
+          [command.participantId],
+          `${by} gave you ${live.id} -- ${live.title}. Claim it with ss_claim once the contract has landed, do it, and finish with ss_done.`
+        );
+      }
       return {
         assignments: [...state.tasks.values()].filter((task) => task.assigneeId).map((task) => ({ taskId: task.id, participantId: task.assigneeId }))
       };
@@ -66661,6 +66709,15 @@ Issue: ${command.issueRef}` : "",
       byAssignee.set(task.assigneeId, [...byAssignee.get(task.assigneeId) ?? [], task]);
     }
     const contractLanded = Boolean(state.session?.contractBranch);
+    const ticketOf = tasks.find((task) => task.ticketId)?.ticketId ?? null;
+    if (ticketOf && !byAssignee.has(actorId) && state.participants.get(actorId)?.repoPath) {
+      this.systemDirective(
+        sessionId,
+        actorId,
+        [actorId],
+        `The split is live and none of its tasks are yours. Land the ticket's contract now so the others can start: ss_land_contract.`
+      );
+    }
     for (const [assignee, theirs] of byAssignee) {
       const listed = theirs.map((task) => `  ${task.id} -- ${task.title} (${task.estimateMinutes}m)${task.state === "blocked" ? `, waiting on ${task.dependsOn.join(", ")}` : ""}`).join("\n");
       const ticketId = theirs[0]?.ticketId ?? null;
@@ -66675,7 +66732,7 @@ Issue: ${command.issueRef}` : "",
           listed,
           "",
           ...ticketId ? [
-            lands ? "You started it, so land this ticket's contract first: ss_land_contract." : "",
+            lands ? "You proposed it, so land this ticket's contract first, now: ss_land_contract." : "",
             lands ? "Then work them, one at a time and without waiting to be asked:" : "When the contract lands you will be told. Then work them, one at a time:",
             "  ss_claim -> do the work -> run the acceptance command -> ss_done",
             "Repeat until ss_claim says there is nothing left for you. Post in the room with",
@@ -67026,6 +67083,9 @@ Issue: ${command.issueRef}` : "",
    */
   checkLease(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    if (ctx.via !== "board" && command.paths[0]) {
+      this.setDoing(sessionId, participantId, `editing ${command.paths.join(", ")}`);
+    }
     const denials = [];
     const granted = this.grantedPaths(state, participantId);
     const frozen = state.frozenContractPaths();
@@ -67199,7 +67259,11 @@ Issue: ${command.issueRef}` : "",
     if (ctx.via === "board") {
       throw new ServiceError("forbidden", "Only a checkout can report its autopilot.");
     }
+    const before = this.autopilots.get(participantId);
     this.autopilots.set(participantId, { mode: command.autopilot, at: Date.now() });
+    if (!before || before.mode !== command.autopilot || Date.now() - before.at > 6e4) {
+      this.onLive?.(this.requireSession(ctx));
+    }
     return { ok: true };
   }
   // -- connection lifecycle ------------------------------------------------
@@ -67490,6 +67554,7 @@ var Gateway = class {
   service;
   attach(service) {
     this.service = service;
+    service.onLive = (sessionId) => this.announceSoon(sessionId);
     this.wss.on("connection", (socket, request) => this.onConnection(socket, request));
     this.heartbeat = setInterval(() => this.sweep(), HEARTBEAT_MS);
   }
@@ -67515,6 +67580,8 @@ var Gateway = class {
   }
   async close() {
     if (this.heartbeat) clearInterval(this.heartbeat);
+    for (const timer of this.pendingLive.values()) clearTimeout(timer);
+    this.pendingLive.clear();
     for (const connection of this.connections) connection.socket.terminate();
     this.connections.clear();
     await new Promise((resolve2) => this.wss.close(() => resolve2()));
@@ -67687,21 +67754,37 @@ var Gateway = class {
     }
     this.announcePresence();
   }
+  pendingLive = /* @__PURE__ */ new Map();
+  /**
+   * Live state changed in a session: say so within half a second, coalescing
+   * a burst -- an agent editing ten files in a row is one update, not ten.
+   */
+  announceSoon(sessionId) {
+    if (this.pendingLive.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      this.pendingLive.delete(sessionId);
+      this.announceTo(sessionId);
+    }, 500);
+    timer.unref?.();
+    this.pendingLive.set(sessionId, timer);
+  }
+  announceTo(sessionId) {
+    const message = {
+      kind: "presence",
+      present: this.service.presentIn(sessionId),
+      autopilots: this.service.autopilotsIn(sessionId),
+      doing: this.service.doingIn(sessionId)
+    };
+    for (const connection of this.connections) {
+      if (connection.ctx.sessionId === sessionId) send(connection.socket, message);
+    }
+  }
   announcePresence() {
     const sessions = /* @__PURE__ */ new Set();
     for (const connection of this.connections) {
       if (connection.ctx.sessionId) sessions.add(connection.ctx.sessionId);
     }
-    for (const sessionId of sessions) {
-      const message = {
-        kind: "presence",
-        present: this.service.presentIn(sessionId),
-        autopilots: this.service.autopilotsIn(sessionId)
-      };
-      for (const connection of this.connections) {
-        if (connection.ctx.sessionId === sessionId) send(connection.socket, message);
-      }
-    }
+    for (const sessionId of sessions) this.announceTo(sessionId);
   }
 };
 function reqIdOf(raw) {

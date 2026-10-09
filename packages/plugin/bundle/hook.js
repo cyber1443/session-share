@@ -14629,6 +14629,10 @@ var ParticipantActivity = external_exports.object({
   updatedAt: Timestamp
 });
 var AutopilotMode = external_exports.enum(["off", "splits", "full"]);
+var Doing = external_exports.object({
+  text: external_exports.string().max(200),
+  at: external_exports.number()
+});
 var Participant = external_exports.object({
   id: ParticipantId,
   sessionId: SessionId,
@@ -14947,6 +14951,8 @@ var SessionSnapshot = external_exports.object({
    * is missing here is closed (or on a plugin too old to say).
    */
   autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
+  /** What each seat's Claude is doing now; see Doing. */
+  doing: external_exports.record(external_exports.string(), Doing).optional(),
   seq: external_exports.number().int().nonnegative()
 });
 
@@ -15326,6 +15332,11 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("agent.heartbeat"),
     autopilot: AutopilotMode
+  }),
+  /** A line for the board's "now": what this checkout's Claude just started doing. */
+  external_exports.object({
+    type: external_exports.literal("agent.doing"),
+    text: external_exports.string().max(200)
   })
 ]);
 var LeaseDenial = external_exports.object({
@@ -15460,7 +15471,8 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
     kind: external_exports.literal("presence"),
     present: external_exports.array(ParticipantId),
     /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
-    autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional()
+    autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
+    doing: external_exports.record(external_exports.string(), Doing).optional()
   })
 ]);
 
@@ -15690,6 +15702,17 @@ var Preferences = external_exports.object({
    * repository, that is public.
    */
   mirror: external_exports.boolean().default(true),
+  /**
+   * Whether hosting opens a public Cloudflare quick tunnel, so teammates on
+   * other networks can join. The invite is still the only way in.
+   */
+  tunnel: external_exports.boolean().default(false),
+  /**
+   * Whether every Claude in a session is asked to answer tersely. Output is
+   * the expensive half of a token bill, and a session with autopilot on writes
+   * a lot of it that nobody reads.
+   */
+  terse: external_exports.boolean().default(true),
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });
@@ -15702,6 +15725,13 @@ function readPreferences() {
     return Preferences.parse({});
   }
 }
+var TERSE_STYLE = [
+  "session-share asks for terse replies in this repository, to save tokens:",
+  "no preamble, no restating the task, no recap of what you just did unless asked;",
+  "short sentences, fragments are fine, drop filler words.",
+  "Code, commit messages, PR text and anything written to files stay normal and complete.",
+  "Security warnings and questions that need a decision stay clear and complete."
+].join(" ");
 
 // packages/plugin/src/usage.ts
 import { existsSync as existsSync5, mkdirSync as mkdirSync6, readFileSync as readFileSync5, statSync as statSync3, writeFileSync as writeFileSync6 } from "node:fs";
@@ -15779,6 +15809,20 @@ function usageSince(transcriptPath) {
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 var TIMEOUT_MS = 1500;
 var ROOM_TIMEOUT_MS = 2500;
+function redact(text) {
+  return text.replace(/\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "$1 ***").replace(/\b([A-Za-z_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASS|PWD|AUTH)[A-Za-z_]*\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, "$1***").replace(/\b(ghp|gho|ghu|ghs|github_pat|sk|sk-ant|xox[abp]|ssx|ssj)_?[A-Za-z0-9_-]{12,}/g, "***").replace(/(--(?:password|token|secret|api-key)[= ])\S+/gi, "$1***").replace(/:\/\/[^/\s:@]+:[^/\s@]+@/g, "://***@");
+}
+var DOING_TIMEOUT_MS = 400;
+async function reportDoing(input, text) {
+  const config2 = readConfig(input.cwd ?? process.cwd());
+  if (!config2) return;
+  const line = redact(text).replace(/\s+/g, " ").trim().slice(0, 200);
+  if (!line) return;
+  try {
+    await runCommand(config2, { type: "agent.doing", text: line }, DOING_TIMEOUT_MS);
+  } catch {
+  }
+}
 function extractPaths(toolInput) {
   if (!toolInput) return [];
   const paths = [];
@@ -15874,6 +15918,12 @@ async function route(input) {
   const event = input.hook_event_name ?? (input.tool_name ? "PreToolUse" : "");
   switch (event) {
     case "PreToolUse":
+      if (input.tool_name === "Bash") {
+        const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
+        const said = typeof input.tool_input?.description === "string" ? input.tool_input.description : "";
+        await reportDoing(input, `running ${said ? `${said}: ` : ""}${command}`);
+        return null;
+      }
       return decide(input);
     /**
      * The turn is over and the agent is about to go idle -- the one moment it
@@ -15885,6 +15935,7 @@ async function route(input) {
       const config2 = readConfig(input.cwd ?? process.cwd());
       const reason = input.stop_hook_active ? null : await collectRoom(input);
       if (config2 && !reason && process.env.SESSION_SHARE_AUTOPILOT !== "child") markIdle(config2.repoPath);
+      await reportDoing(input, reason ? "picking up an instruction from the room" : "idle -- waiting for the next prompt");
       return reason ? { decision: "block", reason } : null;
     }
     // The human is already talking to the agent; ride along rather than interrupt.
@@ -15894,7 +15945,16 @@ async function route(input) {
         const config2 = readConfig(input.cwd ?? process.cwd());
         if (config2) markBusy(config2.repoPath);
       }
-      const additionalContext = await collectRoom(input);
+      if (event === "UserPromptSubmit") {
+        const first = (input.prompt ?? "").split("\n").find((line) => line.trim()) ?? "";
+        await reportDoing(
+          input,
+          process.env.SESSION_SHARE_AUTOPILOT === "child" ? `autopilot: ${first}` : `on: ${first}`
+        );
+      }
+      const room = await collectRoom(input);
+      const style = event === "SessionStart" && readConfig(input.cwd ?? process.cwd()) && readPreferences().terse ? TERSE_STYLE : null;
+      const additionalContext = [style, room].filter(Boolean).join("\n\n");
       return additionalContext ? { hookSpecificOutput: { hookEventName: event, additionalContext } } : null;
     }
     default:
@@ -15924,6 +15984,7 @@ export {
   collectRoom,
   decide,
   extractPaths,
+  redact,
   route,
   toRepoRelative
 };
