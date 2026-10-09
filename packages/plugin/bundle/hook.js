@@ -14953,6 +14953,8 @@ var SessionSnapshot = external_exports.object({
   autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
   /** What each seat's Claude is doing now; see Doing. */
   doing: external_exports.record(external_exports.string(), Doing).optional(),
+  /** Seats whose account has hit its usage limit; their work goes to others. */
+  limited: external_exports.array(external_exports.string()).optional(),
   seq: external_exports.number().int().nonnegative()
 });
 
@@ -15331,7 +15333,12 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
    */
   external_exports.object({
     type: external_exports.literal("agent.heartbeat"),
-    autopilot: AutopilotMode
+    autopilot: AutopilotMode,
+    /**
+     * This account has hit its usage limit, so nothing will run here until it
+     * resets. Work waiting on this seat is handed to someone who can do it.
+     */
+    limited: external_exports.boolean().default(false)
   }),
   /** A line for the board's "now": what this checkout's Claude just started doing. */
   external_exports.object({
@@ -15472,7 +15479,8 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
     present: external_exports.array(ParticipantId),
     /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
     autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
-    doing: external_exports.record(external_exports.string(), Doing).optional()
+    doing: external_exports.record(external_exports.string(), Doing).optional(),
+    limited: external_exports.array(external_exports.string()).optional()
   })
 ]);
 
@@ -15549,6 +15557,14 @@ function markBusy(repoPath) {
 }
 function markIdle(repoPath) {
   rmSync2(marker(repoPath), { force: true });
+}
+var autopilotMarker = (repoPath) => `${marker(repoPath)}.autopilot`;
+function isAutopilotRunning(repoPath) {
+  try {
+    return Date.now() - statSync2(autopilotMarker(repoPath)).mtimeMs < MAX_TURN_MS;
+  } catch {
+    return false;
+  }
 }
 
 // packages/plugin/src/inbox.ts
@@ -15895,6 +15911,7 @@ async function collectRoom(input) {
   if (!config2) return null;
   if (!readPreferences().acceptDirectives) return null;
   if (process.env.SESSION_SHARE_AUTOPILOT === "child") return null;
+  if (isAutopilotRunning(config2.repoPath)) return null;
   let pending;
   try {
     pending = await pendingDirectives(config2, ROOM_TIMEOUT_MS);
@@ -15945,12 +15962,9 @@ async function route(input) {
         const config2 = readConfig(input.cwd ?? process.cwd());
         if (config2) markBusy(config2.repoPath);
       }
-      if (event === "UserPromptSubmit") {
+      if (event === "UserPromptSubmit" && process.env.SESSION_SHARE_AUTOPILOT !== "child") {
         const first = (input.prompt ?? "").split("\n").find((line) => line.trim()) ?? "";
-        await reportDoing(
-          input,
-          process.env.SESSION_SHARE_AUTOPILOT === "child" ? `autopilot: ${first}` : `on: ${first}`
-        );
+        await reportDoing(input, `on: ${first}`);
       }
       const room = await collectRoom(input);
       const style = event === "SessionStart" && readConfig(input.cwd ?? process.cwd()) && readPreferences().terse ? TERSE_STYLE : null;

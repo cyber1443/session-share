@@ -63476,6 +63476,8 @@ var SessionSnapshot = external_exports.object({
   autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
   /** What each seat's Claude is doing now; see Doing. */
   doing: external_exports.record(external_exports.string(), Doing).optional(),
+  /** Seats whose account has hit its usage limit; their work goes to others. */
+  limited: external_exports.array(external_exports.string()).optional(),
   seq: external_exports.number().int().nonnegative()
 });
 
@@ -63854,7 +63856,12 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
    */
   external_exports.object({
     type: external_exports.literal("agent.heartbeat"),
-    autopilot: AutopilotMode
+    autopilot: AutopilotMode,
+    /**
+     * This account has hit its usage limit, so nothing will run here until it
+     * resets. Work waiting on this seat is handed to someone who can do it.
+     */
+    limited: external_exports.boolean().default(false)
   }),
   /** A line for the board's "now": what this checkout's Claude just started doing. */
   external_exports.object({
@@ -63995,7 +64002,8 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
     present: external_exports.array(ParticipantId),
     /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
     autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
-    doing: external_exports.record(external_exports.string(), Doing).optional()
+    doing: external_exports.record(external_exports.string(), Doing).optional(),
+    limited: external_exports.array(external_exports.string()).optional()
   })
 ]);
 
@@ -64817,7 +64825,13 @@ var SessionState = class {
    * they already have loaded, and the longest task goes first so the critical
    * path starts early rather than being discovered at the end.
    */
-  pickTaskFor(participantId) {
+  /**
+   * `available` says whether a seat can do its own work right now -- its
+   * Claude Code is open and its account is not out of usage. Someone else's
+   * task is only taken when its assignee is not; otherwise two agents race for
+   * it and the faster one does the other's work on its own account.
+   */
+  pickTaskFor(participantId, available) {
     const touched = /* @__PURE__ */ new Set();
     for (const task of this.tasks.values()) {
       if (task.ownerId !== participantId)
@@ -64826,7 +64840,7 @@ var SessionState = class {
         touched.add(topLevel(glob));
     }
     const rank = (task) => task.assigneeId === participantId ? 0 : task.assigneeId === null ? 1 : 2;
-    const claimable = this.readyTasks().filter((task) => this.contractLanded(task));
+    const claimable = this.readyTasks().filter((task) => this.contractLanded(task)).filter((task) => !available || !task.assigneeId || task.assigneeId === participantId || !available(task.assigneeId));
     const scored = claimable.map((task) => {
       const affinity = task.ownedPaths.some((glob) => touched.has(topLevel(glob))) ? 1 : 0;
       const unblocks = [...this.tasks.values()].filter((t) => t.dependsOn.includes(task.id)).length;
@@ -65615,6 +65629,22 @@ var SessionService = class {
     const now = Date.now();
     return [...this.state(sessionId).participants.values()].filter((participant) => this.isPresent(participant, now)).map((participant) => participant.id);
   }
+  /**
+   * Whether a seat can do its own work now: its Claude Code is open (it polled
+   * lately) and its account is not out of usage.
+   */
+  isAvailable(participantId, now = Date.now()) {
+    const beat = this.autopilots.get(participantId);
+    return Boolean(beat && now - beat.at < AUTOPILOT_FRESH_MS && !beat.limited);
+  }
+  /** Seats in a session whose account has hit its usage limit. */
+  limitedIn(sessionId) {
+    const now = Date.now();
+    return [...this.state(sessionId).participants.values()].filter((p) => {
+      const beat = this.autopilots.get(p.id);
+      return Boolean(beat?.limited && now - beat.at < AUTOPILOT_FRESH_MS);
+    }).map((p) => p.id);
+  }
   /** Seats in a session whose Claude Code has polled lately, by autopilot mode. */
   autopilotsIn(sessionId) {
     const now = Date.now();
@@ -65662,7 +65692,8 @@ var SessionService = class {
         connected: this.isPresent(participant, now)
       })),
       autopilots: this.autopilotsIn(sessionId),
-      doing: this.doingIn(sessionId)
+      doing: this.doingIn(sessionId),
+      limited: this.limitedIn(sessionId)
     };
   }
   readEvents(sessionId, fromSeq, limit) {
@@ -66044,10 +66075,49 @@ var SessionService = class {
     this.refreshTicketStates(sessionId, participantId);
     return { ticket: this.requireTicket(state, command.ticketId) };
   }
-  /** Who runs the assembled thing: the author if they can, else any member with a checkout. */
+  /**
+   * Who runs the assembled thing. Someone whose Claude Code is open and has
+   * usage left, so it runs now rather than when they are back -- the author
+   * first, since they know what it was meant to do; failing that, the author
+   * or any member with a checkout, to run it when they can.
+   */
   verifier(state, ticket) {
-    if (state.participants.get(ticket.authorId)?.repoPath) return ticket.authorId;
-    return ticket.members.find((id) => state.participants.get(id)?.repoPath) ?? null;
+    const checkout = (id) => Boolean(state.participants.get(id)?.repoPath);
+    const members = [ticket.authorId, ...ticket.members.filter((id) => id !== ticket.authorId)].filter(checkout);
+    return members.find((id) => this.isAvailable(id)) ?? members[0] ?? null;
+  }
+  /**
+   * A seat that just ran out of usage cannot do what it was handed. Its
+   * unstarted tasks go to a teammate who can, and a ticket waiting on it to be
+   * run end to end is handed to someone else to run.
+   */
+  reroute(sessionId, participantId) {
+    const state = this.state(sessionId);
+    const who = state.participants.get(participantId)?.displayName ?? "Someone";
+    for (const task of [...state.tasks.values()]) {
+      if (task.assigneeId !== participantId || task.ownerId || task.state === "merged") continue;
+      const ticket = task.ticketId ? state.tickets.get(task.ticketId) : null;
+      const others = (ticket?.members ?? [...state.participants.keys()]).filter(
+        (id) => {
+          const p = state.participants.get(id);
+          return id !== participantId && Boolean(p?.repoPath) && (this.isAvailable(id) || this.isWorking(p));
+        }
+      );
+      const to = others.sort((a, b) => state.activeTaskCount(a) - state.activeTaskCount(b))[0];
+      if (!to) continue;
+      this.emit(sessionId, null, { type: "task.assigned", taskId: task.id, assigneeId: to });
+      this.systemDirective(
+        sessionId,
+        null,
+        [to],
+        `${who}'s account is out of usage, so ${task.id} -- ${task.title} -- is yours now. Claim it with ss_claim, do it, and finish with ss_done.`
+      );
+    }
+    for (const ticket of [...state.tickets.values()]) {
+      if (ticket.state !== "verify" || !ticket.members.includes(participantId)) continue;
+      const next = this.verifier(state, ticket);
+      if (next && next !== participantId) this.askForVerification(sessionId, participantId, state, ticket);
+    }
   }
   /**
    * The step between "all the tests pass" and "it works".
@@ -66818,12 +66888,12 @@ Issue: ${command.issueRef}` : "",
         reason: `You already hold ${CLAIM_CAP} active task(s). Finish or release before claiming another.`
       };
     }
-    const task = command.taskId ? state.tasks.get(command.taskId) ?? null : state.pickTaskFor(participantId);
+    const task = command.taskId ? state.tasks.get(command.taskId) ?? null : state.pickTaskFor(participantId, (id) => this.isAvailable(id));
     if (!task) {
       return {
         task: null,
         lease: null,
-        reason: command.taskId ? `No task "${command.taskId}" in this session.` : state.readyTasks().length > 0 ? "Nothing is claimable right now -- the ready tasks are waiting for their contract to land." : "Nothing is ready right now -- every remaining task is waiting on a dependency."
+        reason: command.taskId ? `No task "${command.taskId}" in this session.` : state.readyTasks().some((t) => t.assigneeId && t.assigneeId !== participantId && this.isAvailable(t.assigneeId)) ? "Nothing of yours is ready. The rest belongs to teammates whose Claude Code is open, so they will take it -- leave it to them." : state.readyTasks().length > 0 ? "Nothing is claimable right now -- the ready tasks are waiting for their contract to land." : "Nothing is ready right now -- every remaining task is waiting on a dependency."
       };
     }
     if (!state.contractLanded(task)) {
@@ -67260,8 +67330,9 @@ Issue: ${command.issueRef}` : "",
       throw new ServiceError("forbidden", "Only a checkout can report its autopilot.");
     }
     const before = this.autopilots.get(participantId);
-    this.autopilots.set(participantId, { mode: command.autopilot, at: Date.now() });
-    if (!before || before.mode !== command.autopilot || Date.now() - before.at > 6e4) {
+    this.autopilots.set(participantId, { mode: command.autopilot, at: Date.now(), limited: command.limited });
+    if (command.limited && !before?.limited) this.reroute(this.requireSession(ctx), participantId);
+    if (!before || before.mode !== command.autopilot || before.limited !== command.limited || Date.now() - before.at > 6e4) {
       this.onLive?.(this.requireSession(ctx));
     }
     return { ok: true };
@@ -67773,7 +67844,8 @@ var Gateway = class {
       kind: "presence",
       present: this.service.presentIn(sessionId),
       autopilots: this.service.autopilotsIn(sessionId),
-      doing: this.service.doingIn(sessionId)
+      doing: this.service.doingIn(sessionId),
+      limited: this.service.limitedIn(sessionId)
     };
     for (const connection of this.connections) {
       if (connection.ctx.sessionId === sessionId) send(connection.socket, message);

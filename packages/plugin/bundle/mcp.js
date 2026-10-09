@@ -31376,6 +31376,8 @@ var SessionSnapshot = external_exports.object({
   autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
   /** What each seat's Claude is doing now; see Doing. */
   doing: external_exports.record(external_exports.string(), Doing).optional(),
+  /** Seats whose account has hit its usage limit; their work goes to others. */
+  limited: external_exports.array(external_exports.string()).optional(),
   seq: external_exports.number().int().nonnegative()
 });
 
@@ -31754,7 +31756,12 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
    */
   external_exports.object({
     type: external_exports.literal("agent.heartbeat"),
-    autopilot: AutopilotMode
+    autopilot: AutopilotMode,
+    /**
+     * This account has hit its usage limit, so nothing will run here until it
+     * resets. Work waiting on this seat is handed to someone who can do it.
+     */
+    limited: external_exports.boolean().default(false)
   }),
   /** A line for the board's "now": what this checkout's Claude just started doing. */
   external_exports.object({
@@ -31895,7 +31902,8 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
     present: external_exports.array(ParticipantId),
     /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
     autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
-    doing: external_exports.record(external_exports.string(), Doing).optional()
+    doing: external_exports.record(external_exports.string(), Doing).optional(),
+    limited: external_exports.array(external_exports.string()).optional()
   })
 ]);
 
@@ -32579,6 +32587,20 @@ function marker(repoPath) {
   const id = createHash2("sha256").update(repoPath).digest("hex").slice(0, 16);
   return join4(home, "busy", id);
 }
+var autopilotMarker = (repoPath) => `${marker(repoPath)}.autopilot`;
+function markAutopilot(repoPath, running3) {
+  try {
+    const path = autopilotMarker(repoPath);
+    if (!running3) {
+      rmSync2(path, { force: true });
+      return;
+    }
+    mkdirSync4(join4(path, ".."), { recursive: true });
+    writeFileSync4(path, `${process.pid}
+`);
+  } catch {
+  }
+}
 function isBusy(repoPath) {
   try {
     return Date.now() - statSync2(marker(repoPath)).mtimeMs < MAX_TURN_MS;
@@ -32682,8 +32704,10 @@ function describePreferences(preferences) {
 }
 
 // packages/plugin/src/autopilot.ts
-var POLL_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_POLL_MS ?? 2e4);
-var IDLE_GRACE_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_GRACE_MS ?? 25e3);
+var POLL_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_POLL_MS ?? 5e3);
+var IDLE_GRACE_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_GRACE_MS ?? 0);
+var LIMIT_BACKOFF_MS = 30 * 60 * 1e3;
+var LIMIT_PATTERN = /spend limit|usage limit|rate limit|limit reached|hit your .*limit|credit balance|out of (credits|usage)|quota/i;
 function stateDir2() {
   return process.env.SESSION_SHARE_HOME ?? join6(homedir4(), ".session-share");
 }
@@ -32757,6 +32781,7 @@ var BUILDING_TOOLS = [
 ];
 var isPlanning = (messages) => messages.every((message) => /ss_propose|Split the ticket/.test(message.body));
 var running = false;
+var limitedUntil = 0;
 var firstSeen = /* @__PURE__ */ new Map();
 var failedUntil = 0;
 var FAILURE_BACKOFF_MS = 5 * 60 * 1e3;
@@ -32775,7 +32800,12 @@ function readOutcome(stdout, allowed) {
     const result = JSON.parse(line);
     const denied = (result.permission_denials ?? []).map((denial) => denial.tool_name ?? "a tool").filter((tool) => !allowed || allowed.includes(tool));
     if (result.is_error || result.subtype && result.subtype !== "success") {
-      return { ok: false, detail: `the run ended with ${result.subtype ?? "an error"}: ${(result.result ?? "").slice(0, 200)}` };
+      const said = (result.result ?? "").slice(0, 200);
+      return {
+        ok: false,
+        detail: `the run ended with ${result.subtype ?? "an error"}: ${said}`,
+        limited: LIMIT_PATTERN.test(said)
+      };
     }
     if (denied.length > 0) {
       return { ok: false, detail: `it was not allowed to use ${[...new Set(denied)].join(", ")}` };
@@ -32819,6 +32849,7 @@ ${outcome.detail}
 ${tail}`);
       resolve5({
         ok: code === 0 && outcome.ok,
+        limited: outcome.limited || LIMIT_PATTERN.test(tail),
         code,
         detail: (outcome.ok ? "" : outcome.detail) || tail.trim().split("\n").slice(-3).join(" ").slice(0, 300)
       });
@@ -32830,9 +32861,14 @@ async function tickOnce(options = {}) {
   if (!config3) return { ran: false, ok: false, reason: "this checkout is not in a session" };
   const preferences = readPreferences();
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  await runCommand(config3, { type: "agent.heartbeat", autopilot: preferences.autopilot }).catch(
-    () => void 0
-  );
+  await runCommand(config3, {
+    type: "agent.heartbeat",
+    autopilot: preferences.autopilot,
+    limited: Date.now() < limitedUntil
+  }).catch(() => void 0);
+  if (Date.now() < limitedUntil) {
+    return { ran: false, ok: false, reason: "this account is out of usage for now" };
+  }
   let inbox;
   try {
     inbox = await readInbox(config3, 2e3);
@@ -32859,11 +32895,13 @@ async function tickOnce(options = {}) {
     return { ran: false, ok: false, reason: "the interactive session may still take it" };
   }
   running = true;
+  markAutopilot(config3.repoPath, true);
   await say(
     config3,
     `Nobody is at this keyboard, so a headless Claude is taking ${waiting.length === 1 ? "this" : `these ${waiting.length} instructions`} now${planningOnly ? " (splitting)" : ""}.`
   );
   await report(config3, planningOnly ? "planning" : "working", planningOnly ? "autopilot: splitting" : "autopilot: working");
+  await runCommand(config3, { type: "agent.doing", text: `autopilot: ${headline(waiting)}` }).catch(() => void 0);
   try {
     const result = await runHeadless(
       config3,
@@ -32871,6 +32909,23 @@ async function tickOnce(options = {}) {
       planningOnly,
       options.command ?? "claude"
     );
+    if (!result.ok && result.limited) {
+      limitedUntil = Date.now() + LIMIT_BACKOFF_MS;
+      const until = new Date(limitedUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      await runCommand(config3, {
+        type: "agent.heartbeat",
+        autopilot: preferences.autopilot,
+        limited: true
+      }).catch(() => void 0);
+      await runCommand(config3, { type: "agent.doing", text: `out of usage -- trying again at ${until}` }).catch(
+        () => void 0
+      );
+      await say(
+        config3,
+        `This account is out of usage, so nothing more will run here until about ${until}. What was waiting on it has been handed to whoever can take it.`
+      );
+      return { ran: true, ok: false, reason: "out of usage" };
+    }
     if (!result.ok) {
       failedUntil = Date.now() + FAILURE_BACKOFF_MS;
       await say(
@@ -32889,12 +32944,18 @@ async function tickOnce(options = {}) {
     return { ran: true, ok: false, reason: String(error51) };
   } finally {
     running = false;
+    markAutopilot(config3.repoPath, false);
     await report(config3, "idle", "autopilot: idle");
   }
 }
 var report = (config3, state, detail) => runCommand(config3, { type: "activity.report", activity: { state, detail, taskId: null } }).catch(
   () => void 0
 );
+function headline(messages) {
+  const first = messages[0]?.body.split("\n").find((line) => line.trim()) ?? "an instruction";
+  const more = messages.length > 1 ? ` (+${messages.length - 1} more)` : "";
+  return `${first.trim().slice(0, 150)}${more}`;
+}
 var say = (config3, body) => runCommand(config3, { type: "chat.post", body, taskRef: null, asAgent: true, directive: false }).catch(
   () => void 0
 );
