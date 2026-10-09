@@ -1,7 +1,9 @@
 'use client'
 
 import { useState } from 'react'
-import type { Participant, SessionSnapshot, Task, Ticket, TicketState } from '@session-share/protocol'
+import type { Attachment, Participant, SessionSnapshot, Task, Ticket, TicketState } from '@session-share/protocol'
+import { PICTURE_TYPES, uploadPicture } from '@/lib/files'
+import { Pictures } from './pictures'
 import { workingNow } from '@/lib/now'
 
 const DOT = [
@@ -39,6 +41,7 @@ const COLUMNS: Array<{ states: TicketState[]; label: string; hint: string }> = [
 
 export function Kanban({
   snapshot,
+  slug,
   meId,
   onCreate,
   onJoin,
@@ -46,8 +49,9 @@ export function Kanban({
   selected,
 }: {
   snapshot: SessionSnapshot
+  slug: string
   meId: string | null
-  onCreate: (title: string, body: string) => Promise<void>
+  onCreate: (title: string, body: string, attachments: Attachment[], needsHuman: boolean) => Promise<void>
   onJoin: (ticketId: string) => Promise<void>
   onOpen: (ticketId: string) => void
   selected: string | null
@@ -55,6 +59,26 @@ export function Kanban({
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** Pictures for the brief, uploaded as they are added so opening the ticket is instant. */
+  const [pictures, setPictures] = useState<Attachment[]>([])
+  const [uploading, setUploading] = useState(0)
+  const [needsHuman, setNeedsHuman] = useState(false)
+
+  const addPictures = async (files: Iterable<File>) => {
+    setError(null)
+    for (const file of files) {
+      if (!PICTURE_TYPES.includes(file.type)) continue
+      setUploading((n) => n + 1)
+      try {
+        const picture = await uploadPicture(slug, file)
+        setPictures((current) => (current.some((p) => p.id === picture.id) ? current : [...current, picture]))
+      } catch (failure) {
+        setError(failure instanceof Error ? failure.message : 'upload failed')
+      } finally {
+        setUploading((n) => n - 1)
+      }
+    }
+  }
 
   const create = async () => {
     const title = draft.trim()
@@ -64,8 +88,10 @@ export function Kanban({
     try {
       // A first line is a title; anything after it is the brief.
       const [first, ...rest] = title.split('\n')
-      await onCreate(first!.trim(), rest.join('\n').trim())
+      await onCreate(first!.trim(), rest.join('\n').trim(), pictures, needsHuman)
       setDraft('')
+      setPictures([])
+      setNeedsHuman(false)
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'failed')
     } finally {
@@ -99,13 +125,27 @@ export function Kanban({
 
               <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
                 {column.states[0] === 'plan' ? (
-                  <div className="panel p-2">
+                  <div
+                    className="panel p-2"
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      void addPictures(event.dataTransfer.files)
+                    }}
+                  >
                     <textarea
                       className="field min-h-16 w-full resize-y text-xs leading-relaxed"
                       placeholder={'Add due dates to todos\nOptional: a line or two on what you mean.'}
                       value={draft}
                       disabled={busy}
                       onChange={(event) => setDraft(event.target.value)}
+                      onPaste={(event) => {
+                        const files = [...event.clipboardData.files]
+                        if (files.length > 0) {
+                          event.preventDefault()
+                          void addPictures(files)
+                        }
+                      }}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
                           event.preventDefault()
@@ -113,9 +153,36 @@ export function Kanban({
                         }
                       }}
                     />
+                    {pictures.length > 0 ? (
+                      <div className="mt-2 space-y-1">
+                        <Pictures slug={slug} attachments={pictures} />
+                        <button className="text-[10px] text-mute hover:text-neutral-300" onClick={() => setPictures([])}>
+                          remove pictures
+                        </button>
+                      </div>
+                    ) : null}
+                    <div className="mt-2 flex flex-wrap items-center gap-3 text-[10px] text-mute">
+                      <label className="cursor-pointer hover:text-neutral-300">
+                        + pictures{uploading > 0 ? ` (uploading ${uploading})` : ''}
+                        <input
+                          type="file"
+                          accept={PICTURE_TYPES.join(',')}
+                          multiple
+                          className="hidden"
+                          onChange={(event) => {
+                            if (event.target.files) void addPictures(event.target.files)
+                            event.target.value = ''
+                          }}
+                        />
+                      </label>
+                      <label className="flex cursor-pointer items-center gap-1 hover:text-neutral-300" title="After its automated run passes, it waits for someone to try it by hand">
+                        <input type="checkbox" checked={needsHuman} onChange={(event) => setNeedsHuman(event.target.checked)} />
+                        needs a human look
+                      </label>
+                    </div>
                     <div className="mt-2 flex items-center justify-between">
-                      <span className="text-[10px] text-mute">⌘↵ to open it</span>
-                      <button className="btn" disabled={!draft.trim() || busy} onClick={() => void create()}>
+                      <span className="text-[10px] text-mute">⌘↵ to open it · paste or drop pictures</span>
+                      <button className="btn" disabled={!draft.trim() || busy || uploading > 0} onClick={() => void create()}>
                         open
                       </button>
                     </div>
@@ -192,6 +259,17 @@ function Card({
       {/* A split that has been proposed is waiting on a person, so say so loudly. */}
       {ticket.state === 'proposed' ? (
         <p className="text-[10px] font-medium text-accent">split ready — open to start it</p>
+      ) : null}
+      {ticket.attachments.length > 0 || ticket.needsHuman ? (
+        <p className="text-[10px] text-mute">
+          {ticket.attachments.length > 0 ? `${ticket.attachments.length} picture(s)` : ''}
+          {ticket.attachments.length > 0 && ticket.needsHuman ? ' · ' : ''}
+          {ticket.needsHuman
+            ? ticket.state === 'verify' && ticket.verification?.passed && !ticket.humanCheck
+              ? 'waiting for a human look'
+              : 'needs a human look'
+            : ''}
+        </p>
       ) : null}
       {ticket.state === 'review' && !ticket.prNumber ? (
         <p className="text-[10px] text-mute">verified — opening the pull request</p>

@@ -227,9 +227,12 @@ function Board({ slug }: { slug: string }) {
           <div className={`relative min-h-0 flex-1 border-b border-edge ${view === 'board' ? '' : 'hidden'}`}>
             <Kanban
               snapshot={snapshot}
+              slug={slug}
               meId={mine?.id ?? null}
               selected={openTicket}
-              onCreate={(title, body) => act(() => send({ type: 'ticket.create', title, body }))}
+              onCreate={(title, body, attachments, needsHuman) =>
+                act(() => send({ type: 'ticket.create', title, body, attachments, needsHuman }))
+              }
               onJoin={(ticketId) =>
                 act(() => send({ type: 'ticket.join', ticketId: ticketId as never }))
               }
@@ -242,8 +245,8 @@ function Board({ slug }: { slug: string }) {
               events={events}
               filterTaskId={chatFilter}
               onClearFilter={() => setChatFilter(null)}
-              onPost={async (body, directive) => {
-                await send({ type: 'chat.post', body, taskRef: null, asAgent: false, directive })
+              onPost={async (body) => {
+                await send({ type: 'chat.post', body, taskRef: null, asAgent: false, directive: false })
               }}
             />
           </div>
@@ -270,6 +273,13 @@ function Board({ slug }: { slug: string }) {
                 }),
               )
             }
+            onNeedsHuman={(value) => act(() => send({ type: 'ticket.needsHuman', ticketId: ticket.id, value }))}
+            onRunLocally={async () => {
+              await send({ type: 'ticket.runLocally', ticketId: ticket.id })
+            }}
+            onHumanCheck={async (passed, note) => {
+              await send({ type: 'ticket.humanCheck', ticketId: ticket.id, passed, note })
+            }}
             onReclaim={(taskId) =>
               act(() => send({ type: 'task.forceRelease', taskId: taskId as never }))
             }

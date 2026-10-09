@@ -6,10 +6,17 @@ import type { ChatMessage, EventEnvelope, Participant, SessionSnapshot } from '@
 type Tab = 'feed' | 'chat'
 
 /**
- * Feed and chat share one surface because they are one timeline: "what happened"
- * and "what we said about it" are the same conversation, and splitting them
- * makes people read neither.
+ * Two streams. Chat is the people talking to each other, and nothing else --
+ * agents and the session talking over them is what made it unreadable. The
+ * feed is everything else: the session's own messages, the agents' reports and
+ * instructions, and what happened, newest first.
  */
+const QUIET = new Set(['participant.connection', 'participant.activity', 'usage.recorded', 'chat.message'])
+
+type FeedItem =
+  | { kind: 'message'; at: number; key: string; message: ChatMessage }
+  | { kind: 'event'; at: number; key: string; envelope: EventEnvelope }
+
 export function Room({
   snapshot,
   events,
@@ -19,7 +26,7 @@ export function Room({
 }: {
   snapshot: SessionSnapshot
   events: EventEnvelope[]
-  onPost: (body: string, directive: boolean) => Promise<void>
+  onPost: (body: string) => Promise<void>
   filterTaskId: string | null
   onClearFilter: () => void
 }) {
@@ -27,20 +34,25 @@ export function Room({
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [unread, setUnread] = useState(0)
-  /**
-   * The room is also a terminal. In `run` mode the message is delivered into
-   * the other participants' Claude Code sessions and acted on there, so the
-   * mode is explicit and sticky rather than inferred from what you typed --
-   * "make it dark" should not silently reach two agents because it read like
-   * an instruction.
-   */
-  const [mode, setMode] = useState<'say' | 'run'>('say')
   const scroller = useRef<HTMLDivElement>(null)
 
-  const messages = useMemo(
+  const scoped = useMemo(
     () => (filterTaskId ? snapshot.chat.filter((m) => m.taskRef === filterTaskId) : snapshot.chat),
     [snapshot.chat, filterTaskId],
   )
+  const human = useMemo(() => scoped.filter((m) => m.authorKind === 'human' && !m.directive), [scoped])
+
+  const feed = useMemo(() => {
+    const items: FeedItem[] = [
+      ...scoped
+        .filter((m) => m.authorKind !== 'human' || m.directive)
+        .map((message) => ({ kind: 'message' as const, at: message.createdAt, key: `m${message.id}`, message })),
+      ...(filterTaskId ? [] : events)
+        .filter((envelope) => !QUIET.has(envelope.body.type))
+        .map((envelope) => ({ kind: 'event' as const, at: envelope.ts, key: `e${envelope.seq}`, envelope })),
+    ]
+    return items.sort((a, b) => b.at - a.at).slice(0, 300)
+  }, [scoped, events, filterTaskId])
 
   useEffect(() => {
     if (tab === 'chat') {
@@ -50,14 +62,14 @@ export function Room({
       setUnread((count) => count + 1)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshot.chat.length])
+  }, [human.length])
 
   const post = async () => {
     const body = draft.trim()
     if (!body) return
     setSending(true)
     try {
-      await onPost(body, mode === 'run')
+      await onPost(body)
       setDraft('')
     } finally {
       setSending(false)
@@ -88,79 +100,68 @@ export function Room({
 
       <div ref={scroller} className="flex-1 space-y-1 overflow-y-auto px-4 py-3 text-xs">
         {tab === 'chat'
-          ? messages.map((message) => (
+          ? human.map((message) => (
               <ChatLine key={message.id} message={message} participants={snapshot.participants} />
             ))
-          : events
-              .slice(-200)
-              .reverse()
-              .map((envelope) => (
-                <FeedLine
-                  key={`${envelope.seq}`}
-                  envelope={envelope}
-                  participants={snapshot.participants}
-                />
-              ))}
+          : feed.map((item) =>
+              item.kind === 'message' ? (
+                <FeedMessage key={item.key} message={item.message} participants={snapshot.participants} />
+              ) : (
+                <FeedLine key={item.key} envelope={item.envelope} participants={snapshot.participants} />
+              ),
+            )}
 
-        {tab === 'chat' && messages.length === 0 ? (
+        {tab === 'chat' && human.length === 0 ? (
           <p className="text-mute">
-            Empty room. Agents post here too — read it before touching anything shared.
+            Nobody has said anything yet. This is for the people; what the agents and the session say is in the feed.
           </p>
         ) : null}
       </div>
 
       {tab === 'chat' ? (
-        <div className="space-y-2 border-t border-edge p-3">
-          <div className="flex gap-2">
-            <div className="flex shrink-0 overflow-hidden rounded border border-edge text-[10px] uppercase tracking-wider">
-              <button
-                className={`px-2 py-1 ${mode === 'say' ? 'bg-neutral-800 text-neutral-200' : 'text-mute hover:text-neutral-400'}`}
-                onClick={() => setMode('say')}
-                title="Talk to the people in the session"
-              >
-                say
-              </button>
-              <button
-                className={`px-2 py-1 ${mode === 'run' ? 'bg-accent/20 text-accent' : 'text-mute hover:text-neutral-400'}`}
-                onClick={() => setMode('run')}
-                title="Send this into the other participants' Claude Code sessions"
-              >
-                run
-              </button>
-            </div>
-            <input
-              className="field"
-              placeholder={
-                mode === 'run'
-                  ? 'instruction for the other agents… @login to aim it at one'
-                  : 'message… use #task-id to pin it to a node'
+        <div className="flex gap-2 border-t border-edge p-3">
+          <input
+            className="field"
+            placeholder="message… use #task-id to pin it to a node"
+            value={draft}
+            disabled={sending}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                void post()
               }
-              value={draft}
-              disabled={sending}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault()
-                  void post()
-                }
-              }}
-            />
-            <button
-              className={mode === 'run' ? 'btn btn-accent' : 'btn'}
-              disabled={!draft.trim() || sending}
-              onClick={() => void post()}
-            >
-              {mode === 'run' ? 'run' : 'send'}
-            </button>
-          </div>
-          {mode === 'run' ? (
-            <p className="text-[10px] text-mute">
-              Delivered into the other participants&apos; Claude Code — they act on it when their
-              current turn ends. File leases still apply.
-            </p>
-          ) : null}
+            }}
+          />
+          <button className="btn" disabled={!draft.trim() || sending} onClick={() => void post()}>
+            send
+          </button>
         </div>
       ) : null}
+    </div>
+  )
+}
+
+/** A message from the session or an agent, in the feed with the events around it. */
+function FeedMessage({ message, participants }: { message: ChatMessage; participants: Participant[] }) {
+  const author = participants.find((p) => p.id === message.authorId)
+  const time = new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const to = message.mentions
+    .map((id) => participants.find((p) => p.id === id)?.displayName)
+    .filter(Boolean)
+    .join(', ')
+  return (
+    <div className="flex gap-3 leading-relaxed">
+      <span className="shrink-0 text-mute/60">{time}</span>
+      <span className="shrink-0 text-mute">
+        {message.authorKind === 'system' ? 'session' : `${author?.displayName ?? 'someone'}'s Claude`}
+      </span>
+      {message.directive ? (
+        <span className="shrink-0 text-accent" title="an instruction to an agent">
+          ▸{to ? ` ${to}` : ''}
+        </span>
+      ) : null}
+      <span className="min-w-0 whitespace-pre-line break-words text-neutral-300">{message.body}</span>
     </div>
   )
 }
@@ -175,11 +176,7 @@ function ChatLine({
   const author = participants.find((p) => p.id === message.authorId)
   return (
     <div className="flex gap-2 leading-relaxed">
-      <span className="shrink-0 text-mute">{author?.displayName ?? 'system'}</span>
-      {message.authorKind === 'agent' ? (
-        <span className="shrink-0 text-sky-400/70">agent</span>
-      ) : null}
-      {message.directive ? <span className="shrink-0 text-accent">▸run</span> : null}
+      <span className="shrink-0 text-mute">{author?.displayName ?? 'someone'}</span>
       {message.taskRef ? <span className="shrink-0 text-accent">#{message.taskRef}</span> : null}
       <span className="min-w-0 break-words text-neutral-300">{message.body}</span>
     </div>
@@ -240,6 +237,12 @@ function describe(envelope: EventEnvelope): string {
         : `ran it and it is broken: ${body.verification.summary.slice(0, 60)}`
     case 'ticket.shipped':
       return body.prNumber ? `ticket shipped as #${body.prNumber}` : 'ticket closed'
+    case 'ticket.attached':
+      return `${body.attachments.length} picture(s) added to a ticket`
+    case 'ticket.needsHuman':
+      return body.value ? 'a ticket now waits for a human look before it ships' : 'a ticket no longer waits for a human look'
+    case 'ticket.humanCheck':
+      return body.check?.passed ? 'tried by hand -- it works' : 'hand check cleared'
     case 'ticket.merged':
       return `ticket merged as #${body.prNumber} -- done`
     case 'ticket.deleted':

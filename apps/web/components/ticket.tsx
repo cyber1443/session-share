@@ -7,6 +7,7 @@ import { ago, isBusy } from '@/lib/now'
 import { api } from '@/lib/api'
 import { usePoll } from '@/lib/poll'
 import { PullCard } from './pull'
+import { Pictures } from './pictures'
 
 const DOT = [
   'bg-emerald-400',
@@ -52,6 +53,9 @@ export function TicketPanel({
   onAssign,
   onReclaim,
   onDelete,
+  onNeedsHuman,
+  onRunLocally,
+  onHumanCheck,
 }: {
   ticket: Ticket
   snapshot: SessionSnapshot
@@ -68,6 +72,9 @@ export function TicketPanel({
   /** Takes a task back from a holder who has gone quiet; the server decides who has. */
   onReclaim: (taskId: string) => Promise<void>
   onDelete: () => Promise<void>
+  onNeedsHuman: (value: boolean) => Promise<void>
+  onRunLocally: () => Promise<void>
+  onHumanCheck: (passed: boolean, note: string) => Promise<void>
 }) {
   /**
    * Deleting is one click and a confirmation rather than a permission: any
@@ -132,7 +139,17 @@ export function TicketPanel({
         </button>
       </div>
 
-      {ticket.body ? <p className="leading-relaxed text-neutral-400">{ticket.body}</p> : null}
+      {ticket.body ? <p className="whitespace-pre-line leading-relaxed text-neutral-400">{ticket.body}</p> : null}
+      <Pictures slug={slug} attachments={ticket.attachments.filter((a) => a.kind === 'brief')} />
+      {!ticket.mergedAt && !ticket.prNumber ? (
+        <label
+          className="flex cursor-pointer items-center gap-2 text-[11px] text-mute hover:text-neutral-300"
+          title="After its automated run passes, it waits in verify until someone has tried it by hand"
+        >
+          <input type="checkbox" checked={ticket.needsHuman} onChange={(event) => void onNeedsHuman(event.target.checked)} />
+          needs a human look before it ships
+        </label>
+      ) : null}
 
       {ticket.prNumber && ticket.mergedAt ? (
         <div className="panel space-y-1 p-3">
@@ -432,6 +449,20 @@ export function TicketPanel({
               together.
             </p>
           )}
+          <Pictures slug={slug} attachments={ticket.attachments.filter((a) => a.kind === 'verify')} />
+          {ticket.humanCheck?.passed ? (
+            <p className="pt-1 text-[11px] text-emerald-400">
+              Tried by hand by {snapshot.participants.find((p) => p.id === ticket.humanCheck?.by)?.displayName ?? 'someone'}
+              {ticket.humanCheck.note ? `: ${ticket.humanCheck.note}` : ''}
+            </p>
+          ) : null}
+          {ticket.state === 'verify' ? (
+            <HandCheck
+              waiting={Boolean(ticket.verification?.passed && ticket.needsHuman && !ticket.humanCheck)}
+              onRun={onRunLocally}
+              onCheck={onHumanCheck}
+            />
+          ) : null}
         </div>
       ) : null}
 
@@ -635,6 +666,81 @@ function TicketPull({ slug, number, title }: { slug: string; number: number; tit
               ? `Not open any more -- if it was merged, "${title}" moves to done in a moment.`
               : 'Reading it from GitHub…'}
       </p>
+    </div>
+  )
+}
+
+/**
+ * Trying it by hand. "Run it for me" asks your own Claude Code to start the
+ * assembled branch on your machine and post how to reach it; then you pass it,
+ * or fail it with what you saw -- failing reopens the work like a failed run.
+ */
+function HandCheck({
+  waiting,
+  onRun,
+  onCheck,
+}: {
+  /** The automated run passed and this ticket asked for a person as well. */
+  waiting: boolean
+  onRun: () => Promise<void>
+  onCheck: (passed: boolean, note: string) => Promise<void>
+}) {
+  const [note, setNote] = useState('')
+  const [asked, setAsked] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const act = async (fn: () => Promise<void>) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await fn()
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="space-y-2 border-t border-edge pt-2">
+      {waiting ? (
+        <p className="text-[11px] text-amber-400">Passed its automated run. Waiting for someone to try it by hand.</p>
+      ) : null}
+      <button
+        className="btn w-full"
+        disabled={busy}
+        onClick={() =>
+          void act(async () => {
+            await onRun()
+            setAsked(true)
+          })
+        }
+      >
+        run it for me
+      </button>
+      {asked ? (
+        <p className="text-[10px] text-mute">
+          Your Claude Code is starting it in a separate folder; how to reach it will appear in the feed.
+        </p>
+      ) : null}
+      {waiting ? (
+        <>
+          <textarea
+            className="field min-h-12 w-full text-[11px]"
+            placeholder="what you tried, and what you saw"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+          />
+          <div className="flex gap-2">
+            <button className="btn flex-1" disabled={busy} onClick={() => void act(() => onCheck(false, note))}>
+              it is broken
+            </button>
+            <button className="btn btn-accent flex-1" disabled={busy} onClick={() => void act(() => onCheck(true, note))}>
+              it works
+            </button>
+          </div>
+        </>
+      ) : null}
+      {error ? <p className="text-[10px] text-red-400">{error}</p> : null}
     </div>
   )
 }
