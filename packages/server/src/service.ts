@@ -1379,29 +1379,21 @@ export class SessionService {
         assignments: autoAssign({ tasks: command.tasks, participants: members }),
       })
       /**
-       * The split is shown before it runs. Joining agreed to the work, not to
-       * whatever shape an agent decided on a minute ago -- and one look at
-       * "who ends up with what" is cheap next to two agents rewriting the wrong
-       * files. It is one button, pressed by whoever is looking.
+       * A valid split starts at once. Waiting for someone to press "approve"
+       * stalled tickets whenever that someone was away, and joining the ticket
+       * was already the agreement; who does what can still be changed on the
+       * board while the work runs. The agent that proposed it is the one that
+       * is certainly awake right now, so it lands the contract.
        */
-      this.setTicketState(sessionId, participantId, ticket.id, 'proposed')
-      /**
-       * Addressed to the members rather than merely announced, so a session
-       * that is running itself can carry on: joining the ticket was the
-       * agreement, and waiting for a second one from the same person is the
-       * ceremony this is supposed to remove. It is still on the board, and
-       * still one click, for anyone who would rather look first.
-       */
-      this.systemDirective(
-        sessionId,
+      this.emit(sessionId, participantId, {
+        type: 'decomposition.approval',
+        decompositionId,
         participantId,
-        ticket.members,
-        [
-          `The split for "${ticket.title}" is ready: ${command.tasks.length} task(s).`,
-          'Look it over, change who does what if you disagree, then start it with',
-          `ss_ticket_approve (ticketId: ${ticket.id}). Starting it hands everyone their tasks.`,
-        ].join('\n'),
-      )
+        approvals: ticket.members,
+        satisfied: true,
+      })
+      this.seedTasks(sessionId, participantId, state, decompositionId)
+      this.refreshTicketStates(sessionId, participantId)
       return { decompositionId, validation }
     }
 
@@ -1608,6 +1600,16 @@ export class SessionService {
         taskId: command.taskId,
         assigneeId: command.participantId,
       })
+      // Their agent finds out from the room, not from noticing the board changed.
+      if (command.participantId && command.participantId !== live.assigneeId && live.state !== 'merged') {
+        const by = state.participants.get(participantId)?.displayName ?? 'Someone'
+        this.systemDirective(
+          sessionId,
+          participantId,
+          [command.participantId],
+          `${by} gave you ${live.id} -- ${live.title}. Claim it with ss_claim once the contract has landed, do it, and finish with ss_done.`,
+        )
+      }
       return {
         assignments: [...state.tasks.values()]
           .filter((task) => task.assigneeId)
@@ -1801,6 +1803,20 @@ export class SessionService {
     }
 
     const contractLanded = Boolean(state.session?.contractBranch)
+    /**
+     * Whoever set the work going lands the contract, tasks of their own or
+     * not -- otherwise a split that gave the proposer nothing left every task
+     * waiting on a landing nobody was asked to do.
+     */
+    const ticketOf = tasks.find((task) => task.ticketId)?.ticketId ?? null
+    if (ticketOf && !byAssignee.has(actorId) && state.participants.get(actorId)?.repoPath) {
+      this.systemDirective(
+        sessionId,
+        actorId,
+        [actorId],
+        `The split is live and none of its tasks are yours. Land the ticket's contract now so the others can start: ss_land_contract.`,
+      )
+    }
     for (const [assignee, theirs] of byAssignee) {
       const listed = theirs
         .map((task) => `  ${task.id} -- ${task.title} (${task.estimateMinutes}m)${task.state === 'blocked' ? `, waiting on ${task.dependsOn.join(', ')}` : ''}`)
@@ -1835,7 +1851,7 @@ export class SessionService {
           ...(ticketId
             ? [
                 lands
-                  ? 'You started it, so land this ticket\'s contract first: ss_land_contract.'
+                  ? 'You proposed it, so land this ticket\'s contract first, now: ss_land_contract.'
                   : '',
                 lands
                   ? 'Then work them, one at a time and without waiting to be asked:'

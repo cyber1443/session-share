@@ -1075,24 +1075,15 @@ describe('tickets', () => {
     assert.equal(proposal.validation.ok, true)
     await settle()
 
-    // The split is shown before it runs, and starting it is itself a directive
-    // so a session running unattended can carry on.
-    const waiting = alice.eventsOfType('ticket.state').at(-1)
-    assert.equal(waiting.body.state, 'proposed', 'the split is put in front of a person first')
-    assert.equal(alice.eventsOfType('tasks.seeded').length, 0, 'and nothing runs until it is started')
-
-    const toStart = alice
+    // Nobody presses anything: a valid split is the start.
+    const seeded = alice.eventsOfType('tasks.seeded').at(-1)
+    assert.ok(seeded, 'a valid split seeds the work at once')
+    const toLand = alice
       .eventsOfType('chat.message')
       .map((event) => event.body.message)
-      .findLast((m) => m.directive)
-    assert.match(toStart.body, /ss_ticket_approve/)
-    assert.deepEqual(toStart.mentions.sort(), [aliceId, bobId].sort())
-
-    await bob.send({ type: 'ticket.approve', ticketId: ticket.id })
-    await settle()
-
-    const seeded = alice.eventsOfType('tasks.seeded').at(-1)
-    assert.ok(seeded, 'starting it is what seeds the work')
+      .filter((m) => m.directive && m.mentions.includes(aliceId))
+      .at(-1)
+    assert.match(toLand.body, /ss_land_contract/, 'and the agent that proposed it lands the contract')
     assert.ok(
       seeded.body.tasks.every((task) => task.ticketId === ticket.id),
       'tasks belong to the ticket they came from',
@@ -1406,7 +1397,7 @@ describe('tickets', () => {
     )
   })
 
-  it('lets the arrangement be changed before it runs, across the ticket only', async () => {
+  it('lets the arrangement be changed while it runs, across the ticket only', async () => {
     const { alice, bob, aliceId, bobId } = await twoDevSession('ticket-reassign')
     const watcher = await new TestClient(url).connect()
     await watcher.send({
@@ -1429,6 +1420,14 @@ describe('tickets', () => {
       ticketId: ticket.id,
     })
 
+    await settle()
+    const seeded = alice.eventsOfType('tasks.seeded').at(-1)
+    /**
+     * Cara is in the session but not in this ticket. The split must not hand
+     * them work they never opted into.
+     */
+    assert.ok(seeded.body.tasks.every((t) => [aliceId, bobId].includes(t.assigneeId)))
+
     const moved = await bob.send({
       type: 'task.assign',
       taskId: 'theme-toggle',
@@ -1437,28 +1436,18 @@ describe('tickets', () => {
     assert.equal(
       moved.assignments.find((a) => a.taskId === 'theme-toggle').participantId,
       bobId,
-      'anyone in the ticket can change who does what, before it starts',
+      'anyone in the ticket can change who does what while it runs',
     )
-
-    /**
-     * Cara is in the session but not in this ticket. Rebalancing must not hand
-     * her work she never opted into.
-     */
-    const owners = new Set(moved.assignments.map((a) => a.participantId))
-    assert.deepEqual([...owners].sort(), [aliceId, bobId].sort())
-
-    await alice.send({ type: 'ticket.approve', ticketId: ticket.id })
     await settle()
-    const seeded = alice.eventsOfType('tasks.seeded').at(-1)
-    assert.equal(
-      seeded.body.tasks.find((t) => t.id === 'theme-toggle').assigneeId,
-      bobId,
-      'and the change is what runs',
-    )
+    const told = bob
+      .eventsOfType('chat.message')
+      .map((event) => event.body.message)
+      .findLast((m) => m.directive && m.mentions.includes(bobId))
+    assert.match(told.body, /theme-toggle/, 'and the new assignee is told')
     await watcher.close()
   })
 
-  it('refuses to start a ticket you have not joined', async () => {
+  it('treats starting a ticket that is already running as done', async () => {
     const { alice, bob } = await twoDevSession('ticket-outsider')
     const { ticket } = await open(alice, 'Add due dates')
     await alice.send({
@@ -1470,11 +1459,8 @@ describe('tickets', () => {
       ticketId: ticket.id,
     })
 
-    const error = await expectError(
-      bob.send({ type: 'ticket.approve', ticketId: ticket.id }),
-      'forbidden',
-    )
-    assert.match(error.message, /Join the ticket/)
+    const again = await bob.send({ type: 'ticket.approve', ticketId: ticket.id })
+    assert.equal(again.ticket.state, 'building', 'pressing start late changes nothing')
   })
 
   /** A ticket with every task landed, sitting in verify. */

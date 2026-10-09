@@ -326,25 +326,21 @@ try {
 
   const ready = await bobBoard.snapshot()
   check(
-    ready.tickets.find((t) => t.id === opened.ticket.id)?.state === 'proposed',
-    'the split is put in front of a person before it runs',
-  )
-  check(
-    ready.tasks.filter((t) => t.ticketId === opened.ticket.id).length === 0,
-    'and nothing is running yet',
+    ready.tickets.find((t) => t.id === opened.ticket.id)?.state === 'building',
+    'a valid split starts on its own, with nobody pressing approve',
   )
 
-  say('Bob changes who does what, then presses start')
+  say('Bob changes who does what while it runs')
   const reassigned = await bobBoard.command({
     type: 'task.assign',
     taskId: TAG_TASKS[0].id,
     participantId: seen.participants.find((p) => p.githubLogin === 'bob').id,
   })
   check(
-    reassigned.assignments.find((a) => a.taskId === TAG_TASKS[0].id).manual === true,
+    reassigned.assignments.find((a) => a.taskId === TAG_TASKS[0].id).participantId ===
+      seen.participants.find((p) => p.githubLogin === 'bob').id,
     'the change sticks',
   )
-  await bobBoard.command({ type: 'ticket.approve', ticketId: opened.ticket.id })
 
   const afterSplit = await bobBoard.snapshot()
   const ticketTasks = afterSplit.tasks.filter((t) => t.ticketId === opened.ticket.id)
@@ -483,8 +479,8 @@ try {
 
   const afterSecond = await aliceBoardEarly.snapshot()
   check(
-    afterSecond.tickets.find((t) => t.id === secondTicket.ticket.id)?.state === 'proposed',
-    'the second ticket reaches its own split like the first',
+    afterSecond.tickets.find((t) => t.id === secondTicket.ticket.id)?.state === 'building',
+    'the second ticket starts from its own split like the first',
   )
   check(
     afterSecond.tickets.find((t) => t.id === opened.ticket.id)?.state === 'review',

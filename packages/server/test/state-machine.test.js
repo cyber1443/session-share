@@ -71,6 +71,16 @@ function ticketWithSplit(s, a, b, title, contractPath, tasks) {
   return { ticket, proposal }
 }
 
+/** A split with no ticket, which still goes through approval. */
+function legacySplit(s, ctx) {
+  return s.run(ctx, {
+    type: 'decomposition.propose',
+    contract: contract('src/a/c.ts'),
+    tasks: [spec('one', ['src/a/x/**'])],
+    participantCount: 2,
+  })
+}
+
 /** A ticket started and its contract landed, ready to claim. */
 function liveTicket(s, a, b, title, contractPath, tasks) {
   const made = ticketWithSplit(s, a, b, title, contractPath, tasks)
@@ -108,15 +118,14 @@ describe('one split per ticket', () => {
     const A = ticketWithSplit(s, a, b, 'A', 'src/a/c.ts', [spec('a-one', ['src/a/x/**'])])
     const B = ticketWithSplit(s, a, b, 'B', 'src/b/c.ts', [spec('b-one', ['src/b/x/**'])])
 
-    s.run(a, { type: 'ticket.approve', ticketId: A.ticket.id })
     const seeded = [...s.state().tasks.values()]
-    assert.deepEqual(seeded.map((t) => t.id), ['a-one'], "starting A must not seed B's split")
-    assert.equal(seeded[0].ticketId, A.ticket.id)
+    assert.deepEqual(seeded.map((t) => t.id).sort(), ['a-one', 'b-one'])
+    assert.equal(s.state().tasks.get('a-one').ticketId, A.ticket.id, 'each task belongs to its own ticket')
+    assert.equal(s.state().tasks.get('b-one').ticketId, B.ticket.id)
 
     const snapshot = s.app.service.snapshotOf(s.sessionId)
     assert.ok(snapshot.decompositions[A.proposal.decompositionId])
     assert.ok(snapshot.decompositions[B.proposal.decompositionId])
-    assert.equal(snapshot.decomposition.id, A.proposal.decompositionId, 'the split waiting to land comes first')
   })
 
   it('keeps a ticket unclaimable until its own contract lands', () => {
@@ -372,13 +381,13 @@ describe('splits that collide with another ticket', () => {
     assert.ok(proposal.validation.issues.some((i) => i.code === 'overlaps_other_ticket' && /contract file/.test(i.message)))
   })
 
-  it('catches two proposals that have not been started yet', () => {
+  it('catches a split reaching into files another ticket already owns', () => {
     const s = session()
     const a = s.join('alice')
     const b = s.join('bob')
     ticketWithSplit(s, a, b, 'A', 'src/a/c.ts', [spec('a-one', ['src/x/**'])])
     const { proposal } = ticketWithSplit(s, a, b, 'B', 'src/b/c.ts', [spec('b-one', ['src/X/y.ts'])])
-    assert.ok(proposal.validation.issues.some((i) => i.code === 'overlaps_other_ticket' && /proposed to own/.test(i.message)))
+    assert.ok(proposal.validation.issues.some((i) => i.code === 'overlaps_other_ticket'))
   })
 })
 
@@ -519,7 +528,7 @@ describe('the lead', () => {
     const a = s.join('alice')
     const b = s.join('bob')
     const c = s.join('carol')
-    const { proposal } = ticketWithSplit(s, a, b, 'A', 'src/a/c.ts', [spec('one', ['src/a/x/**'])])
+    const proposal = legacySplit(s, a)
     quiet(s, a)
     s.run(b, { type: 'decomposition.approve', decompositionId: proposal.decompositionId })
     s.run(c, { type: 'decomposition.approve', decompositionId: proposal.decompositionId })
@@ -533,7 +542,7 @@ describe('the lead', () => {
     s.join('carol')
     s.join('dave')
     s.join('erin')
-    const { proposal } = ticketWithSplit(s, a, b, 'A', 'src/a/c.ts', [spec('one', ['src/a/x/**'])])
+    const proposal = legacySplit(s, a)
 
     const first = s.run(b, { type: 'decomposition.approve', decompositionId: proposal.decompositionId })
     assert.equal(first.satisfied, false, 'the lead is here, and it is her call')
@@ -598,13 +607,15 @@ describe('rejecting a split', () => {
     const b = s.join('bob')
     const c = s.join('carol')
     const { ticket } = s.run(b, { type: 'ticket.create', title: 'B' })
+    // A valid ticket split starts at once; one the validator refused waits to be redone.
     const proposal = s.run(b, {
       type: 'decomposition.propose',
       contract: contract('src/b/c.ts'),
-      tasks: [spec('one', ['src/b/x/**'])],
+      tasks: [spec('one', ['../outside/**'])],
       participantCount: 1,
       ticketId: ticket.id,
     })
+    assert.equal(proposal.validation.ok, false)
     s.fails(c, { type: 'decomposition.reject', decompositionId: proposal.decompositionId, reason: 'no' }, 'forbidden')
     s.run(a, { type: 'decomposition.reject', decompositionId: proposal.decompositionId, reason: 'redo' })
     assert.equal(s.state().decompositions.get(proposal.decompositionId).status, 'rejected')

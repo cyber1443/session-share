@@ -903,7 +903,7 @@ export function createServer(): McpServer {
         ticketId: z
           .string()
           .nullish()
-          .describe('The ticket being split. Given to you in the request; a ticket split needs no approval and starts at once.'),
+          .describe('The ticket being split. Given to you in the request; a valid ticket split needs no approval and starts at once.'),
       },
     },
     async ({ contract, tasks, ticketId }) => {
@@ -935,7 +935,7 @@ export function createServer(): McpServer {
             to: names.get(a.participantId) ?? a.participantId,
           })),
           next: ticketId
-            ? 'On the board now, with the proposed assignment. Anyone in the ticket can change who does what and press start; that is when the work begins.'
+            ? 'The work has started -- a valid split needs no approval. Land the contract now with ss_land_contract if you can (you will also be sent this as an instruction), then claim your own tasks. Who does what can still be changed on the board.'
             : 'The board shows the split with the proposed assignment. Anyone can move a card; approving seeds the tasks and tells each agent what it owns.',
         })
       }
