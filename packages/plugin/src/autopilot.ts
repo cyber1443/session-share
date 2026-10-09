@@ -175,8 +175,13 @@ export interface RunResult {
  * What a headless run says about itself. A run that finished but had a tool
  * refused did not do what it was asked, and counting it as done would move the
  * cursor past an instruction nobody carried out.
+ *
+ * Only a refusal of a tool the run was given counts -- an edit the lease gate
+ * stopped, say. A planning run reaching for Bash, which it was never handed,
+ * is the agent looking around; it proposed the split anyway, and calling that
+ * a failure left the instruction to be run all over again.
  */
-export function readOutcome(stdout: string): { ok: boolean; detail: string } {
+export function readOutcome(stdout: string, allowed?: readonly string[]): { ok: boolean; detail: string } {
   const line = stdout.trim().split('\n').at(-1) ?? ''
   try {
     const result = JSON.parse(line) as {
@@ -185,7 +190,9 @@ export function readOutcome(stdout: string): { ok: boolean; detail: string } {
       result?: string
       permission_denials?: Array<{ tool_name?: string }>
     }
-    const denied = (result.permission_denials ?? []).map((denial) => denial.tool_name ?? 'a tool')
+    const denied = (result.permission_denials ?? [])
+      .map((denial) => denial.tool_name ?? 'a tool')
+      .filter((tool) => !allowed || allowed.includes(tool))
     if (result.is_error || (result.subtype && result.subtype !== 'success')) {
       return { ok: false, detail: `the run ended with ${result.subtype ?? 'an error'}: ${(result.result ?? '').slice(0, 200)}` }
     }
@@ -239,7 +246,7 @@ function runHeadless(
       resolve({ ok: false, code: null, detail: error.message })
     })
     child.on('close', (code) => {
-      const outcome = readOutcome(stdout)
+      const outcome = readOutcome(stdout, planningOnly ? PLANNING_TOOLS : BUILDING_TOOLS)
       log(`exit ${code}\n${outcome.detail}\n${tail}`)
       resolve({
         ok: code === 0 && outcome.ok,

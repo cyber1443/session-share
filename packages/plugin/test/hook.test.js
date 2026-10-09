@@ -608,6 +608,17 @@ describe('autopilot', () => {
     assert.equal(readOutcome(refused).ok, false)
     assert.match(readOutcome(refused).detail, /Edit/)
 
+    // A planning run trying Bash, which it was never given, still did its job.
+    const wandered = JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      result: 'Proposed the split',
+      permission_denials: [{ tool_name: 'Bash' }],
+    })
+    assert.equal(readOutcome(wandered, ['Read', 'Grep']).ok, true)
+    assert.equal(readOutcome(refused, ['Read', 'Edit']).ok, false, 'a refused tool it was given still fails')
+
     assert.equal(readOutcome(JSON.stringify({ subtype: 'error_max_turns', is_error: true })).ok, false)
     assert.equal(readOutcome('not json').ok, false)
   })
