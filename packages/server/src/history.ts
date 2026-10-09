@@ -72,6 +72,8 @@ export function toHistoryEntry(envelope: EventEnvelope): HistoryEntry | null {
       return { ...base, ticketId: body.ticketId, prNumber: body.prNumber }
     case 'ticket.deleted':
       return { ...base, ticketId: body.ticketId }
+    case 'ticket.merged':
+      return { ...base, ticketId: body.ticketId, prNumber: body.prNumber }
     case 'decomposition.proposed':
       return {
         ...base,

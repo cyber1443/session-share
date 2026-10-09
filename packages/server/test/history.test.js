@@ -225,3 +225,89 @@ describe('restoring a session from its mirror', () => {
     }
   })
 })
+
+describe('merging from the board', () => {
+  const repo = { owner: 'acme', name: 'web', baseBranch: 'main', remoteUrl: 'git@github.com:acme/web.git' }
+  const calls = []
+  let open = true
+  const fetcher = async (url, init = {}) => {
+    calls.push({ url: String(url), method: init.method ?? 'GET' })
+    const u = String(url)
+    if (u.endsWith('/graphql')) {
+      return new Response(
+        JSON.stringify({
+          data: {
+            repository: {
+              pullRequests: {
+                nodes: open
+                  ? [
+                      {
+                        number: 7, title: 'Board', url: 'https://x/7', isDraft: false, body: 'what it does',
+                        createdAt: '2026-10-09T10:00:00Z', updatedAt: '2026-10-09T11:00:00Z', author: { login: 'ann' },
+                        headRefName: 'ss/web/contract', baseRefName: 'main', additions: 120, deletions: 4, changedFiles: 6,
+                        commits: { totalCount: 5 }, mergeable: 'MERGEABLE', reviewDecision: null,
+                        labels: { nodes: [] }, statusCommits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] },
+                      },
+                    ]
+                  : [],
+              },
+            },
+          },
+        }),
+      )
+    }
+    if (u.includes('/actions/runs')) return new Response(JSON.stringify({ workflow_runs: [] }))
+    if (u.endsWith('/pulls/7/merge')) {
+      open = false
+      return new Response(JSON.stringify({ merged: true, sha: 'abc123', message: 'Pull Request successfully merged' }))
+    }
+    if (u.endsWith('/pulls/8')) return new Response(JSON.stringify({ merged: true, merge_commit_sha: 'def456' }))
+    return new Response('{}', { status: 404 })
+  }
+
+  it('shows what a PR is, merges it, and moves its ticket to done', async () => {
+    const local = createApp({
+      dbPath: ':memory:',
+      webRoot: null,
+      auth: { mode: 'peer', secret: 'merge-secret' },
+      github: new GitHubReader(fetcher, async () => 'tok'),
+    })
+    const localBase = await local.listen(0)
+    try {
+      const req = (method, path, body, headers = {}) =>
+        fetch(new URL(path, localBase), {
+          method,
+          headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers },
+          body: body ? JSON.stringify(body) : undefined,
+        }).then(async (r) => ({ status: r.status, body: await r.json() }))
+      const created = await req('POST', '/api/sessions', { slug: 'm', title: 'm', repo, issueRef: null }, { [HOST_HEADER]: hostCredential(local.auth) })
+      const ann = (await req('POST', '/api/peer/join', { invite: created.body.invite, githubLogin: 'ann', displayName: 'ann', repoPath: '/tmp/ann', machineId: 'm1' })).body
+      const auth = bearer(ann.participantToken)
+      const { body: made } = await req('POST', '/api/commands', { sessionRef: 'm', command: { type: 'ticket.create', title: 'Board', body: '' } }, auth)
+      const second = await req('POST', '/api/commands', { sessionRef: 'm', command: { type: 'ticket.create', title: 'Elsewhere', body: '' } }, auth)
+      const sessionId = created.body.sessionId
+      local.store.append(sessionId, ann.participantId, { type: 'ticket.shipped', ticketId: made.data.ticket.id, prNumber: 7 })
+      local.store.append(sessionId, ann.participantId, { type: 'ticket.shipped', ticketId: second.body.data.ticket.id, prNumber: 8 })
+      local.service.reload(sessionId)
+
+      const status = await req('GET', '/sessions/m/github', null, auth)
+      const pull = status.body.pulls[0]
+      assert.equal(pull.headRef, 'ss/web/contract')
+      assert.equal(pull.baseRef, 'main')
+      assert.equal(pull.additions, 120)
+      assert.equal(pull.checks, 'SUCCESS')
+      // #8 is not open any more, and GitHub says it was merged there.
+      assert.equal(local.service.state(sessionId).tickets.get(second.body.data.ticket.id).state, 'done')
+
+      assert.equal((await req('POST', '/sessions/m/github/merge', { number: 7 })).status, 401, 'a seat is needed')
+      const merged = await req('POST', '/sessions/m/github/merge', { number: 7, method: 'squash' }, auth)
+      assert.equal(merged.status, 200, JSON.stringify(merged.body))
+      assert.ok(calls.some((c) => c.method === 'PUT' && c.url.endsWith('/pulls/7/merge')))
+      const ticket = local.service.state(sessionId).tickets.get(made.data.ticket.id)
+      assert.equal(ticket.state, 'done')
+      assert.ok(ticket.mergedAt)
+    } finally {
+      await local.close()
+    }
+  })
+})

@@ -208,6 +208,29 @@ export class SessionService {
     }
   }
 
+  /**
+   * A pull request was merged -- from the board or on GitHub. Whichever
+   * tickets it was for are done. Returns the tickets it finished.
+   */
+  recordMerged(
+    sessionId: SessionId,
+    actorId: ParticipantId | null,
+    prNumber: number,
+    commitSha: string | null,
+  ): TicketId[] {
+    const state = this.state(sessionId)
+    const finished = [...state.tickets.values()].filter((t) => t.prNumber === prNumber && !t.mergedAt)
+    if (finished.length === 0) return []
+    return this.atomically(() => {
+      const by = actorId ? (state.participants.get(actorId)?.displayName ?? 'Someone') : 'Someone on GitHub'
+      for (const ticket of finished) {
+        this.emit(sessionId, actorId, { type: 'ticket.merged', ticketId: ticket.id, prNumber, commitSha })
+        this.systemMessage(sessionId, actorId, [], `${by} merged PR #${prNumber}. "${ticket.title}" is done.`)
+      }
+      return finished.map((t) => t.id)
+    })
+  }
+
   /** Drops the folded state so the next read rebuilds it from the log, as after an import. */
   reload(sessionId: SessionId): void {
     this.states.delete(sessionId)
@@ -618,6 +641,7 @@ export class SessionService {
       verification: null,
       decompositionId: null,
       prNumber: null,
+      mergedAt: null,
       createdAt: Date.now(),
     }
     this.emit(sessionId, participantId, { type: 'ticket.created', ticket })

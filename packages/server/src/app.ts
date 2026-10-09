@@ -131,6 +131,11 @@ const PeerJoinRequest = z.object({
   machineId: z.string().min(1).max(100).nullish(),
 })
 
+const MergeRequest = z.object({
+  number: z.number().int().positive(),
+  method: z.enum(['merge', 'squash', 'rebase']).default('merge'),
+})
+
 const ImportSessionRequest = z.object({
   sessionId: z.string().uuid(),
   slug: z.string().min(1).max(100),
@@ -610,9 +615,44 @@ export function createApp(options: AppOptions = {}): App {
   fastify.get('/sessions/:ref/github', async (request, reply) => {
     const sessionId = readable(request, reply)
     if (!sessionId) return reply
-    const session = service.state(sessionId).session
-    if (!session) return reply.code(404).send({ error: 'not_found' })
-    return github.status(session.repo)
+    const state = service.state(sessionId)
+    if (!state.session) return reply.code(404).send({ error: 'not_found' })
+    const status = await github.status(state.session.repo)
+    /**
+     * A ticket's PR that is no longer open may have been merged on GitHub
+     * rather than from here. Checked only for those, so a board polling costs
+     * nothing extra once everything is settled.
+     */
+    if (!status.error) {
+      const open = new Set(status.pulls.map((pull) => pull.number))
+      for (const ticket of state.tickets.values()) {
+        if (!ticket.prNumber || ticket.mergedAt || open.has(ticket.prNumber)) continue
+        const merged = await github.mergedState(state.session.repo, ticket.prNumber)
+        if (merged?.merged) service.recordMerged(sessionId, null, ticket.prNumber, merged.sha)
+      }
+    }
+    return status
+  })
+
+  /**
+   * Merges a pull request from the board, with the host's GitHub sign-in.
+   * Anyone with a seat in the session may press it -- the same people who can
+   * already push to the branches -- and GitHub still applies its own rules.
+   */
+  fastify.post('/sessions/:ref/github/merge', async (request, reply) => {
+    const sessionId = readable(request, reply)
+    if (!sessionId) return reply
+    const claims = bearerClaims(request)
+    const actor = claims?.participantId ?? null
+    if (!actor && !currentUser(request)) return reply.code(401).send({ error: 'unauthorized' })
+    const parsed = MergeRequest.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: 'bad_request', message: parsed.error.message })
+    const state = service.state(sessionId)
+    if (!state.session) return reply.code(404).send({ error: 'not_found' })
+    const result = await github.merge(state.session.repo, parsed.data.number, parsed.data.method)
+    if (!result.merged) return reply.code(409).send({ error: 'conflict', message: result.message })
+    const tickets = service.recordMerged(sessionId, actor as ParticipantId | null, parsed.data.number, result.sha)
+    return { ...result, tickets }
   })
 
   // -- pairing a checkout --------------------------------------------------
