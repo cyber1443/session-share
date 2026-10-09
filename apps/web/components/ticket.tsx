@@ -209,11 +209,17 @@ export function TicketPanel({
                   />
                   <span className="text-neutral-200">{worker.displayName}</span>
                   <span className="ml-auto text-[10px] text-mute">
-                    {snapshot.autopilots
-                      ? autopilot
-                        ? `Claude Code open · autopilot ${autopilot}`
-                        : 'Claude Code closed'
-                      : ''}
+                    {snapshot.limited?.includes(worker.id) ? (
+                      <span className="text-red-400">out of usage</span>
+                    ) : snapshot.autopilots ? (
+                      autopilot ? (
+                        `Claude Code open · autopilot ${autopilot}`
+                      ) : (
+                        'Claude Code closed'
+                      )
+                    ) : (
+                      ''
+                    )}
                   </span>
                 </div>
                 <p className={`break-words text-[11px] ${busy ? 'text-neutral-300' : 'text-mute'}`}>

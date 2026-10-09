@@ -56,6 +56,7 @@ export function useLiveSession(sessionRef: string) {
   const autopilotsRef = useRef<SessionSnapshot['autopilots']>(undefined)
   /** What each seat's Claude is doing now; same delivery as autopilots. */
   const doingRef = useRef<SessionSnapshot['doing']>(undefined)
+  const limitedRef = useRef<SessionSnapshot['limited']>(undefined)
   const socketRef = useRef<WebSocket | null>(null)
   const pendingRef = useRef(new Map<string, Pending>())
   const reqCounter = useRef(0)
@@ -63,7 +64,7 @@ export function useLiveSession(sessionRef: string) {
 
   const publish = useCallback(() => {
     if (!stateRef.current.session) return
-    setSnapshot({ ...stateRef.current.snapshot(), autopilots: autopilotsRef.current, doing: doingRef.current })
+    setSnapshot({ ...stateRef.current.snapshot(), autopilots: autopilotsRef.current, doing: doingRef.current, limited: limitedRef.current })
   }, [])
 
   const send = useCallback(<T extends ClientCommand['type']>(
@@ -154,6 +155,7 @@ export function useLiveSession(sessionRef: string) {
                 stateRef.current.hydrate(result.snapshot)
                 autopilotsRef.current = result.snapshot.autopilots
                 doingRef.current = result.snapshot.doing
+                limitedRef.current = result.snapshot.limited
               }
               setStatus('live')
               setError(null)
@@ -200,6 +202,7 @@ export function useLiveSession(sessionRef: string) {
               }
               if (message.autopilots) autopilotsRef.current = message.autopilots
               if (message.doing) doingRef.current = message.doing
+              if (message.limited) limitedRef.current = message.limited
               publish()
               break
             }
