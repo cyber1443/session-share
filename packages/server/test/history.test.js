@@ -172,3 +172,56 @@ describe('github on the board', () => {
     assert.deepEqual(status.pulls, [])
   })
 })
+
+describe('restoring a session from its mirror', () => {
+  it('rebuilds the same session on a fresh server, and hands people their own seats back', async () => {
+    const { join } = await seats('mirror-src')
+    const ann = await join('ann', '/tmp/ann/m', 'm1')
+    await command(ann.participantToken, 'mirror-src', { type: 'ticket.create', title: 'Carry me over', body: '' })
+    const exported = await call('GET', '/sessions/mirror-src/events?from=0&limit=5000', null, bearer(ann.participantToken))
+    assert.equal(exported.status, 200)
+    const sessionId = exported.body.events[0].sessionId
+
+    const fresh = createApp({ dbPath: ':memory:', webRoot: null, auth: { mode: 'peer', secret: 'another-secret' } })
+    const freshBase = await fresh.listen(0)
+    try {
+      const post = (path, body, headers = {}) =>
+        fetch(new URL(path, freshBase), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...headers },
+          body: JSON.stringify(body),
+        }).then(async (r) => ({ status: r.status, body: await r.json() }))
+      const payload = { sessionId, slug: 'mirror-src', events: exported.body.events }
+
+      assert.equal((await post('/api/sessions/import', payload)).status, 403, 'only the host may write history')
+      const host = { [HOST_HEADER]: hostCredential(fresh.auth) }
+      const imported = await post('/api/sessions/import', payload, host)
+      assert.equal(imported.status, 200, JSON.stringify(imported.body))
+      assert.equal(imported.body.added, exported.body.events.length)
+
+      const again = await post('/api/sessions/import', payload, host)
+      assert.equal(again.body.added, 0, 'importing what is already there changes nothing')
+
+      const tampered = structuredClone(exported.body.events)
+      tampered[1].ts += 1
+      tampered[1].body = { ...tampered[1].body, participant: { ...tampered[1].body.participant, displayName: 'Mallory' } }
+      assert.equal((await post('/api/sessions/import', { ...payload, events: tampered }, host)).status, 409)
+
+      const snapshot = fresh.service.snapshotOf(sessionId)
+      assert.equal(snapshot.session.id, sessionId, 'the same id, so everything that names it still does')
+      assert.ok(snapshot.tickets.some((t) => t.title === 'Carry me over'))
+
+      const rejoined = await post('/api/peer/join', {
+        invite: imported.body.invite,
+        githubLogin: 'ann',
+        displayName: 'ann',
+        repoPath: '/tmp/ann/m',
+        machineId: 'm1',
+      })
+      assert.equal(rejoined.status, 200, JSON.stringify(rejoined.body))
+      assert.equal(rejoined.body.participantId, ann.participantId, 'ann gets their own seat back, not a new one')
+    } finally {
+      await fresh.close()
+    }
+  })
+})

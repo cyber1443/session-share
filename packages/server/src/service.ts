@@ -200,6 +200,11 @@ export class SessionService {
     }
   }
 
+  /** Drops the folded state so the next read rebuilds it from the log, as after an import. */
+  reload(sessionId: SessionId): void {
+    this.states.delete(sessionId)
+  }
+
   /** Marks someone present now -- used when a socket opens. */
   seen(participantId: ParticipantId): void {
     this.lastSeen.set(participantId, Date.now())

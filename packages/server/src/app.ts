@@ -7,6 +7,8 @@ import fastifyStatic from '@fastify/static'
 import { z } from 'zod'
 import {
   ClientCommand,
+  EventBody,
+  ParticipantId as ParticipantIdSchema,
   RepoRef,
   type ErrorCode,
   type ParticipantId,
@@ -33,6 +35,7 @@ import {
   readUserIdFromCookies,
   serverFingerprint,
   upsertPeerUser,
+  peerUserId,
   upsertUser,
   type AuthConfig,
   type ParticipantClaims,
@@ -126,6 +129,21 @@ const PeerJoinRequest = z.object({
   repoPath: z.string().min(1).nullish(),
   /** Which machine the checkout is on; see Participant.machineId. */
   machineId: z.string().min(1).max(100).nullish(),
+})
+
+const ImportSessionRequest = z.object({
+  sessionId: z.string().uuid(),
+  slug: z.string().min(1).max(100),
+  events: z
+    .array(
+      z.object({
+        seq: z.number().int().nonnegative(),
+        ts: z.number().int().nonnegative(),
+        actorId: ParticipantIdSchema.nullable(),
+        body: EventBody,
+      }),
+    )
+    .max(200_000),
 })
 
 export interface AppOptions {
@@ -480,6 +498,64 @@ export function createApp(options: AppOptions = {}): App {
     } catch (error) {
       return sendServiceError(reply, error)
     }
+  })
+
+  /**
+   * Restores a session from its mirror in the repository, ids and all, or
+   * brings this server's copy up to date with it. Host only, in every mode:
+   * an import writes history, and nobody but whoever runs the server may.
+   */
+  // A two-year log is far past the default 1 MB body.
+  fastify.post('/api/sessions/import', { bodyLimit: 256 * 1024 * 1024 }, async (request, reply) => {
+    if (!isHost(request)) {
+      return reply.code(403).send({ error: 'forbidden', message: 'Only the machine running this server can restore a session.' })
+    }
+    const parsed = ImportSessionRequest.safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'bad_request', message: parsed.error.message })
+    }
+    const { sessionId, slug, events } = parsed.data
+    try {
+      const result = store.importEvents(sessionId as SessionId, slug, events)
+      service.reload(sessionId as SessionId)
+      /**
+       * Seats name people by user id, and a peer user's id is minted by the
+       * server that first saw them. A fresh server would mint new ones and
+       * hand everyone a stranger's empty seat instead of their own, so the
+       * people in the log are put back under the ids it already uses.
+       */
+      if (auth.mode === 'peer') {
+        for (const participant of service.state(sessionId as SessionId).participants.values()) {
+          if (!participant.userId || store.findUserById(participant.userId)) continue
+          if (store.findUserByGithubId(peerUserId(participant.githubLogin))) continue
+          store.saveUser({
+            id: participant.userId,
+            githubId: peerUserId(participant.githubLogin),
+            githubLogin: participant.githubLogin,
+            displayName: participant.displayName,
+            avatarUrl: participant.avatarUrl,
+          })
+        }
+      }
+      return {
+        sessionId,
+        slug,
+        ...result,
+        invite: auth.mode === 'peer' ? issueInvite(auth, sessionId as SessionId) : null,
+      }
+    } catch (error) {
+      return reply.code(409).send({ error: 'conflict', message: error instanceof Error ? error.message : String(error) })
+    }
+  })
+
+  /** The raw log, a page at a time, for a seat mirroring it into the repository. */
+  fastify.get('/sessions/:ref/events', async (request, reply) => {
+    const sessionId = readable(request, reply)
+    if (!sessionId) return reply
+    const query = request.query as { from?: string; limit?: string }
+    const from = Math.max(0, Number(query.from ?? 0) || 0)
+    const limit = Math.min(5000, Math.max(1, Number(query.limit ?? 1000) || 1000))
+    return { events: store.readEvents(sessionId, from, limit), maxSeq: store.maxSeq(sessionId) }
   })
 
   /** Readable by a signed-in user or by an attached checkout's participant token. */

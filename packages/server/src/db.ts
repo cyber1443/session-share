@@ -145,6 +145,53 @@ export class Store {
     return envelope
   }
 
+  /**
+   * Puts a log back exactly as it was written elsewhere: the same session id,
+   * the same seqs, the same timestamps and authors. Used to restore a session
+   * from its mirror, so everything that refers to an id -- tokens, tasks,
+   * leases -- means what it meant before.
+   *
+   * Only ever extends. Events this store already has are checked against the
+   * incoming ones and skipped; anything that disagrees, or a gap, refuses the
+   * whole import rather than splicing two histories together.
+   */
+  importEvents(
+    sessionId: SessionId,
+    slug: string,
+    events: Array<Pick<EventEnvelope, 'seq' | 'ts' | 'actorId' | 'body'>>,
+  ): { added: number; upToSeq: number } {
+    return this.transaction(() => {
+      const owner = this.findSessionIdByRef(slug)
+      if (owner && owner !== sessionId) {
+        throw new Error(`The slug "${slug}" already names another session on this server.`)
+      }
+      const known = this.db.prepare('SELECT id FROM sessions WHERE id = ?').get(sessionId)
+      if (!known) this.createSession(sessionId, slug, events[0]?.ts ?? Date.now())
+
+      let next = this.maxSeq(sessionId) + 1
+      let added = 0
+      const existing = this.db.prepare('SELECT body FROM events WHERE session_id = ? AND seq = ?')
+      const insert = this.db.prepare(
+        'INSERT INTO events (session_id, seq, ts, actor_id, body) VALUES (?, ?, ?, ?, ?)',
+      )
+      for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+        const body = JSON.stringify(event.body)
+        if (event.seq < next) {
+          const row = existing.get(sessionId, event.seq) as { body: string } | undefined
+          if (row && row.body !== body) {
+            throw new Error(`Event ${event.seq} differs from this server's copy; refusing to mix two histories.`)
+          }
+          continue
+        }
+        if (event.seq !== next) throw new Error(`The log has a gap before event ${event.seq}.`)
+        insert.run(sessionId, event.seq, event.ts, event.actorId, body)
+        next++
+        added++
+      }
+      return { added, upToSeq: next - 1 }
+    })
+  }
+
   readEvents(sessionId: SessionId, fromSeq = 0, limit = 5000): EventEnvelope[] {
     const rows = this.db
       .prepare(
