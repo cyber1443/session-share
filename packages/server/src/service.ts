@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import {
   type ActivityFrame,
+  type AutopilotMode,
   type ChatMessage,
   type ClientCommand,
   type CommandResultMap,
@@ -94,6 +95,12 @@ const UNANIMOUS_UP_TO = 3
  */
 const PRESENT_FOR_MS = 10 * 60 * 1000
 
+/**
+ * An autopilot polls every 20 seconds; three missed polls and its Claude Code
+ * is taken to be closed.
+ */
+const AUTOPILOT_FRESH_MS = 60 * 1000
+
 /** How much of the room a snapshot carries. */
 const SNAPSHOT_CHAT = 500
 
@@ -121,6 +128,11 @@ export class SessionService {
    * forever, and with it every task the checkout had claimed and abandoned.
    */
   readonly lastWorked = new Map<ParticipantId, number>()
+  /**
+   * Each seat's last autopilot heartbeat. Memory only, like presence: whether
+   * a Claude Code is open right now is not history worth a log entry a minute.
+   */
+  readonly autopilots = new Map<ParticipantId, { mode: AutopilotMode; at: number }>()
 
   constructor(
     private readonly store: Store,
@@ -232,6 +244,17 @@ export class SessionService {
       .map((participant) => participant.id)
   }
 
+  /** Seats in a session whose Claude Code has polled lately, by autopilot mode. */
+  autopilotsIn(sessionId: SessionId): Record<string, AutopilotMode> {
+    const now = Date.now()
+    const open: Record<string, AutopilotMode> = {}
+    for (const participant of this.state(sessionId).participants.values()) {
+      const beat = this.autopilots.get(participant.id)
+      if (beat && now - beat.at < AUTOPILOT_FRESH_MS) open[participant.id] = beat.mode
+    }
+    return open
+  }
+
   /**
    * The snapshot everyone actually reads, with presence resolved from when each
    * participant was last heard from rather than from a flag nobody clears.
@@ -253,6 +276,7 @@ export class SessionService {
         // agent that was still working over HTTP as gone, permanently.
         connected: this.isPresent(participant, now),
       })),
+      autopilots: this.autopilotsIn(sessionId),
     }
   }
 
@@ -338,6 +362,8 @@ export class SessionService {
         return this.recordUsage(command, ctx)
       case 'activity.report':
         return this.reportActivity(command, ctx)
+      case 'agent.heartbeat':
+        return this.heartbeat(command, ctx)
     }
   }
 
@@ -2477,6 +2503,19 @@ export class SessionService {
       participantId,
       activity: { ...command.activity, updatedAt: Date.now() },
     })
+    return { ok: true as const }
+  }
+
+  private heartbeat(
+    command: Extract<ClientCommand, { type: 'agent.heartbeat' }>,
+    ctx: CommandContext,
+  ) {
+    const { participantId } = this.requireParticipant(ctx)
+    // A board has no Claude Code behind it; only a checkout's own token counts.
+    if (ctx.via === 'board') {
+      throw new ServiceError('forbidden', 'Only a checkout can report its autopilot.')
+    }
+    this.autopilots.set(participantId, { mode: command.autopilot, at: Date.now() })
     return { ok: true as const }
   }
 

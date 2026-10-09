@@ -293,7 +293,11 @@ export class Gateway {
       if (connection.ctx.sessionId) sessions.add(connection.ctx.sessionId)
     }
     for (const sessionId of sessions) {
-      const message: ServerMessage = { kind: 'presence', present: this.service.presentIn(sessionId) }
+      const message: ServerMessage = {
+        kind: 'presence',
+        present: this.service.presentIn(sessionId),
+        autopilots: this.service.autopilotsIn(sessionId),
+      }
       for (const connection of this.connections) {
         if (connection.ctx.sessionId === sessionId) send(connection.socket, message)
       }

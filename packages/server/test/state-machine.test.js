@@ -436,6 +436,25 @@ describe('presence on an open board', () => {
   })
 })
 
+describe('autopilot heartbeats', () => {
+  it('shows a seat whose Claude Code polled lately, and forgets it once it stops', () => {
+    const s = session()
+    const a = s.join('ann')
+    s.join('ben')
+    s.run(a, { type: 'agent.heartbeat', autopilot: 'full' })
+    assert.deepEqual(s.app.service.snapshotOf(s.sessionId).autopilots, { [a.participantId]: 'full' })
+
+    s.app.service.autopilots.set(a.participantId, { mode: 'full', at: Date.now() - 5 * 60 * 1000 })
+    assert.deepEqual(s.app.service.autopilotsIn(s.sessionId), {})
+  })
+
+  it('refuses one from a board, which has no Claude Code behind it', () => {
+    const s = session()
+    const a = s.join('ann')
+    s.fails({ ...a, via: 'board' }, { type: 'agent.heartbeat', autopilot: 'full' }, 'forbidden')
+  })
+})
+
 describe('the lead', () => {
   const HOUR = 60 * 60 * 1000
   const quiet = (s, ctx) => s.app.service.lastSeen.set(ctx.participantId, Date.now() - HOUR)
