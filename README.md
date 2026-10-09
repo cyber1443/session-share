@@ -185,6 +185,18 @@ shares weighted by API price ratios and a CSV export for settling up; and
 **github**, open pull requests and recent Actions runs, read by the server with
 its own `gh` sign-in (or `GITHUB_TOKEN`) so no browser holds a token.
 
+Tickets can carry **pictures** -- paste, drop or pick mockups and screenshots
+when writing one; the agent that splits it is told to look at them first.
+**Chat** is for the people; the session's messages and the agents' reports and
+instructions are in the **feed**.
+
+**Verify** runs on its own: the agent assembles the branch, starts the app and,
+for anything with a UI, drives it in a headless browser with Playwright,
+attaching screenshots to the ticket. Tick **needs a human look** on a ticket and
+it also waits, after that run passes, for someone to press **run it for me**
+(their own Claude Code starts the branch on their machine and posts how to reach
+it), click through, and pass or fail it on the board.
+
 Tickets wait in the plan column until someone presses **start**. One person is
 enough; joining a ticket never starts anything, so let everyone who wants in
 join first -- the split is sized for whoever is in it.
