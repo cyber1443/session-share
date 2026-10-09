@@ -4,7 +4,15 @@ import { join } from 'node:path'
 import type { EventEnvelope } from '@session-share/protocol'
 import { readConfig, type SessionConfig } from './config.js'
 import { HOST_HEADER, hostKey } from './daemon.js'
-import { fetchLog, listMirrored, pushLog, readMirrored, type MirrorMeta, type PushResult } from './mirror.js'
+import {
+  fetchLog,
+  listMirrored,
+  pushLog,
+  readMirrored,
+  readMirroredFiles,
+  type MirrorMeta,
+  type PushResult,
+} from './mirror.js'
 import { readPreferences } from './preferences.js'
 
 const MIRROR_MS = Number(process.env.SESSION_SHARE_MIRROR_MS ?? 2 * 60_000)
@@ -52,6 +60,28 @@ export async function mirrorOnce(config: SessionConfig): Promise<PushResult> {
       repo: session.repo.owner === 'local' ? null : { owner: session.repo.owner, name: session.repo.name },
     },
     maxSeq: first.maxSeq,
+    files: {
+      ids: async () => {
+        const response = await fetch(new URL(`/sessions/${config.sessionRef}/files`, config.serverUrl), {
+          headers: config.participantToken ? { authorization: `Bearer ${config.participantToken}` } : {},
+          signal: AbortSignal.timeout(15_000),
+        })
+        return response.ok ? ((await response.json()) as { ids: string[] }).ids : []
+      },
+      read: async (id) => {
+        const response = await fetch(new URL(`/sessions/${config.sessionRef}/files/${id}`, config.serverUrl), {
+          headers: config.participantToken ? { authorization: `Bearer ${config.participantToken}` } : {},
+          signal: AbortSignal.timeout(30_000),
+        })
+        if (!response.ok) return null
+        return {
+          id,
+          name: id,
+          type: response.headers.get('content-type') ?? 'application/octet-stream',
+          bytes: new Uint8Array(await response.arrayBuffer()),
+        }
+      },
+    },
     read: async (from, to) => {
       const events: EventEnvelope[] = []
       let next = from
@@ -115,11 +145,12 @@ async function importInto(
   serverUrl: string,
   meta: MirrorMeta,
   events: Awaited<ReturnType<typeof readMirrored>>,
+  files: Awaited<ReturnType<typeof readMirroredFiles>> = [],
 ): Promise<Restored> {
   const response = await fetch(new URL('/api/sessions/import', serverUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json', [HOST_HEADER]: hostKey() },
-    body: JSON.stringify({ sessionId: meta.sessionId, slug: meta.slug, events }),
+    body: JSON.stringify({ sessionId: meta.sessionId, slug: meta.slug, events, files }),
   })
   const payload = (await response.json()) as {
     invite?: string | null
@@ -157,7 +188,7 @@ export async function restoreFromMirror(
     .sort((a, b) => b.updatedAt - a.updatedAt)
   const meta = candidates[0]
   if (!meta) return null
-  return importInto(serverUrl, meta, await readMirrored(root, meta.sessionId))
+  return importInto(serverUrl, meta, await readMirrored(root, meta.sessionId), await readMirroredFiles(root, meta.sessionId))
 }
 
 /**
@@ -170,7 +201,12 @@ export async function catchUpFromMirror(root: string, serverUrl: string, slug: s
     if (!(await fetchLog(root))) return 0
     const meta = (await listMirrored(root)).find((m) => m.slug === slug)
     if (!meta) return 0
-    const restored = await importInto(serverUrl, meta, await readMirrored(root, meta.sessionId))
+    const restored = await importInto(
+      serverUrl,
+      meta,
+      await readMirrored(root, meta.sessionId),
+      await readMirroredFiles(root, meta.sessionId),
+    )
     return restored.added
   } catch (error) {
     log(`catch-up skipped: ${error instanceof Error ? error.message : error}`)

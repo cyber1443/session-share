@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
-import { LOG_BRANCH, fetchLog, listMirrored, pushLog, readMirrored } from '../dist/mirror.js'
+import { LOG_BRANCH, fetchLog, listMirrored, pushLog, readMirrored, readMirroredFiles } from '../dist/mirror.js'
 
 /**
  * The repository as the session's memory: a log pushed from one clone has to
@@ -90,6 +90,31 @@ describe('the log mirror', () => {
       back.map((event) => event.seq),
       log.map((event) => event.seq),
     )
+  })
+
+  it('carries pictures too, byte for byte, and copies each only once', async () => {
+    const { a, b } = clones()
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1, 2, 255])
+    let reads = 0
+    const withFiles = (log) => ({
+      ...source(log),
+      files: {
+        ids: async () => ['pic1'],
+        read: async (id) => {
+          reads++
+          return { id, name: 'mock.png', type: 'image/png', bytes: png }
+        },
+      },
+    })
+    assert.equal((await pushLog(a, withFiles(events(3)))).pushed, true)
+    assert.equal((await pushLog(a, withFiles(events(5)))).pushed, true)
+    assert.equal(reads, 1, 'a picture already on the branch is not copied again')
+
+    await fetchLog(b)
+    const [file] = await readMirroredFiles(b, SESSION)
+    assert.equal(file.type, 'image/png')
+    assert.deepEqual([...Buffer.from(file.base64, 'base64')], [...png])
+    assert.equal((await readMirrored(b, SESSION)).length, 5)
   })
 
   it('finds nothing in a repository that has never been mirrored', async () => {

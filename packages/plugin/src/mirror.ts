@@ -58,6 +58,37 @@ function git(cwd: string, args: string[], options: { env?: NodeJS.ProcessEnv; in
   })
 }
 
+/** Like git(), for binary stdin: a picture is not text. */
+function gitBytes(cwd: string, args: string[], input: Uint8Array): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
+    let stdout = ''
+    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk))
+    child.on('error', reject)
+    child.on('close', (code) => (code === 0 ? resolve(stdout.trim()) : reject(new Error(`git ${args[0]} failed`))))
+    child.stdin.end(Buffer.from(input))
+  })
+}
+
+/** A session's mirrored pictures, read back for a restore. */
+export async function readMirroredFiles(cwd: string, sessionId: string): Promise<Array<Omit<MirrorFile, 'bytes'> & { base64: string }>> {
+  const head = await remoteHead(cwd)
+  if (!head) return []
+  const index = JSON.parse((await show(cwd, head, `${sessionDir(sessionId)}/files.json`)) ?? '[]') as Array<Omit<MirrorFile, 'bytes'>>
+  const files = []
+  for (const file of index) {
+    const bytes = await new Promise<Buffer>((resolve) => {
+      const child = spawn('git', ['cat-file', 'blob', `${head}:${sessionDir(sessionId)}/files/${file.id}`], { cwd })
+      const chunks: Buffer[] = []
+      child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+      child.on('close', () => resolve(Buffer.concat(chunks)))
+      child.on('error', () => resolve(Buffer.alloc(0)))
+    })
+    if (bytes.length > 0) files.push({ ...file, base64: bytes.toString('base64') })
+  }
+  return files
+}
+
 const chunkName = (seq: number) => String(Math.floor(seq / CHUNK)).padStart(6, '0')
 const sessionDir = (sessionId: string) => `sessions/${sessionId}`
 
@@ -120,7 +151,16 @@ export async function readMirrored(cwd: string, sessionId: string): Promise<Stor
   return events.sort((a, b) => a.seq - b.seq)
 }
 
+export interface MirrorFile {
+  id: string
+  name: string
+  type: string
+  bytes: Uint8Array
+}
+
 export interface PushSource {
+  /** The session's pictures; copied once each, since a file never changes. */
+  files?: { ids: () => Promise<string[]>; read: (id: string) => Promise<MirrorFile | null> }
   meta: Omit<MirrorMeta, 'upToSeq' | 'updatedAt'>
   /** The newest seq the server has. */
   maxSeq: number
@@ -145,7 +185,14 @@ export async function pushLog(cwd: string, source: PushSource, attempts = 3): Pr
     const metaPath = `${sessionDir(source.meta.sessionId)}/meta.json`
     const current = parent ? await show(cwd, parent, metaPath) : null
     const mirrored = current ? (JSON.parse(current) as MirrorMeta).upToSeq : -1
-    if (mirrored >= source.maxSeq) return { pushed: false, reason: 'the branch is already up to date' }
+    const filesPath = `${sessionDir(source.meta.sessionId)}/files.json`
+    const knownFiles = new Set(
+      ((parent ? JSON.parse((await show(cwd, parent, filesPath)) ?? '[]') : []) as Array<{ id: string }>).map((f) => f.id),
+    )
+    const newFiles = source.files ? (await source.files.ids()).filter((id) => !knownFiles.has(id)) : []
+    if (mirrored >= source.maxSeq && newFiles.length === 0) {
+      return { pushed: false, reason: 'the branch is already up to date' }
+    }
 
     const dir = mkdtempSync(join(tmpdir(), 'ss-mirror-'))
     const env = { GIT_INDEX_FILE: join(dir, 'index') }
@@ -157,10 +204,22 @@ export async function pushLog(cwd: string, source: PushSource, attempts = 3): Pr
         await git(cwd, ['update-index', '--add', '--cacheinfo', `100644,${blob},${path}`], { env })
       }
 
+      if (newFiles.length > 0 && source.files) {
+        const index = parent ? (JSON.parse((await show(cwd, parent, filesPath)) ?? '[]') as Array<Omit<MirrorFile, 'bytes'>>) : []
+        for (const id of newFiles) {
+          const file = await source.files.read(id)
+          if (!file) continue
+          const blob = await gitBytes(cwd, ['hash-object', '-w', '--stdin'], file.bytes)
+          await git(cwd, ['update-index', '--add', '--cacheinfo', `100644,${blob},${sessionDir(source.meta.sessionId)}/files/${id}`], { env })
+          index.push({ id, name: file.name, type: file.type })
+        }
+        await write(filesPath, `${JSON.stringify(index, null, 2)}\n`)
+      }
+
       // Rewrite from the start of the chunk the branch stopped in.
       const firstChunk = Math.floor((mirrored + 1) / CHUNK)
       const lastChunk = Math.floor(source.maxSeq / CHUNK)
-      for (let chunk = firstChunk; chunk <= lastChunk; chunk++) {
+      for (let chunk = mirrored >= source.maxSeq ? lastChunk + 1 : firstChunk; chunk <= lastChunk; chunk++) {
         const from = chunk * CHUNK
         const to = Math.min(source.maxSeq, from + CHUNK - 1)
         const events = await source.read(from, to)
@@ -169,7 +228,7 @@ export async function pushLog(cwd: string, source: PushSource, attempts = 3): Pr
         )
         await write(`${sessionDir(source.meta.sessionId)}/events/${chunkName(from)}.jsonl`, `${lines.join('\n')}\n`)
       }
-      const meta: MirrorMeta = { ...source.meta, upToSeq: source.maxSeq, updatedAt: Date.now() }
+      const meta: MirrorMeta = { ...source.meta, upToSeq: Math.max(source.maxSeq, mirrored), updatedAt: Date.now() }
       await write(metaPath, `${JSON.stringify(meta, null, 2)}\n`)
       if (!parent) {
         await write(

@@ -14,6 +14,7 @@ import {
   type TaskState,
 } from '@session-share/protocol'
 import { CommandError, pair, peerJoin, runCommand } from './client.js'
+import { downloadPictures, uploadPicture } from './files.js'
 import { readConfig, writeConfig, type SessionConfig } from './config.js'
 import { HOST_HEADER, ensureDaemon, hostKey, probe, publicUrlOverride, stopDaemon } from './daemon.js'
 import { describeDirectives, markCaughtUp, peekDirectives, pendingDirectives } from './inbox.js'
@@ -719,16 +720,73 @@ export function createServer(): McpServer {
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(4000).nullish().describe('The brief the planner works from'),
+        pictures: z
+          .array(z.string())
+          .max(20)
+          .nullish()
+          .describe('Paths of pictures that are part of the brief: mockups, screenshots of the bug. PNG, JPEG, GIF or WebP.'),
+        needsHuman: z
+          .boolean()
+          .nullish()
+          .describe('Hold it in verify, after its automated run passes, until a person has tried it by hand'),
       },
     },
-    async ({ title, body }) => {
+    async ({ title, body, pictures, needsHuman }) => {
       const cfg = config()
-      const { ticket, plannerId } = await runCommand(cfg, {
-        type: 'ticket.create',
-        title,
-        body: body ?? '',
-      })
+      const attachments = []
+      for (const path of pictures ?? []) attachments.push(await uploadPicture(cfg, resolve(path), 'brief'))
+      const { ticket, plannerId } = await runCommand(
+        cfg,
+        {
+          type: 'ticket.create',
+          title,
+          body: body ?? '',
+          attachments,
+          needsHuman: needsHuman ?? false,
+        },
+        15_000,
+      )
       return text([`Opened "${ticket.title}" (${ticket.id}).`, splitHint(cfg, ticket, plannerId)].join('\n'))
+    },
+  )
+
+  server.registerTool(
+    'ss_attach',
+    {
+      description:
+        'Attach pictures to a ticket: more of the brief (kind "brief"), or evidence from running it (kind "verify") -- screenshots taken while exercising the assembled thing, each with a caption saying what it shows.',
+      inputSchema: {
+        ticketId: z.string(),
+        kind: z.enum(['brief', 'verify']),
+        files: z
+          .array(z.object({ path: z.string(), caption: z.string().max(300).nullish() }))
+          .min(1)
+          .max(20),
+      },
+    },
+    async ({ ticketId, kind, files }) => {
+      const cfg = config()
+      const attachments = []
+      for (const file of files) attachments.push(await uploadPicture(cfg, resolve(file.path), kind, file.caption ?? ''))
+      await runCommand(cfg, { type: 'ticket.attach', ticketId: ticketId as never, attachments }, 15_000)
+      return text(`Attached ${attachments.length} picture(s) to the ticket. They show on the board.`)
+    },
+  )
+
+  server.registerTool(
+    'ss_ticket_files',
+    {
+      description:
+        "Save a ticket's pictures -- its brief's mockups and screenshots, and any evidence from running it -- to this machine and return their paths, so you can look at them with Read.",
+      inputSchema: { ticketId: z.string() },
+    },
+    async ({ ticketId }) => {
+      const cfg = config()
+      const state = await snapshot(cfg)
+      const ticket = state.tickets.find((t) => t.id === ticketId)
+      if (!ticket) return text(`No ticket "${ticketId}".`)
+      if (ticket.attachments.length === 0) return text(`"${ticket.title}" has no pictures.`)
+      return text({ ticket: ticket.title, pictures: await downloadPictures(cfg, ticket.attachments) })
     },
   )
 

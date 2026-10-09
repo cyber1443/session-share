@@ -116,7 +116,7 @@ const PLANNING_TOOLS = [
   'Read',
   'Grep',
   'Glob',
-  ...mcpTools('ss_propose', 'ss_tickets', 'ss_get_contract', 'ss_chat_post', 'ss_chat_read', 'ss_status'),
+  ...mcpTools('ss_propose', 'ss_tickets', 'ss_ticket_files', 'ss_get_contract', 'ss_chat_post', 'ss_chat_read', 'ss_status'),
 ]
 
 /**
@@ -155,6 +155,9 @@ const BUILDING_TOOLS = [
     'ss_ticket_verified',
     'ss_ticket_shipped',
     'ss_ship',
+    'ss_attach',
+    'ss_ticket_files',
+    'ss_worktree',
   ),
 ]
 
