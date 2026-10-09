@@ -973,13 +973,17 @@ describe('tickets', () => {
     )
   })
 
-  it('starts splitting the moment someone joins', async () => {
+  it('lets people join without starting anything, and splits when someone presses start', async () => {
     const { alice, bob, aliceId } = await twoDevSession('ticket-join')
     const { ticket } = await open(alice, 'Add due dates')
 
     const joined = await bob.send({ type: 'ticket.join', ticketId: ticket.id })
     assert.equal(joined.ticket.members.length, 2)
-    assert.equal(joined.plannerId, aliceId, 'the caller is told who was asked to split it')
+    assert.equal(joined.plannerId, null, 'joining sets no agent off')
+    assert.equal(joined.ticket.state, 'plan')
+
+    const started = await alice.send({ type: 'ticket.start', ticketId: ticket.id })
+    assert.equal(started.plannerId, aliceId, 'whoever pressed start splits it on their own checkout')
     await settle()
 
     const state = alice.eventsOfType('ticket.state').at(-1)
@@ -992,12 +996,14 @@ describe('tickets', () => {
     assert.deepEqual(directive.mentions, [aliceId], 'the split goes to someone with a checkout')
     assert.match(directive.body, new RegExp(ticket.id))
     assert.match(directive.body, /goes on the board for one of them to start/)
+    assert.match(directive.body, /for 2 person\(s\)/)
   })
 
   it('re-sends the request when asked again, instead of doing nothing', async () => {
     const { alice, bob, aliceId } = await twoDevSession('ticket-again')
     const { ticket } = await open(alice, 'Add due dates')
     await bob.send({ type: 'ticket.join', ticketId: ticket.id })
+    await alice.send({ type: 'ticket.start', ticketId: ticket.id })
     await settle()
     const first = alice.eventsOfType('chat.message').filter((e) => e.body.message.directive).length
 
@@ -1005,7 +1011,7 @@ describe('tickets', () => {
      * Pressing "ask again" while it is already splitting used to return early,
      * so the button did nothing while the card claimed an agent was working.
      */
-    const again = await bob.send({ type: 'ticket.start', ticketId: ticket.id })
+    const again = await alice.send({ type: 'ticket.start', ticketId: ticket.id })
     assert.equal(again.plannerId, aliceId)
     await settle()
 
@@ -1029,7 +1035,7 @@ describe('tickets', () => {
     assert.equal(again.plannerId, null, 'there is nothing to ask for; the split is on the board')
   })
 
-  it('splits alone when there is nobody else to wait for', async () => {
+  it('starts with only its author in it', async () => {
     const solo = await new TestClient(url).connect()
     await solo.send({
       type: 'session.create',
@@ -1047,7 +1053,9 @@ describe('tickets', () => {
       fromSeq: null,
     })
     const { ticket } = await open(solo, 'Just me')
-    assert.equal(ticket.state, 'splitting', 'waiting for a join that cannot come would deadlock')
+    assert.equal(ticket.state, 'plan', 'nothing starts until someone presses start')
+    const started = await solo.send({ type: 'ticket.start', ticketId: ticket.id })
+    assert.equal(started.ticket.state, 'splitting', 'one person is enough to start')
     await solo.close()
   })
 

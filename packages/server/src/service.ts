@@ -538,6 +538,10 @@ export class SessionService {
    * Anyone can open a ticket. The author is in it from the start, and everyone
    * else is told it exists -- as a message, not a directive, because joining is
    * a person's decision and hijacking their agent to make it is not an offer.
+   *
+   * Nothing starts on its own. The split is sized for whoever is in the ticket,
+   * so it waits in the plan column until someone presses start -- alone, or
+   * after the people who want in have joined.
    */
   private createTicket(
     command: Extract<ClientCommand, { type: 'ticket.create' }>,
@@ -560,27 +564,27 @@ export class SessionService {
     }
     this.emit(sessionId, participantId, { type: 'ticket.created', ticket })
 
-    let plannerId: ParticipantId | null = null
-    const others = [...state.participants.values()].filter((p) => p.id !== participantId)
-    const author = state.participants.get(participantId)?.displayName ?? 'Someone'
+    const author = state.participants.get(participantId)
+    const others = [...state.participants.values()].filter(
+      (p) => p.githubLogin.toLowerCase() !== author?.githubLogin.toLowerCase(),
+    )
     if (others.length > 0) {
       this.systemMessage(
         sessionId,
         participantId,
         others.map((p) => p.id),
-        `${author} opened "${ticket.title}". Join it on the board if you want in -- joining is all it takes, there is nothing to approve.`,
+        `${author?.displayName ?? 'Someone'} opened "${ticket.title}". Join it on the board if you want in; it is split for whoever is in it when someone presses start.`,
       )
-    } else {
-      // Nobody to wait for. Start splitting it immediately.
-      plannerId = this.beginSplit(sessionId, participantId, state, ticket)
     }
 
-    return { ticket: state.tickets.get(ticket.id)!, plannerId }
+    return { ticket: state.tickets.get(ticket.id)!, plannerId: null }
   }
 
   /**
    * Opting in. This is the consent step: no approval follows, so joining has to
-   * mean "I accept whatever split this produces for me".
+   * mean "I accept whatever split this produces for me". Joining a ticket still
+   * in the plan column only adds a member; the split starts when someone
+   * presses start, so a second person arriving does not set an agent off.
    */
   private joinTicket(
     command: Extract<ClientCommand, { type: 'ticket.join' }>,
@@ -597,17 +601,13 @@ export class SessionService {
       })
     }
 
-    let plannerId: ParticipantId | null = null
     const joined = this.requireTicket(state, command.ticketId)
-    if (joined.state === 'plan') {
-      // Somebody wants in, so there is now something to split.
-      plannerId = this.beginSplit(sessionId, participantId, state, joined)
-    } else if (joined.decompositionId) {
+    if (joined.state !== 'plan' && joined.decompositionId) {
       // Late to a ticket already being built: fold them into the assignment.
       this.rebalanceTicket(sessionId, participantId, state, joined)
     }
 
-    return { ticket: this.requireTicket(state, command.ticketId), plannerId }
+    return { ticket: this.requireTicket(state, command.ticketId), plannerId: null }
   }
 
   private leaveTicket(
@@ -735,7 +735,20 @@ export class SessionService {
      */
     const current = ticket.decompositionId
     if (current && state.validations.get(current)?.ok) return { ticket, plannerId: null }
-    const plannerId = this.beginSplit(sessionId, participantId, state, ticket)
+    // Starting a ticket is taking part in it; one person is enough.
+    if (!ticket.members.includes(participantId)) {
+      this.emit(sessionId, participantId, {
+        type: 'ticket.members',
+        ticketId: ticket.id,
+        members: [...ticket.members, participantId],
+      })
+    }
+    const plannerId = this.beginSplit(
+      sessionId,
+      participantId,
+      state,
+      this.requireTicket(state, command.ticketId),
+    )
     return { ticket: this.requireTicket(state, command.ticketId), plannerId }
   }
 
@@ -1010,9 +1023,35 @@ export class SessionService {
     state: SessionState,
     ticket: Ticket,
   ): ParticipantId | null {
-    const planner = ticket.members
-      .map((id) => state.participants.get(id))
-      .find((p) => p?.repoPath && this.isPresent(p))
+    /**
+     * Whoever pressed start splits it on their own machine if they can: from a
+     * board, that is a checkout of theirs that is in the ticket, or failing that
+     * one that is merely open. Only then is it handed to another member.
+     */
+    const actor = state.participants.get(actorId)
+    const login = actor?.githubLogin.toLowerCase()
+    const usable = (p: Participant | undefined): p is Participant =>
+      Boolean(p?.repoPath && this.isPresent(p))
+    const members = ticket.members.map((id) => state.participants.get(id)).filter(usable)
+    const mine = (p: Participant) => p.githubLogin.toLowerCase() === login
+    const ownOpen = [...state.participants.values()]
+      .filter(usable)
+      .filter(mine)
+      .sort((a, b) => Number(Boolean(this.autopilots.get(b.id))) - Number(Boolean(this.autopilots.get(a.id))))
+    const planner = (usable(actor) ? actor : undefined) ?? members.find(mine) ?? ownOpen[0] ?? members[0]
+    if (planner && !ticket.members.includes(planner.id)) {
+      this.emit(sessionId, actorId, {
+        type: 'ticket.members',
+        ticketId: ticket.id,
+        members: [...(state.tickets.get(ticket.id)?.members ?? ticket.members), planner.id],
+      })
+    }
+    // People, not seats: someone in it from a board and a checkout is one person.
+    const people = new Set(
+      (state.tickets.get(ticket.id)?.members ?? ticket.members).map(
+        (id) => state.participants.get(id)?.githubLogin.toLowerCase() ?? id,
+      ),
+    ).size
 
     if (!planner) {
       // Nobody in it can read the repo, so it stays where it is rather than
@@ -1032,7 +1071,7 @@ export class SessionService {
       actorId,
       [planner.id],
       [
-        `Split the ticket "${ticket.title}" for ${ticket.members.length} person(s).`,
+        `Split the ticket "${ticket.title}" for ${people} person(s).`,
         ticket.body ? `\n${ticket.body}` : '',
         '',
         'Read the repository, then call ss_propose with:',
