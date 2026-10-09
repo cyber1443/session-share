@@ -661,6 +661,16 @@ describe('autopilot', () => {
       true,
       'a failed run must leave the instruction for someone else',
     )
+
+    // The board heard that bob's Claude Code is open, and that a run started.
+    const { readPreferences } = await import('../dist/preferences.js')
+    const bob = readConfig(bobRepo)
+    const snapshot = app.service.snapshotOf(app.service.store.findSessionIdByRef(bob.sessionRef))
+    assert.equal(snapshot.autopilots[bob.participantId], readPreferences().autopilot)
+    assert.ok(
+      snapshot.chat.some((message) => /headless Claude is taking/.test(message.body)),
+      'a run says it has started, not only how it ended',
+    )
     delete process.env.SESSION_SHARE_REPO
   })
 })

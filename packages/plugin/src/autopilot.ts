@@ -269,6 +269,16 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
   const preferences = readPreferences()
   const today = new Date().toISOString().slice(0, 10)
 
+  /**
+   * Tells the board this Claude Code is open and what it will do with work
+   * handed to it. Without this a board can only say "it waits for them", which
+   * is wrong whenever an autopilot is about to take it. An older server refuses
+   * the command; that costs nothing.
+   */
+  await runCommand(config, { type: 'agent.heartbeat', autopilot: preferences.autopilot }).catch(
+    () => undefined,
+  )
+
   let inbox
   try {
     inbox = await readInbox(config, 2000)
@@ -310,6 +320,15 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
   }
 
   running = true
+  /**
+   * Said up front, because a split can take minutes and a board that shows
+   * nothing for that long looks exactly like an agent that never started.
+   */
+  await say(
+    config,
+    `Nobody is at this keyboard, so a headless Claude is taking ${waiting.length === 1 ? 'this' : `these ${waiting.length} instructions`} now${planningOnly ? ' (splitting)' : ''}.`,
+  )
+  await report(config, planningOnly ? 'planning' : 'working', planningOnly ? 'autopilot: splitting' : 'autopilot: working')
   try {
     /**
      * Run first, take second.
@@ -353,8 +372,14 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
     return { ran: true, ok: false, reason: String(error) }
   } finally {
     running = false
+    await report(config, 'idle', 'autopilot: idle')
   }
 }
+
+const report = (config: SessionConfig, state: 'idle' | 'planning' | 'working', detail: string) =>
+  runCommand(config, { type: 'activity.report', activity: { state, detail, taskId: null } }).catch(
+    () => undefined,
+  )
 
 const say = (config: SessionConfig, body: string) =>
   runCommand(config, { type: 'chat.post', body, taskRef: null, asAgent: true, directive: false }).catch(
