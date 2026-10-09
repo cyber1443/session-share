@@ -42,6 +42,8 @@ import {
 import { buildId } from './build.js'
 import { Store } from './db.js'
 import { ServiceError, SessionService, type AuthenticatedUser } from './service.js'
+import { GitHubReader } from './github.js'
+import { History } from './history.js'
 import { Gateway } from './ws.js'
 
 const STATUS: Record<ErrorCode, number> = {
@@ -136,6 +138,8 @@ export interface AppOptions {
    * a proxy between them.
    */
   webRoot?: string | null
+  /** Reads pull requests and Actions runs; injectable so a test never calls GitHub. */
+  github?: GitHubReader
 }
 
 export interface App {
@@ -173,6 +177,8 @@ export function createApp(options: AppOptions = {}): App {
     (sessionId, from, frame) => gateway.relayFrame(sessionId, from, frame),
   )
   gateway.attach(service)
+  const history = new History(store)
+  const github = options.github ?? new GitHubReader()
 
   const toAuthUser = (user: User): AuthenticatedUser => ({
     id: user.id,
@@ -477,30 +483,60 @@ export function createApp(options: AppOptions = {}): App {
   })
 
   /** Readable by a signed-in user or by an attached checkout's participant token. */
-  fastify.get('/sessions/:ref/snapshot', async (request, reply) => {
+  /**
+   * The session a read is for, once the caller has shown it may read it: a
+   * signed-in browser, or a token for this very session. Answers the refusal
+   * itself and returns null when it may not.
+   */
+  const readable = (request: FastifyRequest, reply: FastifyReply): SessionId | null => {
     const claims = bearerClaims(request)
     if (!claims && !currentUser(request)) {
-      return refuse(request, reply, {
+      void refuse(request, reply, {
         status: 401,
         body: { error: 'unauthorized', message: 'Sign in first.' },
       })
+      return null
     }
 
     const { ref } = request.params as { ref: string }
     const sessionId = store.findSessionIdByRef(ref)
     if (!sessionId) {
       const { error, reason, message } = TOKEN_REFUSALS.session_gone
-      return reply.code(404).send({ error, reason, message })
+      void reply.code(404).send({ error, reason, message })
+      return null
     }
     if (claims && claims.sessionId !== sessionId) {
-      return reply.code(403).send(OTHER_SESSION)
+      void reply.code(403).send(OTHER_SESSION)
+      return null
     }
     // Reading the session is being here: an agent that only polls is still present.
     if (claims) {
       if (via(claims) === 'checkout') service.worked(claims.participantId)
       else service.seen(claims.participantId)
     }
+    return sessionId
+  }
+
+  fastify.get('/sessions/:ref/snapshot', async (request, reply) => {
+    const sessionId = readable(request, reply)
+    if (!sessionId) return reply
     return service.snapshotOf(sessionId)
+  })
+
+  /** What happened over the whole project, and what each person's Claude spent on it. */
+  fastify.get('/sessions/:ref/history', async (request, reply) => {
+    const sessionId = readable(request, reply)
+    if (!sessionId) return reply
+    return history.read(sessionId)
+  })
+
+  /** Open pull requests and recent Actions runs for the session's repository. */
+  fastify.get('/sessions/:ref/github', async (request, reply) => {
+    const sessionId = readable(request, reply)
+    if (!sessionId) return reply
+    const session = service.state(sessionId).session
+    if (!session) return reply.code(404).send({ error: 'not_found' })
+    return github.status(session.repo)
   })
 
   // -- pairing a checkout --------------------------------------------------
