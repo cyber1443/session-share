@@ -59,6 +59,7 @@ async function claudeCode(repoPath) {
         SESSION_SHARE_PORT: String(PORT),
         SESSION_SHARE_LOGIN: 'alice',
         SESSION_SHARE_NO_OPEN: '1',
+        SESSION_SHARE_AUTOPILOT: 'off',
       },
     }),
   )

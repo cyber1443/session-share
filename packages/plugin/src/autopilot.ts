@@ -388,7 +388,12 @@ const say = (config: SessionConfig, body: string) =>
 
 /** Starts polling. Returns a stop function, and does nothing in a child run. */
 export function startAutopilot(): () => void {
-  if (process.env.SESSION_SHARE_AUTOPILOT === 'child') return () => undefined
+  /**
+   * `off` is for harnesses: a test that drives the plugin over MCP must never
+   * have it start a real headless Claude on someone's subscription.
+   */
+  const env = process.env.SESSION_SHARE_AUTOPILOT
+  if (env === 'child' || env === 'off') return () => undefined
 
   const timer = setInterval(() => void tickOnce(), POLL_MS)
   timer.unref?.()

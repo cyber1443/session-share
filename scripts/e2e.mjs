@@ -80,6 +80,8 @@ async function claudeCode(repoPath, home, login) {
         SESSION_SHARE_PORT: PORT,
         SESSION_SHARE_LOGIN: login,
         SESSION_SHARE_NO_OPEN: '1',
+        // Real `claude` is on PATH here; an idle seat must not spend tokens on it.
+        SESSION_SHARE_AUTOPILOT: 'off',
       },
     }),
   )
