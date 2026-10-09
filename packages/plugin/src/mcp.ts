@@ -18,6 +18,8 @@ import { readConfig, writeConfig, type SessionConfig } from './config.js'
 import { HOST_HEADER, ensureDaemon, hostKey, probe, publicUrlOverride, stopDaemon } from './daemon.js'
 import { describeDirectives, markCaughtUp, peekDirectives, pendingDirectives } from './inbox.js'
 import { startAutopilot } from './autopilot.js'
+import { LOG_BRANCH } from './mirror.js'
+import { catchUpFromMirror, mirrorOnce, restoreFromMirror, startMirror, type Restored } from './mirror-sync.js'
 import { boardUrl, openInBrowser } from './open.js'
 import {
   addWorktree,
@@ -297,10 +299,26 @@ export function createServer(): McpServer {
           return null
         }
       }
+      /**
+       * The repository remembers sessions this server has never seen: a new
+       * laptop, a wiped one, or the last host gone for good. Restoring comes
+       * before opening anything new, so hosting again means carrying on.
+       */
+      let restored: Restored | null = null
+      const restore = async () => {
+        restored = await restoreFromMirror(
+          root,
+          loopback,
+          remote ? { owner: remote.owner, name: remote.name } : null,
+          given?.trim() ? slug : null,
+        ).catch(() => null)
+        return restored?.invite ? { invite: restored.invite, resumed: true, slug: restored.slug } : null
+      }
       const attached = readConfig(root)
       const created =
         (given?.trim() ? null : await resume(attached?.sessionRef)) ??
         (given?.trim() ? null : await resume(slugify(basename(root)))) ??
+        (await restore()) ??
         (await open(slug)) ??
         (await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`)) ??
         null
@@ -313,6 +331,9 @@ export function createServer(): McpServer {
       if (!created.invite) {
         throw new Error('This server verifies identity with GitHub; use the board to invite people.')
       }
+      // A session this server had, but that another machine hosted on since.
+      const caughtUp = created.resumed && !restored ? await catchUpFromMirror(root, loopback, created.slug) : 0
+      const memory = restored as Restored | null
 
       // Everything a guest needs in one string: where to dial, how to get in,
       // and which server minted it so they can tell if they reached the wrong one.
@@ -346,6 +367,11 @@ export function createServer(): McpServer {
           created.resumed
             ? `Resumed hosting "${title}" as ${identity.displayName}.`
             : `Hosting "${title}" as ${identity.displayName}.`,
+          memory
+            ? `Restored from the repository's ${LOG_BRANCH} branch: ${memory.upToSeq + 1} events, last saved ${new Date(memory.updatedAt).toLocaleString()}. Everyone else re-joins with the invite below and gets their own seat and tasks back.`
+            : caughtUp > 0
+              ? `Caught up ${caughtUp} event(s) from the ${LOG_BRANCH} branch that happened while this server was away.`
+              : '',
           '',
           'Send your teammate this line:',
           `  /ss:join ${packed}`,
@@ -523,15 +549,22 @@ export function createServer(): McpServer {
     'ss_stop_host',
     {
       description:
-        'Stop the coordination server running on this machine. Everyone loses the session until it is started again; the event log survives.',
+        'Stop the coordination server running on this machine. The session is saved to the repository first, so /ss:host on this or any other machine carries on from where it stopped.',
       inputSchema: {},
     },
-    async () =>
-      text(
+    async () => {
+      // Saved first: whoever hosts next, here or elsewhere, starts from this.
+      const attached = readConfig(await repoRoot(REPO_ROOT))
+      const saved = attached ? await mirrorOnce(attached).catch(() => null) : null
+      const note = saved?.pushed
+        ? ` The session is saved on the ${LOG_BRANCH} branch; /ss:host on any machine picks it up from there.`
+        : ''
+      return text(
         (await stopDaemon()) === 'stopped'
-          ? 'Stopped.'
-          : 'Nothing was running. (Any stale record of one has been cleared.)',
-      ),
+          ? `Stopped.${note}`
+          : `Nothing was running. (Any stale record of one has been cleared.)${note}`,
+      )
+    },
   )
 
   server.registerTool(
@@ -1188,6 +1221,7 @@ if (isEntrypoint) {
    * alive between turns a session stops the moment someone steps away.
    */
   startAutopilot()
+  startMirror()
   process.stderr.write('[session-share] mcp server ready\n')
 }
 

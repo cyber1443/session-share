@@ -39,6 +39,13 @@ export const Preferences = z.object({
   autopilot: z.enum(['off', 'splits', 'full']).default('full'),
   /** Tokens per day this machine may spend unattended. */
   autopilotBudget: z.number().int().min(0).default(1_000_000),
+  /**
+   * Whether this checkout copies the session's event log to the repository's
+   * `session-share/log` branch, so the session outlives the machine hosting it.
+   * Everything the board shows goes there, the room included -- on a public
+   * repository, that is public.
+   */
+  mirror: z.boolean().default(true),
   /** Set once the setup questions have been answered. */
   configured: z.boolean().default(false),
 })
@@ -73,6 +80,7 @@ export function describePreferences(preferences: Preferences): string {
     `hosting:  ${preferences.expose === 'lan' ? 'reachable on your local network' : 'this machine only'}`,
     `board:    ${preferences.openBoard ? 'opens in your browser on host and join' : 'never opened for you'}`,
     `room:     ${preferences.acceptDirectives ? 'directives from the room run in this session' : 'read-only; nothing from the room reaches your agent'}`,
+    `memory:   ${preferences.mirror ? 'the session log is saved to the repo\'s session-share/log branch, so it survives this machine' : 'the session lives only on the hosting machine'}`,
     `autopilot: ${
       preferences.autopilot === 'off'
         ? 'off — queued work waits for you'

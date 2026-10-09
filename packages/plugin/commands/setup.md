@@ -14,5 +14,6 @@ Call `ss_settings` with no arguments first and show them what is currently set. 
 5. **Hosting reach.** `lan` lets a teammate on the same network connect. `loopback` is this machine only, and needs a tunnel for anyone else.
 6. **Opening the board.** On, hosting or joining opens the live board in their browser.
 7. **Letting the room drive this agent.** On, a message sent from the board in `run` mode is delivered here and acted on. Off, the room is read-only for them.
+8. **Saving the session to the repository.** On, the session's event log -- tickets, splits, tasks, the room, usage -- is pushed to the repository's `session-share/log` branch every couple of minutes and when the host stops, so `/ss:host` on any machine carries on where it left off. Off, it lives only on the hosting machine. Say plainly that on a public repository the room's messages become public too.
 
 The cautious options are not all the defaults: autopilot ships on, because a session that stops whenever someone steps away is the problem this exists to solve. Everything else errs toward doing less.

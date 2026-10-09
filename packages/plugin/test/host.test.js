@@ -45,7 +45,7 @@ function repo(parent) {
   return dir
 }
 
-async function claudeCode(repoPath) {
+async function claudeCode(repoPath, stateHome = home) {
   const client = new Client({ name: 'host-test', version: '1' })
   await client.connect(
     new StdioClientTransport({
@@ -55,11 +55,12 @@ async function claudeCode(repoPath) {
       env: {
         ...process.env,
         SESSION_SHARE_REPO: repoPath,
-        SESSION_SHARE_HOME: home,
+        SESSION_SHARE_HOME: stateHome,
         SESSION_SHARE_PORT: String(PORT),
         SESSION_SHARE_LOGIN: 'alice',
         SESSION_SHARE_NO_OPEN: '1',
         SESSION_SHARE_AUTOPILOT: 'off',
+        SESSION_SHARE_MIRROR: 'off',
       },
     }),
   )
@@ -108,5 +109,43 @@ describe('re-hosting a session from before the slug changed', () => {
     const again = await (await claudeCode(legacy))('ss_host', { expose: 'loopback' })
     assert.match(again, /^Resumed/)
     assert.equal(sessionOf(legacy), original)
+  })
+})
+
+/**
+ * The repository is the session's memory. Stopping saves the log to it, and
+ * hosting on a machine whose server has never seen the session -- here, a
+ * fresh state directory with its own database and signing key -- carries on
+ * from it rather than starting an empty one.
+ */
+describe('a session that outlives its host', () => {
+  it('is saved on stop and restored on a fresh server', async () => {
+    const remote = join(scratch, 'origin.git')
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote])
+    const project = repo('outlives')
+    execFileSync('git', ['remote', 'add', 'origin', remote], { cwd: project })
+    execFileSync('git', ['push', '-q', 'origin', 'main'], { cwd: project })
+
+    const first = await claudeCode(project)
+    assert.match(await first('ss_host', { expose: 'loopback', title: 'outlives' }), /^Hosting/)
+    await first('ss_ticket_create', { title: 'Remember me' })
+    const original = sessionOf(project)
+    assert.match(await first('ss_stop_host'), /saved on the session-share\/log branch/)
+    assert.match(execFileSync('git', ['ls-remote', '--heads', remote], { encoding: 'utf8' }), /session-share\/log/)
+
+    // A new machine, as far as the server can tell: no database, no key, no config.
+    const elsewhere = join(scratch, 'home-elsewhere')
+    mkdirSync(elsewhere)
+    rmSync(join(project, '.session-share'), { recursive: true, force: true })
+    const second = await claudeCode(project, elsewhere)
+    const hosted = await second('ss_host', { expose: 'loopback' })
+    assert.match(hosted, /Restored from the repository/, hosted)
+    assert.equal(sessionOf(project), original)
+    assert.match(await second('ss_tickets'), /Remember me/)
+    assert.equal(
+      execFileSync('git', ['status', '--porcelain'], { cwd: project, encoding: 'utf8' }).replace(/.*\.session-share.*\n?/g, ''),
+      '',
+      'mirroring never touches the working tree',
+    )
   })
 })

@@ -9,6 +9,8 @@ Host a session for: **$ARGUMENTS**
 1. Call `ss_host` with that as the title. Pass `issueRef` if the argument is or contains an issue URL. It starts a coordination server on this machine if one is not already running, creates the session for this repository, and attaches this checkout.
 2. Show them the `/ss:join ssx_…` line to send. The board opens in their browser automatically.
 
+If `ss_host` says it restored the session from the repository, tell them plainly: this machine's server had never seen it, so it was rebuilt from the `session-share/log` branch and everyone carries on where they were once they re-join with the new invite.
+
 If `ss_host` reports that the address is loopback, say so plainly rather than handing over the invite: an invite minted from a loopback-bound server names *the recipient's* machine, so it fails on every machine but this one.
 
 Tell them plainly what is now exposed: with the default `expose: "lan"` the server listens on their local network, and anyone holding the invite can join. Nobody without it can. If they are on an untrusted network, re-run with `expose: "loopback"` and use a tunnel.

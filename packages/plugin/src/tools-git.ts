@@ -47,7 +47,7 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
     'ss_settings',
     {
       description:
-        'Read or change how session-share touches this machine: whether queued work runs itself while you are idle (autopilot) and what it may spend, when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, and whether the room can drive this agent.',
+        'Read or change how session-share touches this machine: whether queued work runs itself while you are idle (autopilot) and what it may spend, when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, whether the room can drive this agent, and whether the session log is saved to the repository (mirror).',
       inputSchema: {
         commitPolicy: z.enum(['explicit', 'auto-on-green']).nullish(),
         push: z.boolean().nullish(),
@@ -57,6 +57,7 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
         acceptDirectives: z.boolean().nullish(),
         autopilot: z.enum(['off', 'splits', 'full']).nullish(),
         autopilotBudget: z.number().int().min(0).nullish(),
+        mirror: z.boolean().nullish(),
       },
     },
     async (input) => {
