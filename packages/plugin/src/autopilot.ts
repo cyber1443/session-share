@@ -6,7 +6,7 @@ import type { ChatMessage } from '@session-share/protocol'
 import { runCommand } from './client.js'
 import { readConfig, type SessionConfig } from './config.js'
 import { acknowledge, describeDirectives, readInbox } from './inbox.js'
-import { isBusy } from './busy.js'
+import { isBusy, markAutopilot } from './busy.js'
 import { readPreferences, TERSE_STYLE, type Preferences } from './preferences.js'
 
 /**
@@ -27,10 +27,24 @@ import { readPreferences, TERSE_STYLE, type Preferences } from './preferences.js
  * a person -- the file leases, the validator, the verify step -- applies here
  * unchanged, because it is the same plugin in the same repository.
  */
-const POLL_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_POLL_MS ?? 20_000)
+/**
+ * Often, because every second between "handed over" and "started" is a second
+ * a session stands still. A poll is one small local request.
+ */
+const POLL_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_POLL_MS ?? 5_000)
 
-/** Long enough that a turn already in flight wins the race and this never starts. */
-const IDLE_GRACE_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_GRACE_MS ?? 25_000)
+/**
+ * None by default. A turn in flight is already known from the busy marker,
+ * and it takes the instruction itself when it ends; an idle terminal will not
+ * take it until someone types, which is exactly the wait this removes.
+ */
+const IDLE_GRACE_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_GRACE_MS ?? 0)
+
+/** After the account runs out of usage, how long before trying again. */
+const LIMIT_BACKOFF_MS = 30 * 60 * 1000
+
+/** What Claude Code says when an account has nothing left to spend. */
+const LIMIT_PATTERN = /spend limit|usage limit|rate limit|limit reached|hit your .*limit|credit balance|out of (credits|usage)|quota/i
 
 function stateDir(): string {
   return process.env.SESSION_SHARE_HOME ?? join(homedir(), '.session-share')
@@ -148,6 +162,8 @@ const isPlanning = (messages: ChatMessage[]) =>
   messages.every((message) => /ss_propose|Split the ticket/.test(message.body))
 
 let running = false
+/** Until when this account is out of usage, as far as this process knows. */
+let limitedUntil = 0
 /** When this process first saw each waiting directive. */
 const firstSeen = new Map<string, number>()
 /** After a failed run, stop hammering: the next one will fail the same way. */
@@ -169,6 +185,8 @@ export interface RunResult {
   ok: boolean
   code: number | null
   detail: string
+  /** The account is out of usage; retrying soon will fail the same way. */
+  limited?: boolean
 }
 
 /**
@@ -181,7 +199,10 @@ export interface RunResult {
  * is the agent looking around; it proposed the split anyway, and calling that
  * a failure left the instruction to be run all over again.
  */
-export function readOutcome(stdout: string, allowed?: readonly string[]): { ok: boolean; detail: string } {
+export function readOutcome(
+  stdout: string,
+  allowed?: readonly string[],
+): { ok: boolean; detail: string; limited?: boolean } {
   const line = stdout.trim().split('\n').at(-1) ?? ''
   try {
     const result = JSON.parse(line) as {
@@ -194,7 +215,12 @@ export function readOutcome(stdout: string, allowed?: readonly string[]): { ok: 
       .map((denial) => denial.tool_name ?? 'a tool')
       .filter((tool) => !allowed || allowed.includes(tool))
     if (result.is_error || (result.subtype && result.subtype !== 'success')) {
-      return { ok: false, detail: `the run ended with ${result.subtype ?? 'an error'}: ${(result.result ?? '').slice(0, 200)}` }
+      const said = (result.result ?? '').slice(0, 200)
+      return {
+        ok: false,
+        detail: `the run ended with ${result.subtype ?? 'an error'}: ${said}`,
+        limited: LIMIT_PATTERN.test(said),
+      }
     }
     if (denied.length > 0) {
       return { ok: false, detail: `it was not allowed to use ${[...new Set(denied)].join(', ')}` }
@@ -250,6 +276,7 @@ function runHeadless(
       log(`exit ${code}\n${outcome.detail}\n${tail}`)
       resolve({
         ok: code === 0 && outcome.ok,
+        limited: outcome.limited || LIMIT_PATTERN.test(tail),
         code,
         detail: (outcome.ok ? '' : outcome.detail) || tail.trim().split('\n').slice(-3).join(' ').slice(0, 300),
       })
@@ -282,9 +309,14 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
    * is wrong whenever an autopilot is about to take it. An older server refuses
    * the command; that costs nothing.
    */
-  await runCommand(config, { type: 'agent.heartbeat', autopilot: preferences.autopilot }).catch(
-    () => undefined,
-  )
+  await runCommand(config, {
+    type: 'agent.heartbeat',
+    autopilot: preferences.autopilot,
+    limited: Date.now() < limitedUntil,
+  }).catch(() => undefined)
+  if (Date.now() < limitedUntil) {
+    return { ran: false, ok: false, reason: 'this account is out of usage for now' }
+  }
 
   let inbox
   try {
@@ -327,6 +359,7 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
   }
 
   running = true
+  markAutopilot(config.repoPath, true)
   /**
    * Said up front, because a split can take minutes and a board that shows
    * nothing for that long looks exactly like an agent that never started.
@@ -336,6 +369,8 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
     `Nobody is at this keyboard, so a headless Claude is taking ${waiting.length === 1 ? 'this' : `these ${waiting.length} instructions`} now${planningOnly ? ' (splitting)' : ''}.`,
   )
   await report(config, planningOnly ? 'planning' : 'working', planningOnly ? 'autopilot: splitting' : 'autopilot: working')
+  // The board's "now": the instruction itself, not the header every one of them starts with.
+  await runCommand(config, { type: 'agent.doing', text: `autopilot: ${headline(waiting)}` }).catch(() => undefined)
   try {
     /**
      * Run first, take second.
@@ -353,6 +388,23 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
       options.command ?? 'claude',
     )
 
+    if (!result.ok && result.limited) {
+      limitedUntil = Date.now() + LIMIT_BACKOFF_MS
+      const until = new Date(limitedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      await runCommand(config, {
+        type: 'agent.heartbeat',
+        autopilot: preferences.autopilot,
+        limited: true,
+      }).catch(() => undefined)
+      await runCommand(config, { type: 'agent.doing', text: `out of usage -- trying again at ${until}` }).catch(
+        () => undefined,
+      )
+      await say(
+        config,
+        `This account is out of usage, so nothing more will run here until about ${until}. What was waiting on it has been handed to whoever can take it.`,
+      )
+      return { ran: true, ok: false, reason: 'out of usage' }
+    }
     if (!result.ok) {
       failedUntil = Date.now() + FAILURE_BACKOFF_MS
       await say(
@@ -379,6 +431,7 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
     return { ran: true, ok: false, reason: String(error) }
   } finally {
     running = false
+    markAutopilot(config.repoPath, false)
     await report(config, 'idle', 'autopilot: idle')
   }
 }
@@ -387,6 +440,13 @@ const report = (config: SessionConfig, state: 'idle' | 'planning' | 'working', d
   runCommand(config, { type: 'activity.report', activity: { state, detail, taskId: null } }).catch(
     () => undefined,
   )
+
+/** The first line someone actually wrote, across the waiting instructions. */
+export function headline(messages: ChatMessage[]): string {
+  const first = messages[0]?.body.split('\n').find((line) => line.trim()) ?? 'an instruction'
+  const more = messages.length > 1 ? ` (+${messages.length - 1} more)` : ''
+  return `${first.trim().slice(0, 150)}${more}`
+}
 
 const say = (config: SessionConfig, body: string) =>
   runCommand(config, { type: 'chat.post', body, taskRef: null, asAgent: true, directive: false }).catch(

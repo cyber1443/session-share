@@ -3,7 +3,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import type { SessionSnapshot } from '@session-share/protocol'
 import { readConfig, type SessionConfig } from './config.js'
 import { runCommand } from './client.js'
-import { markBusy, markIdle } from './busy.js'
+import { isAutopilotRunning, markBusy, markIdle } from './busy.js'
 import { describeDirectives, pendingDirectives } from './inbox.js'
 import { readPreferences, TERSE_STYLE } from './preferences.js'
 import { usageSince } from './usage.js'
@@ -189,6 +189,8 @@ export async function collectRoom(input: HookInput): Promise<string | null> {
    * or run them twice; the autopilot moves the cursor itself when it is done.
    */
   if (process.env.SESSION_SHARE_AUTOPILOT === 'child') return null
+  // A headless run in this checkout already has them; it moves the cursor when it is done.
+  if (isAutopilotRunning(config.repoPath)) return null
 
   let pending
   try {
@@ -255,12 +257,10 @@ export async function route(
         const config = readConfig(input.cwd ?? process.cwd())
         if (config) markBusy(config.repoPath)
       }
-      if (event === 'UserPromptSubmit') {
+      // An autopilot run says what it is on itself, from the instruction rather than its wrapper.
+      if (event === 'UserPromptSubmit' && process.env.SESSION_SHARE_AUTOPILOT !== 'child') {
         const first = (input.prompt ?? '').split('\n').find((line) => line.trim()) ?? ''
-        await reportDoing(
-          input,
-          process.env.SESSION_SHARE_AUTOPILOT === 'child' ? `autopilot: ${first}` : `on: ${first}`,
-        )
+        await reportDoing(input, `on: ${first}`)
       }
       const room = await collectRoom(input)
       // Said once when a session starts (and again after a compaction), not on every prompt.

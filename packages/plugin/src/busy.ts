@@ -34,6 +34,35 @@ export function markIdle(repoPath: string): void {
   rmSync(marker(repoPath), { force: true })
 }
 
+/**
+ * The other direction: a headless autopilot run is working in this checkout.
+ * The interactive session must not be handed the same instructions while it
+ * is, or two agents would be editing one working tree.
+ */
+const autopilotMarker = (repoPath: string) => `${marker(repoPath)}.autopilot`
+
+export function markAutopilot(repoPath: string, running: boolean): void {
+  try {
+    const path = autopilotMarker(repoPath)
+    if (!running) {
+      rmSync(path, { force: true })
+      return
+    }
+    mkdirSync(join(path, '..'), { recursive: true })
+    writeFileSync(path, `${process.pid}\n`)
+  } catch {
+    // Best effort.
+  }
+}
+
+export function isAutopilotRunning(repoPath: string): boolean {
+  try {
+    return Date.now() - statSync(autopilotMarker(repoPath)).mtimeMs < MAX_TURN_MS
+  } catch {
+    return false
+  }
+}
+
 export function isBusy(repoPath: string): boolean {
   try {
     return Date.now() - statSync(marker(repoPath)).mtimeMs < MAX_TURN_MS

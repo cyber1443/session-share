@@ -698,3 +698,24 @@ describe('what the board is told a shell command was', () => {
     assert.match(redact('npm test -- src/board'), /npm test -- src\/board/, 'ordinary commands read as they are')
   })
 })
+
+describe('an autopilot run that hits the usage limit', () => {
+  it('is told apart from one that failed, so it backs off instead of retrying', async () => {
+    const { readOutcome, headline } = await import('../dist/autopilot.js')
+    const limited = JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      result: "You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit",
+    })
+    assert.equal(readOutcome(limited).ok, false)
+    assert.equal(readOutcome(limited).limited, true)
+    const broken = JSON.stringify({ type: 'result', subtype: 'error_max_turns', is_error: true, result: 'ran out of turns' })
+    assert.equal(readOutcome(broken).limited, false)
+
+    assert.equal(
+      headline([{ body: '\nThe contract landed on ss/x/contract. Your task is claimable now.' }, { body: 'x' }]),
+      'The contract landed on ss/x/contract. Your task is claimable now. (+1 more)',
+    )
+  })
+})
