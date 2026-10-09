@@ -4,6 +4,9 @@ import { useState } from 'react'
 import type { Participant, SessionSnapshot, Ticket } from '@session-share/protocol'
 import { tokens } from '@/lib/tokens'
 import { ago, isBusy } from '@/lib/now'
+import { api } from '@/lib/api'
+import { usePoll } from '@/lib/poll'
+import { PullCard } from './pull'
 
 const DOT = [
   'bg-emerald-400',
@@ -38,6 +41,7 @@ const STATE_COLOUR: Record<string, string> = {
 export function TicketPanel({
   ticket,
   snapshot,
+  slug,
   meId,
   activity,
   onClose,
@@ -51,6 +55,8 @@ export function TicketPanel({
 }: {
   ticket: Ticket
   snapshot: SessionSnapshot
+  /** The session, for reading and merging its pull request. */
+  slug: string
   meId: string | null
   activity: Record<string, string>
   onClose: () => void
@@ -118,7 +124,7 @@ export function TicketPanel({
           <h2 className="text-sm leading-snug text-neutral-200">{ticket.title}</h2>
           <p className="mt-1 text-[10px] uppercase tracking-wider text-mute">
             {ticket.state}
-            {ticket.prNumber ? ` · PR #${ticket.prNumber} open` : ''}
+            {ticket.prNumber ? ` · PR #${ticket.prNumber} ${ticket.mergedAt ? 'merged' : 'open'}` : ''}
           </p>
         </div>
         <button className="text-mute hover:text-neutral-300" onClick={onClose}>
@@ -128,16 +134,15 @@ export function TicketPanel({
 
       {ticket.body ? <p className="leading-relaxed text-neutral-400">{ticket.body}</p> : null}
 
-      {ticket.prNumber ? (
+      {ticket.prNumber && ticket.mergedAt ? (
         <div className="panel space-y-1 p-3">
-          <p className="text-[10px] uppercase tracking-wider text-accent">
-            Pull request #{ticket.prNumber}
+          <p className="text-[10px] uppercase tracking-wider text-emerald-400">
+            Pull request #{ticket.prNumber} merged
           </p>
-          <p className="leading-relaxed text-mute">
-            Open, and staying open. Nothing here merges anything — review it and merge it yourself
-            when you are happy with it.
-          </p>
+          <p className="leading-relaxed text-mute">Done {new Date(ticket.mergedAt).toLocaleString()}.</p>
         </div>
+      ) : ticket.prNumber ? (
+        <TicketPull slug={slug} number={ticket.prNumber} title={ticket.title} />
       ) : null}
 
       {/* What this ticket has cost, and on whose account. */}
@@ -606,5 +611,30 @@ function SplitWait({
       Handed to {whose} Claude Code. It runs on that session&apos;s next turn, or headlessly if its
       autopilot is on.
     </>
+  )
+}
+
+/**
+ * The ticket's pull request, read from GitHub, with the merge button. Merging
+ * moves the ticket to done; so does merging it on GitHub, the next time the
+ * board looks.
+ */
+function TicketPull({ slug, number, title }: { slug: string; number: number; title: string }) {
+  const { data, error, reload } = usePoll(() => api.github(slug), 60_000, `${slug}#${number}`)
+  const pull = data?.pulls.find((p) => p.number === number)
+  if (pull) return <PullCard slug={slug} pull={pull} onMerged={reload} />
+  return (
+    <div className="panel space-y-1 p-3">
+      <p className="text-[10px] uppercase tracking-wider text-accent">Pull request #{number}</p>
+      <p className="leading-relaxed text-mute">
+        {error
+          ? `Could not read it from GitHub: ${error}`
+          : data?.error
+            ? data.error
+            : data
+              ? `Not open any more -- if it was merged, "${title}" moves to done in a moment.`
+              : 'Reading it from GitHub…'}
+      </p>
+    </div>
   )
 }

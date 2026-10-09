@@ -167,18 +167,30 @@ export interface UsageDay {
   turns: number
 }
 
+export interface PullSummary {
+  number: number
+  title: string
+  author: string
+  url: string
+  draft: boolean
+  headRef: string
+  baseRef: string
+  updatedAt: string
+  createdAt?: string
+  body?: string
+  additions?: number
+  deletions?: number
+  changedFiles?: number
+  commits?: number
+  mergeable?: string
+  reviewDecision?: string | null
+  checks?: string | null
+  labels?: string[]
+}
+
 export interface GitHubStatus {
   repo: string | null
-  pulls: Array<{
-    number: number
-    title: string
-    author: string
-    url: string
-    draft: boolean
-    headRef: string
-    baseRef: string
-    updatedAt: string
-  }>
+  pulls: PullSummary[]
   runs: Array<{
     id: number
     workflow: string
@@ -230,6 +242,11 @@ export const api = {
   history: (ref: string) =>
     request<{ entries: HistoryEntry[]; usage: UsageDay[] }>(`/sessions/${ref}/history`),
   github: (ref: string) => request<GitHubStatus>(`/sessions/${ref}/github`),
+  merge: (ref: string, number: number, method: 'merge' | 'squash' | 'rebase') =>
+    request<{ merged: boolean; sha: string | null; message: string }>(`/sessions/${ref}/github/merge`, {
+      method: 'POST',
+      body: JSON.stringify({ number, method }),
+    }),
   joinToken: (ref: string) =>
     request<{ token: string; expiresAt: number; command: string }>(
       `/api/sessions/${ref}/join-token`,

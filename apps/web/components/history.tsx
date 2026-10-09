@@ -170,7 +170,7 @@ export function Stat({ label, value }: { label: string; value: string | number }
 
 function tone(entry: HistoryEntry): string {
   if (entry.type === 'merge.conflict' || entry.ok === false) return 'text-red-400'
-  if (entry.type === 'ticket.shipped' || (entry.type === 'task.state' && entry.state === 'merged')) {
+  if (entry.type === 'ticket.shipped' || entry.type === 'ticket.merged' || (entry.type === 'task.state' && entry.state === 'merged')) {
     return 'text-emerald-400'
   }
   return 'text-neutral-300'
@@ -198,6 +198,8 @@ function describe(
       return `${ticket} shipped${entry.prNumber ? ` as PR #${entry.prNumber}` : ''}`
     case 'ticket.deleted':
       return `${who} deleted ${ticket}`
+    case 'ticket.merged':
+      return `${ticket} merged as PR #${entry.prNumber} -- done`
     case 'decomposition.proposed':
       return `${who} proposed a ${entry.tasks?.length ?? 0}-task split for ${ticket}${entry.ok ? '' : ' (the validator refused it)'}`
     case 'contract.committed':

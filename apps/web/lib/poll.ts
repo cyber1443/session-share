@@ -10,6 +10,8 @@ import { useEffect, useState } from 'react'
 export function usePoll<T>(read: () => Promise<T>, everyMs: number, key: string) {
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** Bumped to read again now, e.g. right after a merge. */
+  const [nonce, setNonce] = useState(0)
 
   useEffect(() => {
     let live = true
@@ -31,7 +33,7 @@ export function usePoll<T>(read: () => Promise<T>, everyMs: number, key: string)
     }
     // `read` is rebuilt every render; `key` is what actually changes what it reads.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, everyMs])
+  }, [key, everyMs, nonce])
 
-  return { data, error }
+  return { data, error, reload: () => setNonce((n) => n + 1) }
 }

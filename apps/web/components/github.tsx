@@ -1,16 +1,9 @@
 'use client'
 
+import type { SessionSnapshot } from '@session-share/protocol'
 import { api } from '@/lib/api'
+import { PullCard, ago as agoIso } from './pull'
 import { usePoll } from '@/lib/poll'
-
-function ago(iso: string): string {
-  const minutes = Math.round((Date.now() - new Date(iso).getTime()) / 60_000)
-  if (minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.round(minutes / 60)
-  if (hours < 48) return `${hours}h ago`
-  return `${Math.round(hours / 24)}d ago`
-}
 
 function runTone(status: string, conclusion: string | null): { label: string; className: string } {
   if (status !== 'completed') return { label: status.replace('_', ' '), className: 'text-amber-400' }
@@ -25,8 +18,8 @@ function runTone(status: string, conclusion: string | null): { label: string; cl
  * The repository as GitHub sees it: what is waiting for review and whether CI
  * is green. Read by the server with its own GitHub sign-in, once a minute.
  */
-export function GitHubView({ slug }: { slug: string }) {
-  const { data, error } = usePoll(() => api.github(slug), 60_000, slug)
+export function GitHubView({ slug, snapshot }: { slug: string; snapshot: SessionSnapshot }) {
+  const { data, error, reload } = usePoll(() => api.github(slug), 60_000, slug)
 
   if (!data) {
     return <p className="p-6 text-xs text-mute">{error ? `Could not reach GitHub: ${error}` : 'asking GitHub…'}</p>
@@ -44,35 +37,23 @@ export function GitHubView({ slug }: { slug: string }) {
             'no repository'
           )}
         </p>
-        <p className="text-[10px] text-mute">updated {ago(new Date(data.fetchedAt).toISOString())}</p>
+        <p className="text-[10px] text-mute">updated {agoIso(new Date(data.fetchedAt).toISOString())}</p>
       </div>
       {data.error ? <p className="mt-3 text-amber-400">{data.error}</p> : null}
 
       <p className="mt-5 text-[10px] uppercase tracking-wider text-mute">
         Open pull requests · {data.pulls.length}
       </p>
-      <div className="mt-2 space-y-1">
+      <div className="mt-2 space-y-2">
         {data.pulls.length === 0 && !data.error ? <p className="text-mute">None open.</p> : null}
         {data.pulls.map((pull) => (
-          <a
+          <PullCard
             key={pull.number}
-            href={pull.url}
-            target="_blank"
-            rel="noreferrer"
-            className="panel flex items-baseline gap-3 px-3 py-2 hover:border-neutral-500"
-          >
-            <span className="w-10 shrink-0 text-mute">#{pull.number}</span>
-            <span className="min-w-0 flex-1 truncate text-neutral-200">
-              {pull.title}
-              {pull.draft ? <span className="ml-2 text-mute">draft</span> : null}
-            </span>
-            <span className="hidden shrink-0 truncate text-mute md:inline">
-              {pull.headRef} → {pull.baseRef}
-            </span>
-            <span className="shrink-0 text-mute">
-              {pull.author} · {ago(pull.updatedAt)}
-            </span>
-          </a>
+            slug={slug}
+            pull={pull}
+            ticketTitle={snapshot.tickets.find((t) => t.prNumber === pull.number)?.title ?? null}
+            onMerged={reload}
+          />
         ))}
       </div>
 
@@ -95,7 +76,7 @@ export function GitHubView({ slug }: { slug: string }) {
               <span className="w-24 shrink-0 truncate text-mute">{item.workflow}</span>
               <span className="min-w-0 flex-1 truncate text-neutral-200">{item.title}</span>
               <span className="hidden shrink-0 truncate text-mute md:inline">{item.branch}</span>
-              <span className="shrink-0 text-mute">{ago(item.createdAt)}</span>
+              <span className="shrink-0 text-mute">{agoIso(item.createdAt)}</span>
             </a>
           )
         })}

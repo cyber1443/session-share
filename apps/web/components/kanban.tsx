@@ -30,11 +30,11 @@ const COLUMNS: Array<{ states: TicketState[]; label: string; hint: string }> = [
   { states: ['building'], label: 'building', hint: 'tasks in flight' },
   { states: ['verify'], label: 'verify', hint: 'run it for real' },
   /**
-   * Review is the end. Merging is a person's call, so a ticket sits here with
-   * its PR open until someone decides -- there is nothing after that this can
-   * honestly claim to know about.
+   * Merging is a person's call -- from the ticket, the GitHub tab, or GitHub
+   * itself. Until someone makes it the ticket waits here with its PR open.
    */
-  { states: ['review', 'done'], label: 'review', hint: 'PR open — yours to merge' },
+  { states: ['review'], label: 'review', hint: 'PR open — yours to merge' },
+  { states: ['done'], label: 'done', hint: 'merged' },
 ]
 
 export function Kanban({
