@@ -292,13 +292,15 @@ try {
   const room = (await aliceBoardEarly.snapshot()).chat.at(-1)
   check(/Join it on the board/.test(room?.body ?? ''), 'the invitation is in the room')
 
-  say('Alice joins it, which is the whole agreement')
+  say('Alice joins it, which is the whole agreement; Bob starts it when ready')
   const joinedTicket = await aliceBoardEarly.command({
     type: 'ticket.join',
     ticketId: opened.ticket.id,
   })
   check(joinedTicket.ticket.members.length === 2, 'both are in')
-  check(joinedTicket.ticket.state === 'splitting', 'and it starts splitting itself')
+  check(joinedTicket.ticket.state === 'plan', 'and joining alone starts nothing')
+  const startedTicket = await bobBoard.command({ type: 'ticket.start', ticketId: opened.ticket.id })
+  check(startedTicket.ticket.state === 'splitting', 'pressing start is what splits it')
 
   // The author's agent does the splitting: they wrote the ticket, so they know
   // what it meant.

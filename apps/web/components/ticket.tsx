@@ -195,13 +195,12 @@ export function TicketPanel({
       {ticket.state === 'plan' ? (
         <div className="panel space-y-2 p-3">
           <p className="leading-relaxed text-neutral-300">
-            Waiting for someone to join. Joining starts the split.
+            Nothing happens until someone presses start. The split is sized for whoever is in
+            the ticket, so let anyone who wants in join first — one person is enough.
           </p>
-          {mine ? (
-            <button className="btn w-full" onClick={() => void onStart()}>
-              split it now
-            </button>
-          ) : null}
+          <button className="btn btn-accent w-full" disabled={!meId} onClick={() => void onStart()}>
+            {mine ? 'start' : 'join and start'}
+          </button>
         </div>
       ) : null}
 

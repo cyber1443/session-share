@@ -117,7 +117,7 @@ function splitHint(
   }
   if (plannerId) return 'Someone else was asked to split it; it appears on the board when they do.'
   if (ticket.state === 'plan') {
-    return 'The others have been told. It starts splitting when one of them joins, or when you run ss_ticket_start.'
+    return 'The others have been told and can join. Nothing is split until someone runs ss_ticket_start (or presses start on the board) -- alone is fine.'
   }
   return ''
 }
@@ -671,7 +671,7 @@ export function createServer(): McpServer {
     'ss_ticket_create',
     {
       description:
-        'Open a ticket for a piece of work. Everyone else is told it exists and can join it; joining is all the agreement there is, so no approval follows.',
+        'Open a ticket for a piece of work. It waits in the plan column; everyone else is told it exists and can join it, and it is split when someone runs ss_ticket_start.',
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(4000).nullish().describe('The brief the planner works from'),
@@ -692,7 +692,7 @@ export function createServer(): McpServer {
     'ss_ticket_join',
     {
       description:
-        'Join a ticket. This is the consent step: the split starts immediately and the work is assigned to whoever is in, with nothing further to approve.',
+        'Join a ticket. This is the consent step: the work is assigned to whoever is in, with nothing further to approve. Joining does not start the split; ss_ticket_start does.',
       inputSchema: { ticketId: z.string() },
     },
     async ({ ticketId }) => {
@@ -734,7 +734,7 @@ export function createServer(): McpServer {
     'ss_ticket_start',
     {
       description:
-        'Start splitting a ticket now instead of waiting for someone else to join it.',
+        'Start splitting a ticket. One person is enough; the split is sized for whoever is in it, so let anyone who wants in join first. The caller joins it if they had not.',
       inputSchema: { ticketId: z.string() },
     },
     async ({ ticketId }) => {
