@@ -19,6 +19,7 @@ import { HOST_HEADER, ensureDaemon, hostKey, probe, publicUrlOverride, stopDaemo
 import { describeDirectives, markCaughtUp, peekDirectives, pendingDirectives } from './inbox.js'
 import { startAutopilot } from './autopilot.js'
 import { LOG_BRANCH } from './mirror.js'
+import { ensureTunnel, stopTunnel } from './tunnel.js'
 import { catchUpFromMirror, mirrorOnce, restoreFromMirror, startMirror, type Restored } from './mirror-sync.js'
 import { boardUrl, openInBrowser } from './open.js'
 import {
@@ -219,9 +220,15 @@ export function createServer(): McpServer {
           .describe(
             'The address teammates should dial when it is not one this machine can see: a tunnel (https://x.trycloudflare.com), a Tailscale name, a port forward. Defaults to SESSION_SHARE_PUBLIC_URL.',
           ),
+        tunnel: z
+          .boolean()
+          .nullish()
+          .describe(
+            'Open a Cloudflare quick tunnel so teammates on any network can join, and put its public address in the invite. Needs cloudflared installed. Defaults to your saved preference.',
+          ),
       },
     },
-    async ({ title: given, issueRef, expose, publicUrl: givenPublicUrl }) => {
+    async ({ title: given, issueRef, expose, publicUrl: givenPublicUrl, tunnel }) => {
       const root = await repoRoot(REPO_ROOT)
       /**
        * A session is the repository, not a piece of work -- tickets are the
@@ -231,9 +238,12 @@ export function createServer(): McpServer {
        */
       const title = given?.trim() || basename(root)
       const identity = await localIdentity()
-      const publicUrl = publicUrlOverride(givenPublicUrl)
-      const daemon = await ensureDaemon({ expose: expose ?? readPreferences().expose })
+      let publicUrl = publicUrlOverride(givenPublicUrl)
+      const tunnelled = !publicUrl && (tunnel ?? readPreferences().tunnel)
+      const daemon = await ensureDaemon({ expose: expose ?? (tunnelled ? 'loopback' : readPreferences().expose) })
       const loopback = `http://127.0.0.1:${daemon.port}`
+      // Anyone, anywhere: the tunnel forwards to loopback, so nothing on the LAN is opened.
+      if (tunnelled) publicUrl = await ensureTunnel(daemon.port)
       // What goes in the invite: what the host said, else what this machine can see.
       const dialUrl = publicUrl ?? daemon.url
 
@@ -556,6 +566,7 @@ export function createServer(): McpServer {
       // Saved first: whoever hosts next, here or elsewhere, starts from this.
       const attached = readConfig(await repoRoot(REPO_ROOT))
       const saved = attached ? await mirrorOnce(attached).catch(() => null) : null
+      stopTunnel()
       const note = saved?.pushed
         ? ` The session is saved on the ${LOG_BRANCH} branch; /ss:host on any machine picks it up from there.`
         : ''
