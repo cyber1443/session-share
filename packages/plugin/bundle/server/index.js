@@ -65775,6 +65775,10 @@ var SessionService = class {
    * Anyone can open a ticket. The author is in it from the start, and everyone
    * else is told it exists -- as a message, not a directive, because joining is
    * a person's decision and hijacking their agent to make it is not an offer.
+   *
+   * Nothing starts on its own. The split is sized for whoever is in the ticket,
+   * so it waits in the plan column until someone presses start -- alone, or
+   * after the people who want in have joined.
    */
   createTicket(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
@@ -65792,24 +65796,25 @@ var SessionService = class {
       createdAt: Date.now()
     };
     this.emit(sessionId, participantId, { type: "ticket.created", ticket });
-    let plannerId = null;
-    const others = [...state.participants.values()].filter((p) => p.id !== participantId);
-    const author = state.participants.get(participantId)?.displayName ?? "Someone";
+    const author = state.participants.get(participantId);
+    const others = [...state.participants.values()].filter(
+      (p) => p.githubLogin.toLowerCase() !== author?.githubLogin.toLowerCase()
+    );
     if (others.length > 0) {
       this.systemMessage(
         sessionId,
         participantId,
         others.map((p) => p.id),
-        `${author} opened "${ticket.title}". Join it on the board if you want in -- joining is all it takes, there is nothing to approve.`
+        `${author?.displayName ?? "Someone"} opened "${ticket.title}". Join it on the board if you want in; it is split for whoever is in it when someone presses start.`
       );
-    } else {
-      plannerId = this.beginSplit(sessionId, participantId, state, ticket);
     }
-    return { ticket: state.tickets.get(ticket.id), plannerId };
+    return { ticket: state.tickets.get(ticket.id), plannerId: null };
   }
   /**
    * Opting in. This is the consent step: no approval follows, so joining has to
-   * mean "I accept whatever split this produces for me".
+   * mean "I accept whatever split this produces for me". Joining a ticket still
+   * in the plan column only adds a member; the split starts when someone
+   * presses start, so a second person arriving does not set an agent off.
    */
   joinTicket(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
@@ -65821,14 +65826,11 @@ var SessionService = class {
         members: [...ticket.members, participantId]
       });
     }
-    let plannerId = null;
     const joined = this.requireTicket(state, command.ticketId);
-    if (joined.state === "plan") {
-      plannerId = this.beginSplit(sessionId, participantId, state, joined);
-    } else if (joined.decompositionId) {
+    if (joined.state !== "plan" && joined.decompositionId) {
       this.rebalanceTicket(sessionId, participantId, state, joined);
     }
-    return { ticket: this.requireTicket(state, command.ticketId), plannerId };
+    return { ticket: this.requireTicket(state, command.ticketId), plannerId: null };
   }
   leaveTicket(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
@@ -65905,7 +65907,19 @@ var SessionService = class {
     const ticket = this.requireTicket(state, command.ticketId);
     const current = ticket.decompositionId;
     if (current && state.validations.get(current)?.ok) return { ticket, plannerId: null };
-    const plannerId = this.beginSplit(sessionId, participantId, state, ticket);
+    if (!ticket.members.includes(participantId)) {
+      this.emit(sessionId, participantId, {
+        type: "ticket.members",
+        ticketId: ticket.id,
+        members: [...ticket.members, participantId]
+      });
+    }
+    const plannerId = this.beginSplit(
+      sessionId,
+      participantId,
+      state,
+      this.requireTicket(state, command.ticketId)
+    );
     return { ticket: this.requireTicket(state, command.ticketId), plannerId };
   }
   /**
@@ -66092,7 +66106,25 @@ var SessionService = class {
   }
   /** Hands the ticket to a member's agent to split, and moves the card. */
   beginSplit(sessionId, actorId, state, ticket) {
-    const planner = ticket.members.map((id) => state.participants.get(id)).find((p) => p?.repoPath && this.isPresent(p));
+    const actor = state.participants.get(actorId);
+    const login = actor?.githubLogin.toLowerCase();
+    const usable = (p) => Boolean(p?.repoPath && this.isPresent(p));
+    const members = ticket.members.map((id) => state.participants.get(id)).filter(usable);
+    const mine = (p) => p.githubLogin.toLowerCase() === login;
+    const ownOpen = [...state.participants.values()].filter(usable).filter(mine).sort((a, b) => Number(Boolean(this.autopilots.get(b.id))) - Number(Boolean(this.autopilots.get(a.id))));
+    const planner = (usable(actor) ? actor : void 0) ?? members.find(mine) ?? ownOpen[0] ?? members[0];
+    if (planner && !ticket.members.includes(planner.id)) {
+      this.emit(sessionId, actorId, {
+        type: "ticket.members",
+        ticketId: ticket.id,
+        members: [...state.tickets.get(ticket.id)?.members ?? ticket.members, planner.id]
+      });
+    }
+    const people = new Set(
+      (state.tickets.get(ticket.id)?.members ?? ticket.members).map(
+        (id) => state.participants.get(id)?.githubLogin.toLowerCase() ?? id
+      )
+    ).size;
     if (!planner) {
       this.systemMessage(
         sessionId,
@@ -66108,7 +66140,7 @@ var SessionService = class {
       actorId,
       [planner.id],
       [
-        `Split the ticket "${ticket.title}" for ${ticket.members.length} person(s).`,
+        `Split the ticket "${ticket.title}" for ${people} person(s).`,
         ticket.body ? `
 ${ticket.body}` : "",
         "",
@@ -67169,6 +67201,223 @@ function personOf(participant) {
   return participant.userId ?? participant.id;
 }
 
+// packages/server/src/github.ts
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+var run = promisify(execFile);
+var TTL_MS = 60 * 1e3;
+var GitHubReader = class {
+  constructor(fetcher = fetch, tokenSource = defaultToken) {
+    this.fetcher = fetcher;
+    this.tokenSource = tokenSource;
+  }
+  fetcher;
+  tokenSource;
+  cache = /* @__PURE__ */ new Map();
+  tokenPromise = null;
+  async status(repo) {
+    if (!repo.owner || repo.owner === "local") {
+      return empty(null, "This session has no GitHub remote, so there is nothing to show.");
+    }
+    const slug = `${repo.owner}/${repo.name}`;
+    const cached2 = this.cache.get(slug);
+    if (cached2 && Date.now() - cached2.fetchedAt < TTL_MS) return cached2;
+    this.tokenPromise ??= this.tokenSource().catch(() => null);
+    const token = await this.tokenPromise;
+    const get = async (path) => {
+      const response = await this.fetcher(`https://api.github.com/repos/${slug}${path}`, {
+        headers: {
+          accept: "application/vnd.github+json",
+          "x-github-api-version": "2022-11-28",
+          "user-agent": "session-share",
+          ...token ? { authorization: `Bearer ${token}` } : {}
+        },
+        signal: AbortSignal.timeout(8e3)
+      });
+      if (!response.ok) {
+        throw new Error(
+          response.status === 404 ? `GitHub does not show ${slug} to this server${token ? "" : " (no token: sign in with gh, or set GITHUB_TOKEN)"}.` : `GitHub answered ${response.status}${response.status === 403 ? " (rate limited or not allowed)" : ""}.`
+        );
+      }
+      return response.json();
+    };
+    let status;
+    try {
+      const [pulls, runs] = await Promise.all([
+        get("/pulls?state=open&per_page=30&sort=updated&direction=desc"),
+        get("/actions/runs?per_page=20")
+      ]);
+      status = {
+        repo: slug,
+        pulls: pulls.map((pull) => ({
+          number: pull.number,
+          title: pull.title,
+          author: pull.user?.login ?? "unknown",
+          url: pull.html_url,
+          draft: Boolean(pull.draft),
+          headRef: pull.head?.ref ?? "",
+          baseRef: pull.base?.ref ?? "",
+          updatedAt: pull.updated_at
+        })),
+        runs: (runs.workflow_runs ?? []).map((item) => ({
+          id: item.id,
+          workflow: item.name ?? "workflow",
+          title: item.display_title ?? item.head_commit?.message?.split("\n")[0] ?? "",
+          branch: item.head_branch ?? "",
+          event: item.event ?? "",
+          status: item.status ?? "unknown",
+          conclusion: item.conclusion ?? null,
+          url: item.html_url,
+          createdAt: item.created_at
+        })),
+        error: null,
+        fetchedAt: Date.now()
+      };
+    } catch (error51) {
+      status = empty(slug, error51 instanceof Error ? error51.message : String(error51));
+    }
+    this.cache.set(slug, status);
+    return status;
+  }
+};
+var empty = (repo, error51) => ({
+  repo,
+  pulls: [],
+  runs: [],
+  error: error51,
+  fetchedAt: Date.now()
+});
+async function defaultToken() {
+  const fromEnv = process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const { stdout } = await run("gh", ["auth", "token"], { timeout: 5e3 });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// packages/server/src/history.ts
+var TASK_STATES = /* @__PURE__ */ new Set(["claimed", "merged"]);
+function toHistoryEntry(envelope) {
+  const base = { seq: envelope.seq, ts: envelope.ts, actorId: envelope.actorId, type: envelope.body.type };
+  const body = envelope.body;
+  switch (body.type) {
+    case "session.created":
+      return { ...base, title: body.session.title };
+    case "participant.joined":
+      return { ...base, login: body.participant.githubLogin, ok: Boolean(body.participant.repoPath) };
+    case "ticket.created":
+      return { ...base, ticketId: body.ticket.id, title: body.ticket.title };
+    case "ticket.state":
+      return { ...base, ticketId: body.ticketId, state: body.state };
+    case "ticket.verified":
+      return {
+        ...base,
+        ticketId: body.ticketId,
+        ok: body.verification.passed,
+        summary: body.verification.summary.slice(0, 200)
+      };
+    case "ticket.shipped":
+      return { ...base, ticketId: body.ticketId, prNumber: body.prNumber };
+    case "ticket.deleted":
+      return { ...base, ticketId: body.ticketId };
+    case "decomposition.proposed":
+      return {
+        ...base,
+        ticketId: body.decomposition.ticketId ?? null,
+        decompositionId: body.decomposition.id,
+        ok: body.validation.ok,
+        tasks: body.decomposition.tasks.map((task) => ({ id: task.id, title: task.title }))
+      };
+    case "contract.committed":
+      return { ...base, decompositionId: body.decompositionId ?? void 0, branch: body.branch, prNumber: body.prNumber };
+    case "tasks.seeded":
+      return {
+        ...base,
+        ticketId: body.tasks[0]?.ticketId ?? null,
+        tasks: body.tasks.map((task) => ({ id: task.id, title: task.title }))
+      };
+    case "task.state":
+      return TASK_STATES.has(body.state) ? { ...base, taskId: body.taskId, state: body.state } : null;
+    case "task.test":
+      return { ...base, taskId: body.taskId, ok: body.result.passed };
+    case "merge.conflict":
+      return { ...base, taskId: body.taskId, paths: body.paths.slice(0, 20) };
+    case "integration.pr":
+      return { ...base, prNumber: body.prNumber, url: body.url };
+    default:
+      return null;
+  }
+}
+var PAGE = 5e3;
+var History = class {
+  constructor(store) {
+    this.store = store;
+  }
+  store;
+  cache = /* @__PURE__ */ new Map();
+  read(sessionId) {
+    const fold = this.cache.get(sessionId) ?? {
+      nextSeq: 0,
+      entries: [],
+      usage: /* @__PURE__ */ new Map(),
+      logins: /* @__PURE__ */ new Map(),
+      splitTicket: /* @__PURE__ */ new Map()
+    };
+    for (; ; ) {
+      const page = this.store.readEvents(sessionId, fold.nextSeq, PAGE);
+      for (const envelope of page) {
+        this.apply(fold, envelope);
+        fold.nextSeq = envelope.seq + 1;
+      }
+      if (page.length < PAGE) break;
+    }
+    this.cache.set(sessionId, fold);
+    return {
+      entries: fold.entries,
+      usage: [...fold.usage.values()].sort((a, b) => a.day.localeCompare(b.day) || a.login.localeCompare(b.login))
+    };
+  }
+  apply(fold, envelope) {
+    const body = envelope.body;
+    if (body.type === "participant.joined") {
+      fold.logins.set(body.participant.id, body.participant.githubLogin.toLowerCase());
+    }
+    if (body.type === "usage.recorded") {
+      const login = fold.logins.get(body.participantId) ?? body.participantId;
+      const day = new Date(envelope.ts).toISOString().slice(0, 10);
+      const key = `${day} ${login}`;
+      const total = fold.usage.get(key) ?? {
+        day,
+        login,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        turns: 0
+      };
+      total.inputTokens += body.inputTokens;
+      total.outputTokens += body.outputTokens;
+      total.cacheReadTokens += body.cacheReadTokens;
+      total.cacheCreationTokens += body.cacheCreationTokens;
+      total.turns += body.turns;
+      fold.usage.set(key, total);
+      return;
+    }
+    const entry = toHistoryEntry(envelope);
+    if (!entry) return;
+    if (entry.type === "decomposition.proposed" && entry.decompositionId) {
+      fold.splitTicket.set(entry.decompositionId, entry.ticketId ?? null);
+    }
+    if (entry.type === "contract.committed" && entry.decompositionId) {
+      entry.ticketId = fold.splitTicket.get(entry.decompositionId) ?? null;
+    }
+    fold.entries.push(entry);
+  }
+};
+
 // node_modules/.pnpm/ws@8.21.3/node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
 var import_extension = __toESM(require_extension(), 1);
@@ -67505,6 +67754,8 @@ function createApp(options = {}) {
     (sessionId, from, frame) => gateway.relayFrame(sessionId, from, frame)
   );
   gateway.attach(service);
+  const history = new History(store);
+  const github = options.github ?? new GitHubReader();
   const toAuthUser = (user) => ({
     id: user.id,
     githubLogin: user.githubLogin,
@@ -67723,28 +67974,48 @@ function createApp(options = {}) {
       return sendServiceError(reply, error51);
     }
   });
-  fastify.get("/sessions/:ref/snapshot", async (request, reply) => {
+  const readable = (request, reply) => {
     const claims = bearerClaims(request);
     if (!claims && !currentUser(request)) {
-      return refuse(request, reply, {
+      void refuse(request, reply, {
         status: 401,
         body: { error: "unauthorized", message: "Sign in first." }
       });
+      return null;
     }
     const { ref } = request.params;
     const sessionId = store.findSessionIdByRef(ref);
     if (!sessionId) {
       const { error: error51, reason, message } = TOKEN_REFUSALS.session_gone;
-      return reply.code(404).send({ error: error51, reason, message });
+      void reply.code(404).send({ error: error51, reason, message });
+      return null;
     }
     if (claims && claims.sessionId !== sessionId) {
-      return reply.code(403).send(OTHER_SESSION);
+      void reply.code(403).send(OTHER_SESSION);
+      return null;
     }
     if (claims) {
       if (via(claims) === "checkout") service.worked(claims.participantId);
       else service.seen(claims.participantId);
     }
+    return sessionId;
+  };
+  fastify.get("/sessions/:ref/snapshot", async (request, reply) => {
+    const sessionId = readable(request, reply);
+    if (!sessionId) return reply;
     return service.snapshotOf(sessionId);
+  });
+  fastify.get("/sessions/:ref/history", async (request, reply) => {
+    const sessionId = readable(request, reply);
+    if (!sessionId) return reply;
+    return history.read(sessionId);
+  });
+  fastify.get("/sessions/:ref/github", async (request, reply) => {
+    const sessionId = readable(request, reply);
+    if (!sessionId) return reply;
+    const session = service.state(sessionId).session;
+    if (!session) return reply.code(404).send({ error: "not_found" });
+    return github.status(session.repo);
   });
   fastify.post("/api/sessions/:ref/join-token", async (request, reply) => {
     const user = requireUser(request, reply);
@@ -68033,6 +68304,8 @@ if (isEntrypoint) {
 }
 export {
   CLAIM_CAP,
+  GitHubReader,
+  History,
   ServiceError,
   SessionService,
   SessionState,
@@ -68040,7 +68313,8 @@ export {
   buildId,
   computeBuildId,
   createApp,
-  isLoopbackAddress
+  isLoopbackAddress,
+  toHistoryEntry
 };
 /*! Bundled license information:
 
