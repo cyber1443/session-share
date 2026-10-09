@@ -63151,6 +63151,7 @@ var ParticipantActivity = external_exports.object({
   taskId: TaskId.nullable(),
   updatedAt: Timestamp
 });
+var AutopilotMode = external_exports.enum(["off", "splits", "full"]);
 var Participant = external_exports.object({
   id: ParticipantId,
   sessionId: SessionId,
@@ -63463,6 +63464,12 @@ var SessionSnapshot = external_exports.object({
   chat: external_exports.array(ChatMessage),
   usage: external_exports.array(Usage).default([]),
   mergeQueue: external_exports.array(MergeQueueEntry),
+  /**
+   * Seats whose Claude Code is open right now, by what its autopilot will do.
+   * Kept in the server's memory from a heartbeat, never logged, so a seat that
+   * is missing here is closed (or on a plugin too old to say).
+   */
+  autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
   seq: external_exports.number().int().nonnegative()
 });
 
@@ -63833,6 +63840,15 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("activity.report"),
     activity: ParticipantActivity.omit({ updatedAt: true })
+  }),
+  /**
+   * A checkout's Claude Code saying it is open and what its autopilot will do,
+   * sent on every autopilot poll. It is how a board can tell "their agent will
+   * pick this up in a minute" from "it waits until they are back".
+   */
+  external_exports.object({
+    type: external_exports.literal("agent.heartbeat"),
+    autopilot: AutopilotMode
   })
 ]);
 var LeaseDenial = external_exports.object({
@@ -63963,7 +63979,12 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
    * event: leaving is noticed by silence, not announced, so an open board
    * would otherwise go on showing someone long gone as here.
    */
-  external_exports.object({ kind: external_exports.literal("presence"), present: external_exports.array(ParticipantId) })
+  external_exports.object({
+    kind: external_exports.literal("presence"),
+    present: external_exports.array(ParticipantId),
+    /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
+    autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional()
+  })
 ]);
 
 // packages/protocol/dist/glob.js
@@ -65415,6 +65436,7 @@ var ServiceError = class extends Error {
 var PALETTE_SIZE = 8;
 var UNANIMOUS_UP_TO = 3;
 var PRESENT_FOR_MS = 10 * 60 * 1e3;
+var AUTOPILOT_FRESH_MS = 60 * 1e3;
 var SNAPSHOT_CHAT = 500;
 var PROGRESS_STATES = /* @__PURE__ */ new Set(["claimed", "running", "testing"]);
 var REBUILD_PAGE = 5e3;
@@ -65444,6 +65466,11 @@ var SessionService = class {
    * forever, and with it every task the checkout had claimed and abandoned.
    */
   lastWorked = /* @__PURE__ */ new Map();
+  /**
+   * Each seat's last autopilot heartbeat. Memory only, like presence: whether
+   * a Claude Code is open right now is not history worth a log entry a minute.
+   */
+  autopilots = /* @__PURE__ */ new Map();
   // -- state access --------------------------------------------------------
   /** Folds the log on first touch; afterwards the map is the live projection. */
   state(sessionId) {
@@ -65524,6 +65551,16 @@ var SessionService = class {
     const now = Date.now();
     return [...this.state(sessionId).participants.values()].filter((participant) => this.isPresent(participant, now)).map((participant) => participant.id);
   }
+  /** Seats in a session whose Claude Code has polled lately, by autopilot mode. */
+  autopilotsIn(sessionId) {
+    const now = Date.now();
+    const open = {};
+    for (const participant of this.state(sessionId).participants.values()) {
+      const beat = this.autopilots.get(participant.id);
+      if (beat && now - beat.at < AUTOPILOT_FRESH_MS) open[participant.id] = beat.mode;
+    }
+    return open;
+  }
   /**
    * The snapshot everyone actually reads, with presence resolved from when each
    * participant was last heard from rather than from a flag nobody clears.
@@ -65544,7 +65581,8 @@ var SessionService = class {
         // The flag alone used to be ANDed in, so one closed board tab marked an
         // agent that was still working over HTTP as gone, permanently.
         connected: this.isPresent(participant, now)
-      }))
+      })),
+      autopilots: this.autopilotsIn(sessionId)
     };
   }
   readEvents(sessionId, fromSeq, limit) {
@@ -65621,6 +65659,8 @@ var SessionService = class {
         return this.recordUsage(command, ctx);
       case "activity.report":
         return this.reportActivity(command, ctx);
+      case "agent.heartbeat":
+        return this.heartbeat(command, ctx);
     }
   }
   // -- sessions ------------------------------------------------------------
@@ -67077,6 +67117,14 @@ Issue: ${command.issueRef}` : "",
     });
     return { ok: true };
   }
+  heartbeat(command, ctx) {
+    const { participantId } = this.requireParticipant(ctx);
+    if (ctx.via === "board") {
+      throw new ServiceError("forbidden", "Only a checkout can report its autopilot.");
+    }
+    this.autopilots.set(participantId, { mode: command.autopilot, at: Date.now() });
+    return { ok: true };
+  }
   // -- connection lifecycle ------------------------------------------------
   markDisconnected(sessionId, participantId) {
     const state = this.state(sessionId);
@@ -67351,7 +67399,11 @@ var Gateway = class {
       if (connection.ctx.sessionId) sessions.add(connection.ctx.sessionId);
     }
     for (const sessionId of sessions) {
-      const message = { kind: "presence", present: this.service.presentIn(sessionId) };
+      const message = {
+        kind: "presence",
+        present: this.service.presentIn(sessionId),
+        autopilots: this.service.autopilotsIn(sessionId)
+      };
       for (const connection of this.connections) {
         if (connection.ctx.sessionId === sessionId) send(connection.socket, message);
       }

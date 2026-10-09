@@ -31051,6 +31051,7 @@ var ParticipantActivity = external_exports.object({
   taskId: TaskId.nullable(),
   updatedAt: Timestamp
 });
+var AutopilotMode = external_exports.enum(["off", "splits", "full"]);
 var Participant = external_exports.object({
   id: ParticipantId,
   sessionId: SessionId,
@@ -31363,6 +31364,12 @@ var SessionSnapshot = external_exports.object({
   chat: external_exports.array(ChatMessage),
   usage: external_exports.array(Usage).default([]),
   mergeQueue: external_exports.array(MergeQueueEntry),
+  /**
+   * Seats whose Claude Code is open right now, by what its autopilot will do.
+   * Kept in the server's memory from a heartbeat, never logged, so a seat that
+   * is missing here is closed (or on a plugin too old to say).
+   */
+  autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
   seq: external_exports.number().int().nonnegative()
 });
 
@@ -31733,6 +31740,15 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("activity.report"),
     activity: ParticipantActivity.omit({ updatedAt: true })
+  }),
+  /**
+   * A checkout's Claude Code saying it is open and what its autopilot will do,
+   * sent on every autopilot poll. It is how a board can tell "their agent will
+   * pick this up in a minute" from "it waits until they are back".
+   */
+  external_exports.object({
+    type: external_exports.literal("agent.heartbeat"),
+    autopilot: AutopilotMode
   })
 ]);
 var LeaseDenial = external_exports.object({
@@ -31863,7 +31879,12 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
    * event: leaving is noticed by silence, not announced, so an open board
    * would otherwise go on showing someone long gone as here.
    */
-  external_exports.object({ kind: external_exports.literal("presence"), present: external_exports.array(ParticipantId) })
+  external_exports.object({
+    kind: external_exports.literal("presence"),
+    present: external_exports.array(ParticipantId),
+    /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
+    autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional()
+  })
 ]);
 
 // packages/protocol/dist/glob.js
@@ -32769,6 +32790,9 @@ async function tickOnce(options = {}) {
   if (!config3) return { ran: false, ok: false, reason: "this checkout is not in a session" };
   const preferences = readPreferences();
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  await runCommand(config3, { type: "agent.heartbeat", autopilot: preferences.autopilot }).catch(
+    () => void 0
+  );
   let inbox;
   try {
     inbox = await readInbox(config3, 2e3);
@@ -32795,6 +32819,11 @@ async function tickOnce(options = {}) {
     return { ran: false, ok: false, reason: "the interactive session may still take it" };
   }
   running = true;
+  await say(
+    config3,
+    `Nobody is at this keyboard, so a headless Claude is taking ${waiting.length === 1 ? "this" : `these ${waiting.length} instructions`} now${planningOnly ? " (splitting)" : ""}.`
+  );
+  await report(config3, planningOnly ? "planning" : "working", planningOnly ? "autopilot: splitting" : "autopilot: working");
   try {
     const result = await runHeadless(
       config3,
@@ -32820,8 +32849,12 @@ async function tickOnce(options = {}) {
     return { ran: true, ok: false, reason: String(error51) };
   } finally {
     running = false;
+    await report(config3, "idle", "autopilot: idle");
   }
 }
+var report = (config3, state, detail) => runCommand(config3, { type: "activity.report", activity: { state, detail, taskId: null } }).catch(
+  () => void 0
+);
 var say = (config3, body) => runCommand(config3, { type: "chat.post", body, taskRef: null, asAgent: true, directive: false }).catch(
   () => void 0
 );
