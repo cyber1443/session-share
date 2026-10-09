@@ -63231,6 +63231,8 @@ var Ticket = external_exports.object({
   verification: Verification.nullable().default(null),
   decompositionId: DecompositionId.nullable().default(null),
   prNumber: external_exports.number().int().nullable().default(null),
+  /** When its pull request was merged; a merged ticket is done. */
+  mergedAt: Timestamp.nullable().default(null),
   createdAt: Timestamp
 });
 var ContractFile = external_exports.object({
@@ -63528,6 +63530,13 @@ var EventBody = external_exports.discriminatedUnion("type", [
    * branch, and nothing here would be honest if it claimed otherwise.
    */
   external_exports.object({ type: external_exports.literal("ticket.deleted"), ticketId: TicketId }),
+  /** Its pull request was merged -- from the board or on GitHub. The ticket is done. */
+  external_exports.object({
+    type: external_exports.literal("ticket.merged"),
+    ticketId: TicketId,
+    prNumber: external_exports.number().int(),
+    commitSha: external_exports.string().nullable()
+  }),
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
   external_exports.object({
@@ -64550,6 +64559,13 @@ var SessionState = class {
           this.tickets.set(body.ticketId, { ...ticket, verification: body.verification });
         break;
       }
+      case "ticket.merged": {
+        const ticket = this.tickets.get(body.ticketId);
+        if (ticket) {
+          this.tickets.set(body.ticketId, { ...ticket, prNumber: body.prNumber, mergedAt: envelope.ts, state: "done" });
+        }
+        break;
+      }
       case "ticket.shipped": {
         const ticket = this.tickets.get(body.ticketId);
         if (ticket)
@@ -64860,6 +64876,8 @@ var SessionState = class {
     const ticket = this.tickets.get(ticketId);
     if (!ticket)
       return "plan";
+    if (ticket.mergedAt)
+      return "done";
     if (ticket.prNumber !== null)
       return "review";
     const tasks = this.tasksOfTicket(ticketId);
@@ -65590,6 +65608,23 @@ var SessionService = class {
       throw error51;
     }
   }
+  /**
+   * A pull request was merged -- from the board or on GitHub. Whichever
+   * tickets it was for are done. Returns the tickets it finished.
+   */
+  recordMerged(sessionId, actorId, prNumber, commitSha) {
+    const state = this.state(sessionId);
+    const finished = [...state.tickets.values()].filter((t) => t.prNumber === prNumber && !t.mergedAt);
+    if (finished.length === 0) return [];
+    return this.atomically(() => {
+      const by = actorId ? state.participants.get(actorId)?.displayName ?? "Someone" : "Someone on GitHub";
+      for (const ticket of finished) {
+        this.emit(sessionId, actorId, { type: "ticket.merged", ticketId: ticket.id, prNumber, commitSha });
+        this.systemMessage(sessionId, actorId, [], `${by} merged PR #${prNumber}. "${ticket.title}" is done.`);
+      }
+      return finished.map((t) => t.id);
+    });
+  }
   /** Drops the folded state so the next read rebuilds it from the log, as after an import. */
   reload(sessionId) {
     this.states.delete(sessionId);
@@ -65910,6 +65945,7 @@ var SessionService = class {
       verification: null,
       decompositionId: null,
       prNumber: null,
+      mergedAt: null,
       createdAt: Date.now()
     };
     this.emit(sessionId, participantId, { type: "ticket.created", ticket });
@@ -67402,8 +67438,7 @@ var GitHubReader = class {
     const slug = `${repo.owner}/${repo.name}`;
     const cached2 = this.cache.get(slug);
     if (cached2 && Date.now() - cached2.fetchedAt < TTL_MS) return cached2;
-    this.tokenPromise ??= this.tokenSource().catch(() => null);
-    const token = await this.tokenPromise;
+    const token = await this.token();
     const get = async (path) => {
       const response = await this.fetcher(`https://api.github.com/repos/${slug}${path}`, {
         headers: {
@@ -67423,22 +67458,14 @@ var GitHubReader = class {
     };
     let status;
     try {
-      const [pulls, runs] = await Promise.all([
-        get("/pulls?state=open&per_page=30&sort=updated&direction=desc"),
+      const [detailed, runs] = await Promise.all([
+        token ? this.detailedPulls(repo, token).catch(() => null) : Promise.resolve(null),
         get("/actions/runs?per_page=20")
       ]);
+      const pulls = detailed ?? (await get("/pulls?state=open&per_page=30&sort=updated&direction=desc")).map(fromRest);
       status = {
         repo: slug,
-        pulls: pulls.map((pull) => ({
-          number: pull.number,
-          title: pull.title,
-          author: pull.user?.login ?? "unknown",
-          url: pull.html_url,
-          draft: Boolean(pull.draft),
-          headRef: pull.head?.ref ?? "",
-          baseRef: pull.base?.ref ?? "",
-          updatedAt: pull.updated_at
-        })),
+        pulls,
         runs: (runs.workflow_runs ?? []).map((item) => ({
           id: item.id,
           workflow: item.name ?? "workflow",
@@ -67459,7 +67486,117 @@ var GitHubReader = class {
     this.cache.set(slug, status);
     return status;
   }
+  async token() {
+    this.tokenPromise ??= this.tokenSource().catch(() => null);
+    return this.tokenPromise;
+  }
+  /** Everything the board shows about each open pull request, in one request. */
+  async detailedPulls(repo, token) {
+    const query = `query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) {
+        pullRequests(states: OPEN, first: 30, orderBy: {field: UPDATED_AT, direction: DESC}) {
+          nodes {
+            number title url isDraft body createdAt updatedAt
+            author { login }
+            headRefName baseRefName additions deletions changedFiles
+            commits { totalCount }
+            mergeable reviewDecision
+            labels(first: 5) { nodes { name } }
+            statusCommits: commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+          }
+        }
+      }
+    }`;
+    const response = await this.fetcher("https://api.github.com/graphql", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "user-agent": "session-share" },
+      body: JSON.stringify({ query, variables: { owner: repo.owner, name: repo.name } }),
+      signal: AbortSignal.timeout(1e4)
+    });
+    if (!response.ok) throw new Error(`GitHub answered ${response.status}`);
+    const payload = await response.json();
+    const nodes = payload.data?.repository?.pullRequests?.nodes;
+    if (!nodes) throw new Error(payload.errors?.[0]?.message ?? "no pull requests in the answer");
+    return nodes.map((pull) => ({
+      number: pull.number,
+      title: pull.title,
+      author: pull.author?.login ?? "unknown",
+      url: pull.url,
+      draft: pull.isDraft,
+      headRef: pull.headRefName,
+      baseRef: pull.baseRefName,
+      updatedAt: pull.updatedAt,
+      createdAt: pull.createdAt,
+      body: (pull.body ?? "").slice(0, 600),
+      additions: pull.additions,
+      deletions: pull.deletions,
+      changedFiles: pull.changedFiles,
+      commits: pull.commits?.totalCount,
+      mergeable: pull.mergeable,
+      reviewDecision: pull.reviewDecision ?? null,
+      checks: pull.statusCommits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? null,
+      labels: (pull.labels?.nodes ?? []).map((label) => label.name)
+    }));
+  }
+  /**
+   * Merges a pull request with the server's own GitHub sign-in. GitHub still
+   * enforces everything it would for a person: branch protection, required
+   * reviews and checks, and whether that account may write at all.
+   */
+  async merge(repo, number4, method) {
+    const token = await this.token();
+    if (!token) {
+      return { merged: false, sha: null, message: "This server has no GitHub sign-in: run `gh auth login` on the host, or set GITHUB_TOKEN." };
+    }
+    const response = await this.fetcher(`https://api.github.com/repos/${repo.owner}/${repo.name}/pulls/${number4}/merge`, {
+      method: "PUT",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "user-agent": "session-share"
+      },
+      body: JSON.stringify({ merge_method: method }),
+      signal: AbortSignal.timeout(2e4)
+    });
+    const payload = await response.json().catch(() => ({}));
+    this.cache.delete(`${repo.owner}/${repo.name}`);
+    return {
+      merged: response.ok && Boolean(payload.merged),
+      sha: payload.sha ?? null,
+      message: payload.message ?? (response.ok ? "Merged." : `GitHub answered ${response.status}.`)
+    };
+  }
+  /** Whether a pull request has been merged, for tickets whose PR was merged on GitHub. */
+  async mergedState(repo, number4) {
+    const token = await this.token();
+    try {
+      const response = await this.fetcher(`https://api.github.com/repos/${repo.owner}/${repo.name}/pulls/${number4}`, {
+        headers: {
+          accept: "application/vnd.github+json",
+          "user-agent": "session-share",
+          ...token ? { authorization: `Bearer ${token}` } : {}
+        },
+        signal: AbortSignal.timeout(8e3)
+      });
+      if (!response.ok) return null;
+      const pull = await response.json();
+      return { merged: Boolean(pull.merged), sha: pull.merge_commit_sha ?? null };
+    } catch {
+      return null;
+    }
+  }
 };
+var fromRest = (pull) => ({
+  number: pull.number,
+  title: pull.title,
+  author: pull.user?.login ?? "unknown",
+  url: pull.html_url,
+  draft: Boolean(pull.draft),
+  headRef: pull.head?.ref ?? "",
+  baseRef: pull.base?.ref ?? "",
+  updatedAt: pull.updated_at
+});
 var empty = (repo, error51) => ({
   repo,
   pulls: [],
@@ -67503,6 +67640,8 @@ function toHistoryEntry(envelope) {
       return { ...base, ticketId: body.ticketId, prNumber: body.prNumber };
     case "ticket.deleted":
       return { ...base, ticketId: body.ticketId };
+    case "ticket.merged":
+      return { ...base, ticketId: body.ticketId, prNumber: body.prNumber };
     case "decomposition.proposed":
       return {
         ...base,
@@ -67932,6 +68071,10 @@ var PeerJoinRequest = external_exports.object({
   /** Which machine the checkout is on; see Participant.machineId. */
   machineId: external_exports.string().min(1).max(100).nullish()
 });
+var MergeRequest = external_exports.object({
+  number: external_exports.number().int().positive(),
+  method: external_exports.enum(["merge", "squash", "rebase"]).default("merge")
+});
 var ImportSessionRequest = external_exports.object({
   sessionId: external_exports.string().uuid(),
   slug: external_exports.string().min(1).max(100),
@@ -68268,9 +68411,33 @@ function createApp(options = {}) {
   fastify.get("/sessions/:ref/github", async (request, reply) => {
     const sessionId = readable(request, reply);
     if (!sessionId) return reply;
-    const session = service.state(sessionId).session;
-    if (!session) return reply.code(404).send({ error: "not_found" });
-    return github.status(session.repo);
+    const state = service.state(sessionId);
+    if (!state.session) return reply.code(404).send({ error: "not_found" });
+    const status = await github.status(state.session.repo);
+    if (!status.error) {
+      const open = new Set(status.pulls.map((pull) => pull.number));
+      for (const ticket of state.tickets.values()) {
+        if (!ticket.prNumber || ticket.mergedAt || open.has(ticket.prNumber)) continue;
+        const merged = await github.mergedState(state.session.repo, ticket.prNumber);
+        if (merged?.merged) service.recordMerged(sessionId, null, ticket.prNumber, merged.sha);
+      }
+    }
+    return status;
+  });
+  fastify.post("/sessions/:ref/github/merge", async (request, reply) => {
+    const sessionId = readable(request, reply);
+    if (!sessionId) return reply;
+    const claims = bearerClaims(request);
+    const actor = claims?.participantId ?? null;
+    if (!actor && !currentUser(request)) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = MergeRequest.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "bad_request", message: parsed.error.message });
+    const state = service.state(sessionId);
+    if (!state.session) return reply.code(404).send({ error: "not_found" });
+    const result = await github.merge(state.session.repo, parsed.data.number, parsed.data.method);
+    if (!result.merged) return reply.code(409).send({ error: "conflict", message: result.message });
+    const tickets = service.recordMerged(sessionId, actor, parsed.data.number, result.sha);
+    return { ...result, tickets };
   });
   fastify.post("/api/sessions/:ref/join-token", async (request, reply) => {
     const user = requireUser(request, reply);

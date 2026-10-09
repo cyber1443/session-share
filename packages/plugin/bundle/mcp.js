@@ -31131,6 +31131,8 @@ var Ticket = external_exports.object({
   verification: Verification.nullable().default(null),
   decompositionId: DecompositionId.nullable().default(null),
   prNumber: external_exports.number().int().nullable().default(null),
+  /** When its pull request was merged; a merged ticket is done. */
+  mergedAt: Timestamp.nullable().default(null),
   createdAt: Timestamp
 });
 var ContractFile = external_exports.object({
@@ -31428,6 +31430,13 @@ var EventBody = external_exports.discriminatedUnion("type", [
    * branch, and nothing here would be honest if it claimed otherwise.
    */
   external_exports.object({ type: external_exports.literal("ticket.deleted"), ticketId: TicketId }),
+  /** Its pull request was merged -- from the board or on GitHub. The ticket is done. */
+  external_exports.object({
+    type: external_exports.literal("ticket.merged"),
+    ticketId: TicketId,
+    prNumber: external_exports.number().int(),
+    commitSha: external_exports.string().nullable()
+  }),
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
   external_exports.object({
