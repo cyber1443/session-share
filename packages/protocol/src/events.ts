@@ -90,6 +90,13 @@ export const EventBody = z.discriminatedUnion('type', [
    * branch, and nothing here would be honest if it claimed otherwise.
    */
   z.object({ type: z.literal('ticket.deleted'), ticketId: TicketId }),
+  /** Its pull request was merged -- from the board or on GitHub. The ticket is done. */
+  z.object({
+    type: z.literal('ticket.merged'),
+    ticketId: TicketId,
+    prNumber: z.number().int(),
+    commitSha: z.string().nullable(),
+  }),
 
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */

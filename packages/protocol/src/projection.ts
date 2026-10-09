@@ -136,6 +136,13 @@ export class SessionState {
         if (ticket) this.tickets.set(body.ticketId, { ...ticket, verification: body.verification })
         break
       }
+      case 'ticket.merged': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) {
+          this.tickets.set(body.ticketId, { ...ticket, prNumber: body.prNumber, mergedAt: envelope.ts, state: 'done' })
+        }
+        break
+      }
       case 'ticket.shipped': {
         const ticket = this.tickets.get(body.ticketId)
         // The PR is the end of the board, not a step before it: a ticket sits
@@ -512,6 +519,8 @@ export class SessionState {
      * `done` column would only ever mean "we opened a PR", which is what the
      * review column already says.
      */
+    // Merged is the end of the line, whoever pressed the button and wherever.
+    if (ticket.mergedAt) return 'done'
     if (ticket.prNumber !== null) return 'review'
 
     const tasks = this.tasksOfTicket(ticketId)

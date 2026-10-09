@@ -178,6 +178,8 @@ export const Ticket = z.object({
   verification: Verification.nullable().default(null),
   decompositionId: DecompositionId.nullable().default(null),
   prNumber: z.number().int().nullable().default(null),
+  /** When its pull request was merged; a merged ticket is done. */
+  mergedAt: Timestamp.nullable().default(null),
   createdAt: Timestamp,
 })
 export type Ticket = z.infer<typeof Ticket>
