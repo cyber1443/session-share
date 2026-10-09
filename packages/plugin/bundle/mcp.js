@@ -32737,11 +32737,11 @@ function log(line) {
   } catch {
   }
 }
-function readOutcome(stdout) {
+function readOutcome(stdout, allowed) {
   const line = stdout.trim().split("\n").at(-1) ?? "";
   try {
     const result = JSON.parse(line);
-    const denied = (result.permission_denials ?? []).map((denial) => denial.tool_name ?? "a tool");
+    const denied = (result.permission_denials ?? []).map((denial) => denial.tool_name ?? "a tool").filter((tool) => !allowed || allowed.includes(tool));
     if (result.is_error || result.subtype && result.subtype !== "success") {
       return { ok: false, detail: `the run ended with ${result.subtype ?? "an error"}: ${(result.result ?? "").slice(0, 200)}` };
     }
@@ -32781,7 +32781,7 @@ function runHeadless(config3, prompt, planningOnly, command = "claude") {
       resolve5({ ok: false, code: null, detail: error51.message });
     });
     child.on("close", (code) => {
-      const outcome = readOutcome(stdout);
+      const outcome = readOutcome(stdout, planningOnly ? PLANNING_TOOLS : BUILDING_TOOLS);
       log(`exit ${code}
 ${outcome.detail}
 ${tail}`);
