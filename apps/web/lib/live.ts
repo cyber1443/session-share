@@ -48,6 +48,12 @@ export function useLiveSession(sessionRef: string) {
   const [events, setEvents] = useState<EventEnvelope[]>([])
 
   const stateRef = useRef(new SessionState())
+  /**
+   * Which seats have a Claude Code open, by autopilot mode. Not an event, so
+   * the fold never sees it: it arrives with a cold join and on every presence
+   * beat, and rides along on each published snapshot.
+   */
+  const autopilotsRef = useRef<SessionSnapshot['autopilots']>(undefined)
   const socketRef = useRef<WebSocket | null>(null)
   const pendingRef = useRef(new Map<string, Pending>())
   const reqCounter = useRef(0)
@@ -55,7 +61,7 @@ export function useLiveSession(sessionRef: string) {
 
   const publish = useCallback(() => {
     if (!stateRef.current.session) return
-    setSnapshot(stateRef.current.snapshot())
+    setSnapshot({ ...stateRef.current.snapshot(), autopilots: autopilotsRef.current })
   }, [])
 
   const send = useCallback(<T extends ClientCommand['type']>(
@@ -142,7 +148,10 @@ export function useLiveSession(sessionRef: string) {
           })
             .then((result) => {
               // A cold join arrives as state; a resume arrives as a sync backlog.
-              if (result.snapshot) stateRef.current.hydrate(result.snapshot)
+              if (result.snapshot) {
+                stateRef.current.hydrate(result.snapshot)
+                autopilotsRef.current = result.snapshot.autopilots
+              }
               setStatus('live')
               setError(null)
               publish()
@@ -186,6 +195,7 @@ export function useLiveSession(sessionRef: string) {
               for (const [id, participant] of participants) {
                 participants.set(id, { ...participant, connected: present.has(id) })
               }
+              if (message.autopilots) autopilotsRef.current = message.autopilots
               publish()
               break
             }

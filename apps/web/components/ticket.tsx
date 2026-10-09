@@ -82,8 +82,29 @@ export function TicketPanel({
     .filter((p): p is Participant => Boolean(p))
   const workers = members.filter((p) => p.repoPath)
   const mine = Boolean(meId && ticket.members.includes(meId as never))
-  /** Whether the agent everyone is waiting for is the one at this keyboard. */
-  const waitingOnMe = Boolean(meId && workers[0]?.id === meId)
+  /**
+   * Whose Claude Code the split was handed to: the seat the newest split
+   * instruction for this ticket was aimed at, which the server picks from who
+   * is around -- not necessarily the first member.
+   */
+  const splitDirective = [...snapshot.chat]
+    .reverse()
+    .find((message) => message.directive && message.body.includes(ticket.id) && message.mentions.length > 0)
+  const splitter =
+    snapshot.participants.find((p) => p.id === splitDirective?.mentions[0]) ?? workers[0] ?? null
+  const myLogin = snapshot.participants.find((p) => p.id === meId)?.githubLogin.toLowerCase()
+  /** Whether the agent everyone is waiting for belongs to whoever is at this board. */
+  const waitingOnMe = Boolean(myLogin && splitter?.githubLogin.toLowerCase() === myLogin)
+  /**
+   * What that seat's Claude Code will do with it: null when the server cannot
+   * say (an older one), 'closed' when no Claude Code is open on that checkout.
+   */
+  const splitterAutopilot = !snapshot.autopilots
+    ? null
+    : splitter
+      ? (snapshot.autopilots[splitter.id] ?? 'closed')
+      : 'closed'
+  const splittingNow = splitter?.activity.detail === 'autopilot: splitting'
   const merged = tasks.filter((task) => task.state === 'merged').length
   const spend = snapshot.usage
     .filter((entry) => entry.ticketId === ticket.id)
@@ -195,20 +216,11 @@ export function TicketPanel({
             broken: nothing is happening, and the card says something is.
           */}
           <p className="leading-relaxed text-mute">
-            {waitingOnMe ? (
-              <>
-                This was handed to <strong className="text-neutral-300">your</strong> Claude Code.
-                It runs the moment that session next does anything — say anything at all in that
-                terminal, or run <code>/ss:go</code>. Nothing can start it from here: a browser
-                cannot make an idle agent take a turn.
-              </>
-            ) : (
-              <>
-                Handed to {workers[0]?.displayName ?? 'an agent'}. It runs when their Claude Code
-                next takes a turn; if their terminal is idle it waits for them, and nothing on this
-                board can hurry it.
-              </>
-            )}
+            <SplitWait
+              who={waitingOnMe ? null : (splitter?.displayName ?? 'an agent')}
+              autopilot={splitterAutopilot}
+              running={splittingNow}
+            />
           </p>
           {mine ? (
             <button className="btn w-full" onClick={() => void onStart()}>
@@ -447,5 +459,58 @@ export function TicketPanel({
         )}
       </div>
     </aside>
+  )
+}
+
+/**
+ * Where a handed-over split stands, said only as far as the board can know it.
+ * An idle terminal cannot be made to take a turn from a browser, but the
+ * plugin's autopilot can run it headlessly -- so whether one is listening is
+ * the whole answer.
+ */
+function SplitWait({
+  who,
+  autopilot,
+  running,
+}: {
+  /** Null when it is this viewer's own Claude Code. */
+  who: string | null
+  autopilot: 'off' | 'splits' | 'full' | 'closed' | null
+  running: boolean
+}) {
+  const whose = who ? `${who}'s` : 'your'
+  if (running) {
+    return <>A headless Claude on {whose} machine is splitting it now. The proposal lands here when it is done.</>
+  }
+  if (autopilot === 'splits' || autopilot === 'full') {
+    return (
+      <>
+        Handed to {whose} Claude Code. If that terminal is idle, its autopilot takes it within about a
+        minute; if someone is typing there, it runs when their turn ends.
+      </>
+    )
+  }
+  if (autopilot === 'off') {
+    return (
+      <>
+        Handed to {whose} Claude Code, which is open but has autopilot off. It runs on that session&apos;s
+        next turn{who ? '' : <> — say anything in the terminal, or run <code>/ss:go</code></>}. Turn
+        autopilot on with <code>/ss:setup</code> to have it run unattended.
+      </>
+    )
+  }
+  if (autopilot === 'closed') {
+    return (
+      <>
+        Handed to {whose} checkout, but no Claude Code is open there. It runs as soon as one is started in
+        that checkout.
+      </>
+    )
+  }
+  return (
+    <>
+      Handed to {whose} Claude Code. It runs on that session&apos;s next turn, or headlessly if its
+      autopilot is on.
+    </>
   )
 }
