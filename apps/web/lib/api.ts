@@ -136,6 +136,64 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T
 }
 
+/** One line of the project's history; see packages/server/src/history.ts. */
+export interface HistoryEntry {
+  seq: number
+  ts: number
+  actorId: string | null
+  type: string
+  ticketId?: string | null
+  taskId?: string
+  title?: string
+  state?: string
+  ok?: boolean
+  prNumber?: number | null
+  url?: string
+  branch?: string
+  summary?: string
+  login?: string
+  tasks?: Array<{ id: string; title: string }>
+  paths?: string[]
+}
+
+/** What one person's own Claude account spent in one day. */
+export interface UsageDay {
+  day: string
+  login: string
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  turns: number
+}
+
+export interface GitHubStatus {
+  repo: string | null
+  pulls: Array<{
+    number: number
+    title: string
+    author: string
+    url: string
+    draft: boolean
+    headRef: string
+    baseRef: string
+    updatedAt: string
+  }>
+  runs: Array<{
+    id: number
+    workflow: string
+    title: string
+    branch: string
+    event: string
+    status: string
+    conclusion: string | null
+    url: string
+    createdAt: string
+  }>
+  error: string | null
+  fetchedAt: number
+}
+
 export interface PeerJoinResult {
   participantId: string
   participantToken: string
@@ -169,6 +227,9 @@ export const api = {
       body: JSON.stringify(input),
     }),
   snapshot: (ref: string) => request<SessionSnapshot>(`/sessions/${ref}/snapshot`),
+  history: (ref: string) =>
+    request<{ entries: HistoryEntry[]; usage: UsageDay[] }>(`/sessions/${ref}/history`),
+  github: (ref: string) => request<GitHubStatus>(`/sessions/${ref}/github`),
   joinToken: (ref: string) =>
     request<{ token: string; expiresAt: number; command: string }>(
       `/api/sessions/${ref}/join-token`,

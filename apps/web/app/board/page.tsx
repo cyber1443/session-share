@@ -11,6 +11,9 @@ import { JoinCode } from '@/components/join-code'
 import { Kanban } from '@/components/kanban'
 import { Room } from '@/components/room'
 import { TicketPanel } from '@/components/ticket'
+import { HistoryView } from '@/components/history'
+import { UsageView } from '@/components/usage'
+import { GitHubView } from '@/components/github'
 import { useLiveSession } from '@/lib/live'
 import { tokens } from '@/lib/tokens'
 
@@ -27,6 +30,9 @@ const DOT = [
 
 const PHASES = ['plan', 'build', 'integrate', 'done'] as const
 
+const VIEWS = ['board', 'history', 'usage', 'github'] as const
+type View = (typeof VIEWS)[number]
+
 
 function Board({ slug }: { slug: string }) {
   const { me, mode } = useAuth()
@@ -35,6 +41,7 @@ function Board({ slug }: { slug: string }) {
   const [chatFilter, setChatFilter] = useState<string | null>(null)
   const [pairing, setPairing] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [view, setView] = useState<View>('board')
 
   if (error && !snapshot) {
     return (
@@ -211,7 +218,33 @@ function Board({ slug }: { slug: string }) {
 
         {/* the board + the room */}
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="relative min-h-0 flex-1 border-b border-edge">
+          <nav className="flex shrink-0 gap-1 border-b border-edge px-3 py-1.5 text-xs">
+            {VIEWS.map((name) => (
+              <button
+                key={name}
+                className={`rounded px-2 py-0.5 ${view === name ? 'bg-neutral-800 text-neutral-200' : 'text-mute hover:text-neutral-300'}`}
+                onClick={() => setView(name)}
+              >
+                {name}
+              </button>
+            ))}
+          </nav>
+          {view === 'history' ? (
+            <div className="min-h-0 flex-1">
+              <HistoryView slug={slug} snapshot={snapshot} />
+            </div>
+          ) : null}
+          {view === 'usage' ? (
+            <div className="min-h-0 flex-1">
+              <UsageView slug={slug} snapshot={snapshot} />
+            </div>
+          ) : null}
+          {view === 'github' ? (
+            <div className="min-h-0 flex-1">
+              <GitHubView slug={slug} />
+            </div>
+          ) : null}
+          <div className={`relative min-h-0 flex-1 border-b border-edge ${view === 'board' ? '' : 'hidden'}`}>
             <Kanban
               snapshot={snapshot}
               meId={mine?.id ?? null}
@@ -223,7 +256,7 @@ function Board({ slug }: { slug: string }) {
               onOpen={(ticketId) => setOpenTicket(ticketId === openTicket ? null : ticketId)}
             />
           </div>
-          <div className="h-64 shrink-0">
+          <div className={`h-64 shrink-0 ${view === 'board' ? '' : 'hidden'}`}>
             <Room
               snapshot={snapshot}
               events={events}
