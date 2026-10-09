@@ -46,6 +46,19 @@ CREATE TABLE IF NOT EXISTS join_tokens (
   used_at     INTEGER
 );
 
+/*
+ * Pictures and screenshots attached to tickets. Small, few, and owned by the
+ * session; the log carries references to them, never the bytes.
+ */
+CREATE TABLE IF NOT EXISTS files (
+  id          TEXT PRIMARY KEY,
+  session_id  TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  type        TEXT NOT NULL,
+  bytes       BLOB NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+
 /* CSRF state for the OAuth redirect, cleared as soon as it comes back. */
 CREATE TABLE IF NOT EXISTS oauth_states (
   state       TEXT PRIMARY KEY,
@@ -199,6 +212,25 @@ export class Store {
       )
       .all(sessionId, fromSeq, limit) as unknown as EventRow[]
     return rows.map(rowToEnvelope)
+  }
+
+  saveFile(file: { id: string; sessionId: SessionId; name: string; type: string; bytes: Uint8Array }): void {
+    this.db
+      .prepare('INSERT OR IGNORE INTO files (id, session_id, name, type, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(file.id, file.sessionId, file.name, file.type, file.bytes, Date.now())
+  }
+
+  readFile(sessionId: SessionId, id: string): { name: string; type: string; bytes: Uint8Array } | null {
+    const row = this.db
+      .prepare('SELECT name, type, bytes FROM files WHERE session_id = ? AND id = ?')
+      .get(sessionId, id) as { name: string; type: string; bytes: Uint8Array } | undefined
+    return row ?? null
+  }
+
+  listFileIds(sessionId: SessionId): string[] {
+    return (this.db.prepare('SELECT id FROM files WHERE session_id = ? ORDER BY created_at').all(sessionId) as Array<{ id: string }>).map(
+      (row) => row.id,
+    )
   }
 
   maxSeq(sessionId: SessionId): number {

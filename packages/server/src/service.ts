@@ -208,6 +208,123 @@ export class SessionService {
     }
   }
 
+  private askToShip(
+    sessionId: SessionId,
+    actorId: ParticipantId,
+    state: SessionState,
+    ticket: Ticket,
+    why: string,
+  ): void {
+    const shipper = this.verifier(state, ticket)
+    if (!shipper) return
+    this.systemDirective(
+      sessionId,
+      actorId,
+      [shipper],
+      `"${ticket.title}" was ${why}. Open the pull request with ss_ship, then record its number with ss_ticket_shipped. Leave it open -- merging is not yours to decide.`,
+    )
+  }
+
+  private requireFiles(sessionId: SessionId, attachments: Array<{ id: string }>): void {
+    const missing = attachments.filter((a) => !this.store.readFile(sessionId, a.id))
+    if (missing.length > 0) {
+      throw new ServiceError('bad_request', `Upload these first: ${missing.map((a) => a.id).join(', ')}.`)
+    }
+  }
+
+  private attach(command: Extract<ClientCommand, { type: 'ticket.attach' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    this.requireFiles(sessionId, command.attachments)
+    this.emit(sessionId, participantId, { type: 'ticket.attached', ticketId: ticket.id, attachments: command.attachments })
+    return { ticket: this.requireTicket(state, ticket.id) }
+  }
+
+  private setNeedsHuman(command: Extract<ClientCommand, { type: 'ticket.needsHuman' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    if (ticket.needsHuman !== command.value) {
+      this.emit(sessionId, participantId, { type: 'ticket.needsHuman', ticketId: ticket.id, value: command.value })
+      const after = this.requireTicket(state, ticket.id)
+      this.refreshTicketStates(sessionId, participantId)
+      // Switched off while it was waiting for a look: nothing stands between it and its PR now.
+      if (!command.value && after.verification?.passed && state.ticketStateFor(ticket.id) === 'review' && !after.prNumber) {
+        this.askToShip(sessionId, participantId, state, after, 'passed its run, and no longer waits for a person')
+      }
+    }
+    return { ticket: this.requireTicket(state, ticket.id) }
+  }
+
+  /**
+   * A person clicked through the running thing. Passing sends it on to its
+   * pull request; failing is a failed run, which reopens the work.
+   */
+  private humanCheck(command: Extract<ClientCommand, { type: 'ticket.humanCheck' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    if (state.ticketStateFor(ticket.id) !== 'verify' || !ticket.verification?.passed) {
+      throw new ServiceError('not_ready', `"${ticket.title}" is not waiting for a look: it needs its automated run to pass first.`)
+    }
+    const by = state.participants.get(participantId)?.displayName ?? 'Someone'
+    if (!command.passed) {
+      return this.recordVerification(
+        {
+          type: 'ticket.verified',
+          ticketId: ticket.id,
+          passed: false,
+          how: `checked by hand by ${by}`,
+          summary: command.note || 'It does not work when tried by hand.',
+          broke: [],
+        },
+        ctx,
+      )
+    }
+    this.emit(sessionId, participantId, {
+      type: 'ticket.humanCheck',
+      ticketId: ticket.id,
+      check: { passed: true, note: command.note, by: participantId, at: Date.now() },
+    })
+    this.refreshTicketStates(sessionId, participantId)
+    this.askToShip(sessionId, participantId, state, ticket, `checked by hand by ${by}${command.note ? ` (${command.note})` : ''}`)
+    return { ticket: this.requireTicket(state, ticket.id) }
+  }
+
+  /**
+   * Starts the ticket's assembled branch on the caller's own machine, for them
+   * to try. Their own Claude Code does it -- this server cannot run anything
+   * on anyone's laptop.
+   */
+  private runLocally(command: Extract<ClientCommand, { type: 'ticket.runLocally' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    const me = state.participants.get(participantId)
+    const login = me?.githubLogin.toLowerCase()
+    const checkout = me?.repoPath
+      ? me
+      : [...state.participants.values()].find(
+          (p) => p.repoPath && p.githubLogin.toLowerCase() === login && this.isPresent(p),
+        )
+    if (!checkout) {
+      throw new ServiceError('not_ready', 'You have no checkout attached to start it in. Run /ss:join in a clone first.')
+    }
+    const branch = state.session?.contractBranch ?? 'the contract branch'
+    this.systemDirective(
+      sessionId,
+      participantId,
+      [checkout.id],
+      [
+        `Start "${ticket.title}" so ${me?.displayName ?? 'they'} can try it by hand.`,
+        `1. Make a separate worktree of ${branch} with ss_worktree (do not switch this checkout's branch).`,
+        '2. Install what it needs and start the app there, detached so it keeps running after this turn',
+        '   (for example `nohup npm run dev > run.log 2>&1 &`), and wait until it answers.',
+        '3. Post in the room with ss_chat_post how to reach it -- the local URL, or the command to run for a CLI --',
+        '   and what to try, from the ticket and its split.',
+        'Do not judge it yourself; they will pass or fail it on the board.',
+      ].join('\n'),
+    )
+    return { asked: checkout.id }
+  }
+
   /**
    * A pull request was merged -- from the board or on GitHub. Whichever
    * tickets it was for are done. Returns the tickets it finished.
@@ -439,6 +556,14 @@ export class SessionService {
         return this.reportActivity(command, ctx)
       case 'agent.heartbeat':
         return this.heartbeat(command, ctx)
+      case 'ticket.attach':
+        return this.attach(command, ctx)
+      case 'ticket.needsHuman':
+        return this.setNeedsHuman(command, ctx)
+      case 'ticket.humanCheck':
+        return this.humanCheck(command, ctx)
+      case 'ticket.runLocally':
+        return this.runLocally(command, ctx)
       case 'agent.doing': {
         const { sessionId, participantId } = this.requireParticipant(ctx)
         if (ctx.via === 'board') throw new ServiceError('forbidden', 'Only a checkout reports what its Claude is doing.')
@@ -642,8 +767,12 @@ export class SessionService {
       decompositionId: null,
       prNumber: null,
       mergedAt: null,
+      attachments: command.attachments.map((a) => ({ ...a, kind: 'brief' as const })),
+      needsHuman: command.needsHuman,
+      humanCheck: null,
       createdAt: Date.now(),
     }
+    this.requireFiles(sessionId, ticket.attachments)
     this.emit(sessionId, participantId, { type: 'ticket.created', ticket })
 
     const author = state.participants.get(participantId)
@@ -965,10 +1094,14 @@ export class SessionService {
         '   Playwright or Cypress config, docker compose, an Xcode or Android target, a CLI.',
         '   Read the repo rather than assuming; the answer is in there.',
         '3. Start it and exercise the feature end to end, the way a person would. If it is a',
-        '   web app, drive the browser. If it is an app, use the simulator or emulator. If it',
-        '   is a library or CLI, run the real commands against real input.',
+        '   web app, drive a headless browser with Playwright (`npx playwright` -- install its',
+        '   chromium if it is missing), click through the flows the ticket describes, and save',
+        '   a screenshot at each meaningful step. If it is an app, use the simulator or emulator.',
+        '   If it is a library or CLI, run the real commands against real input and keep the output.',
         '4. Look at the seams specifically: each task passed its own tests in isolation, so the',
         '   interesting failures are where the pieces meet.',
+        '5. Attach the evidence to the ticket with ss_attach (kind "verify"): the screenshots,',
+        '   each with a caption saying what it shows. People decide from those.',
         '',
         'Then report with ss_ticket_verified: passed true or false, `how` you exercised it, and',
         'what you saw. Passing sends it to review. Failing reopens work, so it needs `broke`:',
@@ -1067,16 +1200,19 @@ export class SessionService {
     this.refreshTicketStates(sessionId, participantId)
 
     const by = state.participants.get(participantId)?.displayName ?? 'Someone'
-    if (command.passed) {
-      const shipper = this.verifier(state, ticket)
-      if (shipper) {
-        this.systemDirective(
-          sessionId,
-          participantId,
-          [shipper],
-          `"${ticket.title}" was verified by ${by} (${command.how}). Open the pull request with ss_ship, then record its number with ss_ticket_shipped. Leave it open -- merging is not yours to decide.`,
-        )
-      }
+    if (command.passed && ticket.needsHuman) {
+      /**
+       * The automated run is in; a person still has to look. Said to the room
+       * rather than to an agent, because there is nothing for an agent to do.
+       */
+      this.systemMessage(
+        sessionId,
+        participantId,
+        ticket.members,
+        `"${ticket.title}" passed its automated run (${command.how}). It asked for a person's look as well: open it on the board, press "run it for me" to start it on your machine, click through, then pass or fail it.`,
+      )
+    } else if (command.passed) {
+      this.askToShip(sessionId, participantId, state, ticket, `verified by ${by} (${command.how})`)
     } else {
       /**
        * A failure goes to everyone who built it, not just whoever found it --
@@ -1196,6 +1332,9 @@ export class SessionService {
       [
         `Split the ticket "${ticket.title}" for ${people} person(s).`,
         ticket.body ? `\n${ticket.body}` : '',
+        ticket.attachments.some((a) => a.kind === 'brief')
+          ? `\nThe brief comes with ${ticket.attachments.filter((a) => a.kind === 'brief').length} picture(s). Look at them first: ss_ticket_files (ticketId: ${ticket.id}) saves them where you can Read them.`
+          : '',
         '',
         'Read the repository, then call ss_propose with:',
         `  ticketId: ${ticket.id}`,

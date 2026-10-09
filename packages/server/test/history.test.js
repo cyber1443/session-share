@@ -311,3 +311,44 @@ describe('merging from the board', () => {
     }
   })
 })
+
+describe('pictures on tickets', () => {
+  it('stores raster pictures for a seat, refuses anything else, and serves them only to the session', async () => {
+    const { join } = await seats('pics')
+    const ann = await join('ann', '/tmp/ann/pics', 'm1')
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+    const upload = (type, body, token = ann.participantToken) =>
+      fetch(new URL('/sessions/pics/files', base), {
+        method: 'POST',
+        headers: { 'content-type': type, 'x-file-name': 'mock.png', authorization: `Bearer ${token}` },
+        body,
+      }).then(async (r) => ({ status: r.status, body: await r.json() }))
+
+    const stored = await upload('image/png', png)
+    assert.equal(stored.status, 200, JSON.stringify(stored.body))
+    assert.equal(stored.body.name, 'mock.png')
+    assert.equal((await upload('image/svg+xml', '<svg onload="alert(1)"/>')).status, 415, 'an SVG can carry script')
+
+    const made = await command(ann.participantToken, 'pics', {
+      type: 'ticket.create',
+      title: 'Looks like this',
+      body: '',
+      attachments: [{ ...stored.body, kind: 'brief' }],
+      needsHuman: true,
+    })
+    assert.equal(made.status, 200, JSON.stringify(made.body))
+    assert.equal(made.body.data.ticket.attachments[0].id, stored.body.id)
+    assert.equal(made.body.data.ticket.needsHuman, true)
+
+    const missing = await command(ann.participantToken, 'pics', {
+      type: 'ticket.create', title: 'x', body: '', attachments: [{ id: 'nope', name: 'x', type: 'image/png', size: 1 }],
+    })
+    assert.equal(missing.status, 400, 'a reference to a file nobody uploaded is refused')
+
+    const served = await fetch(new URL(`/sessions/pics/files/${stored.body.id}`, base), { headers: bearer(ann.participantToken) })
+    assert.equal(served.headers.get('content-type'), 'image/png')
+    assert.equal(served.headers.get('x-content-type-options'), 'nosniff')
+    assert.deepEqual(Buffer.from(await served.arrayBuffer()), png)
+    assert.equal((await fetch(new URL(`/sessions/pics/files/${stored.body.id}`, base))).status, 401)
+  })
+})

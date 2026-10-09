@@ -676,3 +676,54 @@ describe('whose task an agent takes', () => {
     assert.equal(s.run(a, { type: 'task.claim' }).task.id, bobTask.id)
   })
 })
+
+describe('a ticket that asks for a human look', () => {
+  function verifiable(s, a, b) {
+    const made = liveTicket(s, a, b, 'Looks', 'src/l/c.ts', [spec('look-one', ['src/l/x/**'])])
+    s.run(a, { type: 'ticket.needsHuman', ticketId: made.ticket.id, value: true })
+    const task = [...s.state().tasks.values()][0]
+    const owner = task.assigneeId === a.participantId ? a : b
+    s.run(owner, { type: 'task.claim', taskId: task.id })
+    s.run(owner, { type: 'task.merged', taskId: task.id, commitSha: 'x' })
+    return made.ticket
+  }
+
+  it('waits in verify after the automated run passes, until someone tries it', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const ticket = verifiable(s, a, b)
+    s.run(a, { type: 'ticket.verified', ticketId: ticket.id, passed: true, how: 'playwright', summary: 'ok' })
+    assert.equal(s.state().ticketStateFor(ticket.id), 'verify', 'a passing run is not enough on its own')
+    const shipNow = () => s.state().chat.filter((m) => m.directive && /ss_ship/.test(m.body)).length
+    assert.equal(shipNow(), 0)
+
+    s.run(b, { type: 'ticket.humanCheck', ticketId: ticket.id, passed: true, note: 'clicked through it' })
+    assert.equal(s.state().ticketStateFor(ticket.id), 'review')
+    assert.equal(shipNow(), 1, 'and only then is the PR asked for')
+  })
+
+  it('reopens the work when the person finds it broken', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const ticket = verifiable(s, a, b)
+    s.run(a, { type: 'ticket.verified', ticketId: ticket.id, passed: true, how: 'playwright', summary: 'ok' })
+    s.run(b, { type: 'ticket.humanCheck', ticketId: ticket.id, passed: false, note: 'the button does nothing' })
+    assert.equal(s.state().ticketStateFor(ticket.id), 'building')
+    assert.equal(s.state().tasks.get('look-one').state, 'ready')
+    assert.match(s.state().tickets.get(ticket.id).verification.summary, /button does nothing/)
+  })
+
+  it("asks the caller's own checkout to start it for them", () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const ticket = verifiable(s, a, b)
+    const asked = s.run(b, { type: 'ticket.runLocally', ticketId: ticket.id })
+    assert.equal(asked.asked, b.participantId)
+    const directive = s.state().chat.filter((m) => m.directive).at(-1)
+    assert.deepEqual(directive.mentions, [b.participantId])
+    assert.match(directive.body, /ss_worktree/)
+  })
+})

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -149,6 +149,9 @@ const ImportSessionRequest = z.object({
       }),
     )
     .max(200_000),
+  files: z
+    .array(z.object({ id: z.string().max(64), name: z.string().max(200), type: z.string().max(100), base64: z.string() }))
+    .default([]),
 })
 
 export interface AppOptions {
@@ -519,9 +522,12 @@ export function createApp(options: AppOptions = {}): App {
     if (!parsed.success) {
       return reply.code(400).send({ error: 'bad_request', message: parsed.error.message })
     }
-    const { sessionId, slug, events } = parsed.data
+    const { sessionId, slug, events, files } = parsed.data
     try {
       const result = store.importEvents(sessionId as SessionId, slug, events)
+      for (const file of files) {
+        store.saveFile({ id: file.id, sessionId: sessionId as SessionId, name: file.name, type: file.type, bytes: Buffer.from(file.base64, 'base64') })
+      }
       service.reload(sessionId as SessionId)
       /**
        * Seats name people by user id, and a peer user's id is minted by the
@@ -602,6 +608,60 @@ export function createApp(options: AppOptions = {}): App {
     const sessionId = readable(request, reply)
     if (!sessionId) return reply
     return service.snapshotOf(sessionId)
+  })
+
+  /**
+   * Pictures for a ticket's brief and screenshots from running it. Raster
+   * images only: an SVG can carry script, and these are served from the same
+   * origin as the board.
+   */
+  const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+  const MAX_FILE_BYTES = 10 * 1024 * 1024
+  fastify.addContentTypeParser(
+    [...IMAGE_TYPES],
+    { parseAs: 'buffer', bodyLimit: MAX_FILE_BYTES },
+    (_request, body, done) => done(null, body),
+  )
+
+  fastify.post('/sessions/:ref/files', async (request, reply) => {
+    const sessionId = readable(request, reply)
+    if (!sessionId) return reply
+    const type = String(request.headers['content-type'] ?? '').split(';')[0]!.trim()
+    if (!IMAGE_TYPES.has(type) || !Buffer.isBuffer(request.body)) {
+      return reply.code(415).send({ error: 'bad_request', message: 'Only PNG, JPEG, GIF and WebP pictures can be attached.' })
+    }
+    const bytes = request.body as Buffer
+    let name = 'picture'
+    try {
+      name = decodeURIComponent(String(request.headers['x-file-name'] ?? 'picture')).slice(0, 200) || 'picture'
+    } catch {
+      // A name that does not decode is not worth refusing the picture over.
+    }
+    // Named by what is in it: the same picture twice is one file, and a mirror can tell what it has.
+    const id = createHash('sha256').update(bytes).digest('hex').slice(0, 32)
+    store.saveFile({ id, sessionId, name, type, bytes })
+    return { id, name, type, size: bytes.length }
+  })
+
+  /** Which files the session holds, for a mirror deciding what it still has to copy. */
+  fastify.get('/sessions/:ref/files', async (request, reply) => {
+    const sessionId = readable(request, reply)
+    if (!sessionId) return reply
+    return { ids: store.listFileIds(sessionId) }
+  })
+
+  fastify.get('/sessions/:ref/files/:id', async (request, reply) => {
+    const sessionId = readable(request, reply)
+    if (!sessionId) return reply
+    const { id } = request.params as { id: string }
+    const file = store.readFile(sessionId, id)
+    if (!file) return reply.code(404).send({ error: 'not_found' })
+    return reply
+      .header('content-type', file.type)
+      .header('x-content-type-options', 'nosniff')
+      .header('content-security-policy', "default-src 'none'")
+      .header('cache-control', 'private, max-age=31536000, immutable')
+      .send(Buffer.from(file.bytes))
   })
 
   /** What happened over the whole project, and what each person's Claude spent on it. */
