@@ -15683,6 +15683,13 @@ var Preferences = external_exports.object({
   autopilot: external_exports.enum(["off", "splits", "full"]).default("full"),
   /** Tokens per day this machine may spend unattended. */
   autopilotBudget: external_exports.number().int().min(0).default(1e6),
+  /**
+   * Whether this checkout copies the session's event log to the repository's
+   * `session-share/log` branch, so the session outlives the machine hosting it.
+   * Everything the board shows goes there, the room included -- on a public
+   * repository, that is public.
+   */
+  mirror: external_exports.boolean().default(true),
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });

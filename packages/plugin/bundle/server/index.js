@@ -65336,6 +65336,47 @@ var Store = class {
     }
     return envelope;
   }
+  /**
+   * Puts a log back exactly as it was written elsewhere: the same session id,
+   * the same seqs, the same timestamps and authors. Used to restore a session
+   * from its mirror, so everything that refers to an id -- tokens, tasks,
+   * leases -- means what it meant before.
+   *
+   * Only ever extends. Events this store already has are checked against the
+   * incoming ones and skipped; anything that disagrees, or a gap, refuses the
+   * whole import rather than splicing two histories together.
+   */
+  importEvents(sessionId, slug, events) {
+    return this.transaction(() => {
+      const owner = this.findSessionIdByRef(slug);
+      if (owner && owner !== sessionId) {
+        throw new Error(`The slug "${slug}" already names another session on this server.`);
+      }
+      const known = this.db.prepare("SELECT id FROM sessions WHERE id = ?").get(sessionId);
+      if (!known) this.createSession(sessionId, slug, events[0]?.ts ?? Date.now());
+      let next = this.maxSeq(sessionId) + 1;
+      let added = 0;
+      const existing = this.db.prepare("SELECT body FROM events WHERE session_id = ? AND seq = ?");
+      const insert = this.db.prepare(
+        "INSERT INTO events (session_id, seq, ts, actor_id, body) VALUES (?, ?, ?, ?, ?)"
+      );
+      for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+        const body = JSON.stringify(event.body);
+        if (event.seq < next) {
+          const row = existing.get(sessionId, event.seq);
+          if (row && row.body !== body) {
+            throw new Error(`Event ${event.seq} differs from this server's copy; refusing to mix two histories.`);
+          }
+          continue;
+        }
+        if (event.seq !== next) throw new Error(`The log has a gap before event ${event.seq}.`);
+        insert.run(sessionId, event.seq, event.ts, event.actorId, body);
+        next++;
+        added++;
+      }
+      return { added, upToSeq: next - 1 };
+    });
+  }
   readEvents(sessionId, fromSeq = 0, limit = 5e3) {
     const rows = this.db.prepare(
       "SELECT session_id, seq, ts, actor_id, body FROM events WHERE session_id = ? AND seq >= ? ORDER BY seq LIMIT ?"
@@ -65515,6 +65556,10 @@ var SessionService = class {
       for (const sessionId of touched) this.states.delete(sessionId);
       throw error51;
     }
+  }
+  /** Drops the folded state so the next read rebuilds it from the log, as after an import. */
+  reload(sessionId) {
+    this.states.delete(sessionId);
   }
   /** Marks someone present now -- used when a socket opens. */
   seen(participantId) {
@@ -67732,6 +67777,18 @@ var PeerJoinRequest = external_exports.object({
   /** Which machine the checkout is on; see Participant.machineId. */
   machineId: external_exports.string().min(1).max(100).nullish()
 });
+var ImportSessionRequest = external_exports.object({
+  sessionId: external_exports.string().uuid(),
+  slug: external_exports.string().min(1).max(100),
+  events: external_exports.array(
+    external_exports.object({
+      seq: external_exports.number().int().nonnegative(),
+      ts: external_exports.number().int().nonnegative(),
+      actorId: ParticipantId.nullable(),
+      body: EventBody
+    })
+  ).max(2e5)
+});
 function defaultWebRoot() {
   const here = dirname3(fileURLToPath(import.meta.url));
   const candidates = [
@@ -67973,6 +68030,49 @@ function createApp(options = {}) {
     } catch (error51) {
       return sendServiceError(reply, error51);
     }
+  });
+  fastify.post("/api/sessions/import", { bodyLimit: 256 * 1024 * 1024 }, async (request, reply) => {
+    if (!isHost(request)) {
+      return reply.code(403).send({ error: "forbidden", message: "Only the machine running this server can restore a session." });
+    }
+    const parsed = ImportSessionRequest.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "bad_request", message: parsed.error.message });
+    }
+    const { sessionId, slug, events } = parsed.data;
+    try {
+      const result = store.importEvents(sessionId, slug, events);
+      service.reload(sessionId);
+      if (auth.mode === "peer") {
+        for (const participant of service.state(sessionId).participants.values()) {
+          if (!participant.userId || store.findUserById(participant.userId)) continue;
+          if (store.findUserByGithubId(peerUserId(participant.githubLogin))) continue;
+          store.saveUser({
+            id: participant.userId,
+            githubId: peerUserId(participant.githubLogin),
+            githubLogin: participant.githubLogin,
+            displayName: participant.displayName,
+            avatarUrl: participant.avatarUrl
+          });
+        }
+      }
+      return {
+        sessionId,
+        slug,
+        ...result,
+        invite: auth.mode === "peer" ? issueInvite(auth, sessionId) : null
+      };
+    } catch (error51) {
+      return reply.code(409).send({ error: "conflict", message: error51 instanceof Error ? error51.message : String(error51) });
+    }
+  });
+  fastify.get("/sessions/:ref/events", async (request, reply) => {
+    const sessionId = readable(request, reply);
+    if (!sessionId) return reply;
+    const query = request.query;
+    const from = Math.max(0, Number(query.from ?? 0) || 0);
+    const limit = Math.min(5e3, Math.max(1, Number(query.limit ?? 1e3) || 1e3));
+    return { events: store.readEvents(sessionId, from, limit), maxSeq: store.maxSeq(sessionId) };
   });
   const readable = (request, reply) => {
     const claims = bearerClaims(request);

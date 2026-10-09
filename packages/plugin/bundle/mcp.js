@@ -4435,11 +4435,11 @@ var require_core = __commonJS({
     Ajv2.ValidationError = validation_error_1.default;
     Ajv2.MissingRefError = ref_error_1.default;
     exports.default = Ajv2;
-    function checkOptions(checkOpts, options, msg, log2 = "error") {
+    function checkOptions(checkOpts, options, msg, log3 = "error") {
       for (const key in checkOpts) {
         const opt = key;
         if (opt in options)
-          this.logger[log2](`${msg}: option ${key}. ${checkOpts[opt]}`);
+          this.logger[log3](`${msg}: option ${key}. ${checkOpts[opt]}`);
       }
     }
     function getSchEnv(keyRef) {
@@ -32609,6 +32609,13 @@ var Preferences = external_exports.object({
   autopilot: external_exports.enum(["off", "splits", "full"]).default("full"),
   /** Tokens per day this machine may spend unattended. */
   autopilotBudget: external_exports.number().int().min(0).default(1e6),
+  /**
+   * Whether this checkout copies the session's event log to the repository's
+   * `session-share/log` branch, so the session outlives the machine hosting it.
+   * Everything the board shows goes there, the room included -- on a public
+   * repository, that is public.
+   */
+  mirror: external_exports.boolean().default(true),
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });
@@ -32637,6 +32644,7 @@ function describePreferences(preferences) {
     `hosting:  ${preferences.expose === "lan" ? "reachable on your local network" : "this machine only"}`,
     `board:    ${preferences.openBoard ? "opens in your browser on host and join" : "never opened for you"}`,
     `room:     ${preferences.acceptDirectives ? "directives from the room run in this session" : "read-only; nothing from the room reaches your agent"}`,
+    `memory:   ${preferences.mirror ? "the session log is saved to the repo's session-share/log branch, so it survives this machine" : "the session lives only on the hosting machine"}`,
     `autopilot: ${preferences.autopilot === "off" ? "off \u2014 queued work waits for you" : preferences.autopilot === "splits" ? `planning runs itself when you are idle (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)` : `everything runs itself when you are idle, including writing and pushing code (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)`}`
   ].join("\n");
 }
@@ -32866,13 +32874,274 @@ function startAutopilot() {
   return () => clearInterval(timer);
 }
 
-// packages/plugin/src/open.ts
+// packages/plugin/src/mirror.ts
 import { spawn as spawn3 } from "node:child_process";
+import { mkdtempSync, rmSync as rmSync3 } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as join7 } from "node:path";
+var LOG_BRANCH = "session-share/log";
+var REMOTE_REF = `refs/remotes/origin/${LOG_BRANCH}`;
+var CHUNK = 1e3;
+function git(cwd, args, options = {}) {
+  return new Promise((resolve5, reject) => {
+    const child = spawn3("git", args, {
+      cwd,
+      env: { ...process.env, ...options.env },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => stdout += chunk);
+    child.stderr.on("data", (chunk) => stderr += chunk);
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve5(stdout.trim());
+      else reject(new Error(`git ${args[0]} failed: ${stderr.trim().split("\n").at(-1) ?? code}`));
+    });
+    child.stdin.end(options.input ?? "");
+  });
+}
+var chunkName = (seq) => String(Math.floor(seq / CHUNK)).padStart(6, "0");
+var sessionDir = (sessionId) => `sessions/${sessionId}`;
+async function fetchLog(cwd) {
+  try {
+    await git(cwd, ["fetch", "--quiet", "origin", `+refs/heads/${LOG_BRANCH}:${REMOTE_REF}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function remoteHead(cwd) {
+  try {
+    return await git(cwd, ["rev-parse", "--verify", "--quiet", `${REMOTE_REF}^{commit}`]);
+  } catch {
+    return null;
+  }
+}
+async function show(cwd, rev, path) {
+  try {
+    return await git(cwd, ["show", `${rev}:${path}`]);
+  } catch {
+    return null;
+  }
+}
+async function listMirrored(cwd) {
+  const head = await remoteHead(cwd);
+  if (!head) return [];
+  const names = await git(cwd, ["ls-tree", "--name-only", `${head}:sessions`]).catch(() => "");
+  const metas = [];
+  for (const name of names.split("\n").filter(Boolean)) {
+    const raw = await show(cwd, head, `${sessionDir(name)}/meta.json`);
+    if (!raw) continue;
+    try {
+      metas.push(JSON.parse(raw));
+    } catch {
+    }
+  }
+  return metas;
+}
+async function readMirrored(cwd, sessionId) {
+  const head = await remoteHead(cwd);
+  if (!head) return [];
+  const files = await git(cwd, ["ls-tree", "--name-only", `${head}:${sessionDir(sessionId)}/events`]).catch(() => "");
+  const events = [];
+  for (const file2 of files.split("\n").filter(Boolean).sort()) {
+    const raw = await show(cwd, head, `${sessionDir(sessionId)}/events/${file2}`);
+    for (const line of (raw ?? "").split("\n")) {
+      if (line.trim()) events.push(JSON.parse(line));
+    }
+  }
+  return events.sort((a, b) => a.seq - b.seq);
+}
+async function pushLog(cwd, source, attempts = 3) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    await fetchLog(cwd);
+    const parent = await remoteHead(cwd);
+    const metaPath = `${sessionDir(source.meta.sessionId)}/meta.json`;
+    const current = parent ? await show(cwd, parent, metaPath) : null;
+    const mirrored = current ? JSON.parse(current).upToSeq : -1;
+    if (mirrored >= source.maxSeq) return { pushed: false, reason: "the branch is already up to date" };
+    const dir = mkdtempSync(join7(tmpdir(), "ss-mirror-"));
+    const env = { GIT_INDEX_FILE: join7(dir, "index") };
+    try {
+      await git(cwd, parent ? ["read-tree", parent] : ["read-tree", "--empty"], { env });
+      const write = async (path, content) => {
+        const blob = await git(cwd, ["hash-object", "-w", "--stdin"], { input: content });
+        await git(cwd, ["update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], { env });
+      };
+      const firstChunk = Math.floor((mirrored + 1) / CHUNK);
+      const lastChunk = Math.floor(source.maxSeq / CHUNK);
+      for (let chunk = firstChunk; chunk <= lastChunk; chunk++) {
+        const from = chunk * CHUNK;
+        const to = Math.min(source.maxSeq, from + CHUNK - 1);
+        const events = await source.read(from, to);
+        const lines = events.map(
+          (event) => JSON.stringify({ seq: event.seq, ts: event.ts, actorId: event.actorId, body: event.body })
+        );
+        await write(`${sessionDir(source.meta.sessionId)}/events/${chunkName(from)}.jsonl`, `${lines.join("\n")}
+`);
+      }
+      const meta3 = { ...source.meta, upToSeq: source.maxSeq, updatedAt: Date.now() };
+      await write(metaPath, `${JSON.stringify(meta3, null, 2)}
+`);
+      if (!parent) {
+        await write(
+          "README.md",
+          [
+            "# session-share log",
+            "",
+            "This branch is the memory of the session-share sessions on this repository:",
+            "every ticket, split, task, message and usage report, as an append-only event log.",
+            "It is written by the plugin and read back by `/ss:host` to restore a session on any",
+            "machine. Nothing here is meant to be merged or edited by hand.",
+            ""
+          ].join("\n")
+        );
+      }
+      const tree = await git(cwd, ["write-tree"], { env });
+      const commit2 = await git(
+        cwd,
+        ["commit-tree", tree, ...parent ? ["-p", parent] : [], "-m", `log: ${source.meta.slug} up to event ${source.maxSeq}`]
+      );
+      try {
+        await git(cwd, ["push", "--quiet", "origin", `${commit2}:refs/heads/${LOG_BRANCH}`]);
+        return { pushed: true, upToSeq: source.maxSeq, commit: commit2 };
+      } catch (error51) {
+        if (attempt === attempts - 1) {
+          return { pushed: false, reason: error51 instanceof Error ? error51.message : String(error51) };
+        }
+      }
+    } finally {
+      rmSync3(dir, { recursive: true, force: true });
+    }
+  }
+  return { pushed: false, reason: "gave up after repeated push races" };
+}
+
+// packages/plugin/src/mirror-sync.ts
+import { appendFileSync as appendFileSync3, mkdirSync as mkdirSync7 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { join as join8 } from "node:path";
+var MIRROR_MS = Number(process.env.SESSION_SHARE_MIRROR_MS ?? 2 * 6e4);
+var logFile2 = () => join8(process.env.SESSION_SHARE_HOME ?? join8(homedir5(), ".session-share"), "mirror.log");
+function log2(line) {
+  try {
+    mkdirSync7(join8(logFile2(), ".."), { recursive: true });
+    appendFileSync3(logFile2(), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
+`);
+  } catch {
+  }
+}
+async function readEvents(config3, from, limit) {
+  const url2 = new URL(`/sessions/${config3.sessionRef}/events`, config3.serverUrl);
+  url2.searchParams.set("from", String(from));
+  url2.searchParams.set("limit", String(limit));
+  const response = await fetch(url2, {
+    headers: config3.participantToken ? { authorization: `Bearer ${config3.participantToken}` } : {},
+    signal: AbortSignal.timeout(15e3)
+  });
+  if (!response.ok) throw new Error(`the server answered ${response.status}`);
+  return await response.json();
+}
+async function mirrorOnce(config3) {
+  const first = await readEvents(config3, 0, 1);
+  const created = first.events[0]?.body;
+  if (!created || created.type !== "session.created") {
+    return { pushed: false, reason: "the session has no log yet" };
+  }
+  const session = created.session;
+  return pushLog(config3.repoPath, {
+    meta: {
+      sessionId: session.id,
+      slug: session.slug,
+      title: session.title,
+      repo: session.repo.owner === "local" ? null : { owner: session.repo.owner, name: session.repo.name }
+    },
+    maxSeq: first.maxSeq,
+    read: async (from, to) => {
+      const events = [];
+      let next = from;
+      while (next <= to) {
+        const page = await readEvents(config3, next, Math.min(5e3, to - next + 1));
+        if (page.events.length === 0) break;
+        events.push(...page.events.filter((event) => event.seq <= to));
+        next = page.events.at(-1).seq + 1;
+      }
+      return events;
+    }
+  });
+}
+var running2 = false;
+function startMirror() {
+  const env = process.env.SESSION_SHARE_MIRROR;
+  if (env === "off" || process.env.SESSION_SHARE_AUTOPILOT === "child") return () => void 0;
+  const tick = async () => {
+    if (running2 || !readPreferences().mirror) return;
+    const config3 = readConfig(process.env.SESSION_SHARE_REPO ?? process.cwd());
+    if (!config3) return;
+    running2 = true;
+    try {
+      const result = await mirrorOnce(config3);
+      if (result.pushed) log2(`pushed ${config3.sessionRef} up to event ${result.upToSeq}`);
+    } catch (error51) {
+      log2(`mirror failed: ${error51 instanceof Error ? error51.message : error51}`);
+    } finally {
+      running2 = false;
+    }
+  };
+  const timer = setInterval(() => void tick(), MIRROR_MS);
+  timer.unref?.();
+  const first = setTimeout(() => void tick(), 15e3);
+  first.unref?.();
+  return () => {
+    clearInterval(timer);
+    clearTimeout(first);
+  };
+}
+async function importInto(serverUrl, meta3, events) {
+  const response = await fetch(new URL("/api/sessions/import", serverUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json", [HOST_HEADER]: hostKey() },
+    body: JSON.stringify({ sessionId: meta3.sessionId, slug: meta3.slug, events })
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.message ?? payload.error ?? `import failed (${response.status})`);
+  return {
+    sessionId: meta3.sessionId,
+    slug: meta3.slug,
+    invite: payload.invite ?? null,
+    added: payload.added ?? 0,
+    upToSeq: payload.upToSeq ?? -1,
+    updatedAt: meta3.updatedAt
+  };
+}
+async function restoreFromMirror(root, serverUrl, repo, slug) {
+  if (!await fetchLog(root)) return null;
+  const candidates = (await listMirrored(root)).filter((meta4) => !repo || !meta4.repo || meta4.repo.owner === repo.owner && meta4.repo.name === repo.name).filter((meta4) => !slug || meta4.slug === slug).sort((a, b) => b.updatedAt - a.updatedAt);
+  const meta3 = candidates[0];
+  if (!meta3) return null;
+  return importInto(serverUrl, meta3, await readMirrored(root, meta3.sessionId));
+}
+async function catchUpFromMirror(root, serverUrl, slug) {
+  try {
+    if (!await fetchLog(root)) return 0;
+    const meta3 = (await listMirrored(root)).find((m) => m.slug === slug);
+    if (!meta3) return 0;
+    const restored = await importInto(serverUrl, meta3, await readMirrored(root, meta3.sessionId));
+    return restored.added;
+  } catch (error51) {
+    log2(`catch-up skipped: ${error51 instanceof Error ? error51.message : error51}`);
+    return 0;
+  }
+}
+
+// packages/plugin/src/open.ts
+import { spawn as spawn4 } from "node:child_process";
 function openInBrowser(url2) {
   if (process.env.SESSION_SHARE_NO_OPEN === "1") return false;
   const [command, args] = process.platform === "darwin" ? ["open", [url2]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url2]] : ["xdg-open", [url2]];
   try {
-    const child = spawn3(command, args, {
+    const child = spawn4(command, args, {
       detached: true,
       stdio: "ignore"
     });
@@ -32890,7 +33159,7 @@ function boardUrl(serverUrl, packedInvite, as) {
 
 // packages/plugin/src/git.ts
 import { execFile } from "node:child_process";
-import { existsSync as existsSync6, mkdirSync as mkdirSync7, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync8, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname4, isAbsolute as isAbsolute2, relative, resolve as resolve3 } from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
@@ -32904,7 +33173,7 @@ var GitError = class extends Error {
 };
 var contractBranch = (slug) => `ss/${slug}/contract`;
 var taskBranch = (slug, taskId) => `ss/${slug}/${taskId}`;
-async function git(cwd, args) {
+async function git2(cwd, args) {
   try {
     const { stdout } = await run("git", args, { cwd, timeout: 6e4, maxBuffer: 10 * 1024 * 1024 });
     return stdout.trim();
@@ -32920,32 +33189,32 @@ function summarize(stderr) {
 }
 async function hasRemote(cwd) {
   try {
-    await git(cwd, ["remote", "get-url", "origin"]);
+    await git2(cwd, ["remote", "get-url", "origin"]);
     return true;
   } catch {
     return false;
   }
 }
 async function currentBranch(cwd) {
-  return git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  return git2(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
 }
 async function baseBranch(cwd) {
   const here = await currentBranch(cwd);
   if (here !== "HEAD") return here;
   try {
-    const ref = await git(cwd, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+    const ref = await git2(cwd, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
     return ref.replace(/^origin\//, "");
   } catch {
     return "main";
   }
 }
 async function dirtyFiles(cwd) {
-  const output = await git(cwd, ["status", "--porcelain"]);
+  const output = await git2(cwd, ["status", "--porcelain"]);
   return output ? output.split("\n").map((line) => line.trim()) : [];
 }
 async function branchExists(cwd, branch) {
   try {
-    await git(cwd, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+    await git2(cwd, ["rev-parse", "--verify", `refs/heads/${branch}`]);
     return true;
   } catch {
     return false;
@@ -32953,28 +33222,28 @@ async function branchExists(cwd, branch) {
 }
 async function remoteBranchExists(cwd, branch) {
   try {
-    const output = await git(cwd, ["ls-remote", "--heads", "origin", branch]);
+    const output = await git2(cwd, ["ls-remote", "--heads", "origin", branch]);
     return output.length > 0;
   } catch {
     return false;
   }
 }
 async function fetch2(cwd) {
-  if (await hasRemote(cwd)) await git(cwd, ["fetch", "origin", "--prune"]);
+  if (await hasRemote(cwd)) await git2(cwd, ["fetch", "origin", "--prune"]);
 }
 async function checkoutBranch(cwd, branch, from) {
   if (await branchExists(cwd, branch)) {
-    await git(cwd, ["checkout", branch]);
+    await git2(cwd, ["checkout", branch]);
     await fastForward(cwd, branch);
     return "switched";
   }
   await fetch2(cwd);
   if (await remoteBranchExists(cwd, branch)) {
-    await git(cwd, ["checkout", "-b", branch, `origin/${branch}`]);
+    await git2(cwd, ["checkout", "-b", branch, `origin/${branch}`]);
     return "switched";
   }
   const base = await remoteBranchExists(cwd, from) ? `origin/${from}` : from;
-  await git(cwd, ["checkout", "-b", branch, base]);
+  await git2(cwd, ["checkout", "-b", branch, base]);
   return "created";
 }
 async function fastForward(cwd, branch) {
@@ -32982,8 +33251,8 @@ async function fastForward(cwd, branch) {
   await fetch2(cwd);
   if (!await remoteRefExists(cwd, branch)) return;
   const [local, upstream] = await Promise.all([
-    git(cwd, ["rev-parse", "HEAD"]),
-    git(cwd, ["rev-parse", `origin/${branch}`])
+    git2(cwd, ["rev-parse", "HEAD"]),
+    git2(cwd, ["rev-parse", `origin/${branch}`])
   ]);
   if (await isAncestor(cwd, upstream, local)) return;
   if (!await isAncestor(cwd, local, upstream)) {
@@ -32992,11 +33261,11 @@ async function fastForward(cwd, branch) {
       ""
     );
   }
-  await git(cwd, ["merge", "--ff-only", `origin/${branch}`]);
+  await git2(cwd, ["merge", "--ff-only", `origin/${branch}`]);
 }
 async function remoteRefExists(cwd, branch) {
   try {
-    await git(cwd, ["rev-parse", "--verify", `refs/remotes/origin/${branch}`]);
+    await git2(cwd, ["rev-parse", "--verify", `refs/remotes/origin/${branch}`]);
     return true;
   } catch {
     return false;
@@ -33008,33 +33277,33 @@ async function updateLocalBranch(cwd, branch) {
   if (!await remoteRefExists(cwd, branch)) return "no-remote";
   const remote = `origin/${branch}`;
   if (!await branchExists(cwd, branch)) {
-    await git(cwd, ["branch", branch, remote]);
+    await git2(cwd, ["branch", branch, remote]);
     return "updated";
   }
   if (await currentBranch(cwd) === branch) {
     const [head, upstream2] = await Promise.all([
-      git(cwd, ["rev-parse", "HEAD"]),
-      git(cwd, ["rev-parse", remote])
+      git2(cwd, ["rev-parse", "HEAD"]),
+      git2(cwd, ["rev-parse", remote])
     ]);
     if (await isAncestor(cwd, upstream2, head)) return "unchanged";
     if (!await isAncestor(cwd, head, upstream2)) return "diverged";
-    await git(cwd, ["merge", "--ff-only", remote]);
+    await git2(cwd, ["merge", "--ff-only", remote]);
     return "updated";
   }
   const [local, upstream] = await Promise.all([
-    git(cwd, ["rev-parse", branch]),
-    git(cwd, ["rev-parse", remote])
+    git2(cwd, ["rev-parse", branch]),
+    git2(cwd, ["rev-parse", remote])
   ]);
   if (local === upstream) return "unchanged";
   if (await isAncestor(cwd, upstream, local)) return "unchanged";
   if (!await isAncestor(cwd, local, upstream)) return "diverged";
-  const here = resolve3(await git(cwd, ["rev-parse", "--show-toplevel"]));
+  const here = resolve3(await git2(cwd, ["rev-parse", "--show-toplevel"]));
   const elsewhere = (await listWorktrees(cwd)).find(
     (tree) => tree.branch === branch && resolve3(tree.path) !== here
   );
   if (elsewhere) {
     try {
-      await git(elsewhere.path, ["merge", "--ff-only", remote]);
+      await git2(elsewhere.path, ["merge", "--ff-only", remote]);
       return "updated";
     } catch (error51) {
       throw new GitError(
@@ -33043,12 +33312,12 @@ async function updateLocalBranch(cwd, branch) {
       );
     }
   }
-  await git(cwd, ["update-ref", `refs/heads/${branch}`, upstream, local]);
+  await git2(cwd, ["update-ref", `refs/heads/${branch}`, upstream, local]);
   return "updated";
 }
 async function isAncestor(cwd, ancestor, of) {
   try {
-    await git(cwd, ["merge-base", "--is-ancestor", ancestor, of]);
+    await git2(cwd, ["merge-base", "--is-ancestor", ancestor, of]);
     return true;
   } catch {
     return false;
@@ -33071,7 +33340,7 @@ async function writeFiles(cwd, files) {
   const written = [];
   for (const [index, file2] of files.entries()) {
     const absolute = targets[index];
-    mkdirSync7(dirname4(absolute), { recursive: true });
+    mkdirSync8(dirname4(absolute), { recursive: true });
     writeFileSync7(absolute, file2.contents);
     written.push(file2.path);
   }
@@ -33103,23 +33372,23 @@ async function statusEntries(cwd) {
 async function commit(cwd, patterns, message) {
   const files = (await changedFiles(cwd)).filter((file2) => pathMatchesAny(file2, patterns));
   if (files.length === 0) return null;
-  await git(cwd, ["add", "-A", "--", ...files]);
-  await git(cwd, ["commit", "--only", "-m", message, "--", ...files]);
-  return git(cwd, ["rev-parse", "HEAD"]);
+  await git2(cwd, ["add", "-A", "--", ...files]);
+  await git2(cwd, ["commit", "--only", "-m", message, "--", ...files]);
+  return git2(cwd, ["rev-parse", "HEAD"]);
 }
 async function push(cwd, branch) {
   if (!await hasRemote(cwd)) return false;
-  await git(cwd, ["push", "-u", "origin", branch]);
+  await git2(cwd, ["push", "-u", "origin", branch]);
   return true;
 }
 async function mergeInto(cwd, into, from) {
-  await git(cwd, ["checkout", into]);
+  await git2(cwd, ["checkout", into]);
   try {
-    await git(cwd, ["merge", "--no-ff", from, "-m", `Merge ${from} into ${into}`]);
+    await git2(cwd, ["merge", "--no-ff", from, "-m", `Merge ${from} into ${into}`]);
     return { merged: true, conflicts: [] };
   } catch (error51) {
-    const conflicts = (await git(cwd, ["diff", "--name-only", "--diff-filter=U"])).split("\n").filter(Boolean);
-    await git(cwd, ["merge", "--abort"]).catch(() => void 0);
+    const conflicts = (await git2(cwd, ["diff", "--name-only", "--diff-filter=U"])).split("\n").filter(Boolean);
+    await git2(cwd, ["merge", "--abort"]).catch(() => void 0);
     if (conflicts.length === 0) throw error51;
     return { merged: false, conflicts };
   }
@@ -33163,11 +33432,11 @@ async function addWorktree(cwd, path, branch, from) {
   await fetch2(cwd);
   const base = await remoteBranchExists(cwd, from) ? `origin/${from}` : from;
   const args = await branchExists(cwd, branch) ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, base];
-  await git(cwd, args);
+  await git2(cwd, args);
   return "created";
 }
 async function listWorktrees(cwd) {
-  const output = await git(cwd, ["worktree", "list", "--porcelain"]);
+  const output = await git2(cwd, ["worktree", "list", "--porcelain"]);
   const trees = [];
   let current = {};
   for (const line of output.split("\n")) {
@@ -33183,7 +33452,7 @@ async function listWorktrees(cwd) {
 }
 async function canPush(cwd) {
   try {
-    await git(cwd, ["ls-remote", "--exit-code", "origin", "HEAD"]);
+    await git2(cwd, ["ls-remote", "--exit-code", "origin", "HEAD"]);
     return true;
   } catch {
     return false;
@@ -33266,7 +33535,7 @@ function registerGitTools(server, ctx) {
   server.registerTool(
     "ss_settings",
     {
-      description: "Read or change how session-share touches this machine: whether queued work runs itself while you are idle (autopilot) and what it may spend, when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, and whether the room can drive this agent.",
+      description: "Read or change how session-share touches this machine: whether queued work runs itself while you are idle (autopilot) and what it may spend, when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, whether the room can drive this agent, and whether the session log is saved to the repository (mirror).",
       inputSchema: {
         commitPolicy: external_exports.enum(["explicit", "auto-on-green"]).nullish(),
         push: external_exports.boolean().nullish(),
@@ -33275,7 +33544,8 @@ function registerGitTools(server, ctx) {
         openBoard: external_exports.boolean().nullish(),
         acceptDirectives: external_exports.boolean().nullish(),
         autopilot: external_exports.enum(["off", "splits", "full"]).nullish(),
-        autopilotBudget: external_exports.number().int().min(0).nullish()
+        autopilotBudget: external_exports.number().int().min(0).nullish(),
+        mirror: external_exports.boolean().nullish()
       }
     },
     async (input) => {
@@ -33784,8 +34054,18 @@ function createServer() {
           return null;
         }
       };
+      let restored = null;
+      const restore = async () => {
+        restored = await restoreFromMirror(
+          root,
+          loopback,
+          remote ? { owner: remote.owner, name: remote.name } : null,
+          given?.trim() ? slug : null
+        ).catch(() => null);
+        return restored?.invite ? { invite: restored.invite, resumed: true, slug: restored.slug } : null;
+      };
       const attached = readConfig(root);
-      const created = (given?.trim() ? null : await resume(attached?.sessionRef)) ?? (given?.trim() ? null : await resume(slugify2(basename(root)))) ?? await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? null;
+      const created = (given?.trim() ? null : await resume(attached?.sessionRef)) ?? (given?.trim() ? null : await resume(slugify2(basename(root)))) ?? await restore() ?? await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? null;
       if (!created) {
         throw new Error(
           `Sessions named "${slug}" on this server belong to other repositories. Pass a title to name this one.`
@@ -33794,6 +34074,8 @@ function createServer() {
       if (!created.invite) {
         throw new Error("This server verifies identity with GitHub; use the board to invite people.");
       }
+      const caughtUp = created.resumed && !restored ? await catchUpFromMirror(root, loopback, created.slug) : 0;
+      const memory = restored;
       const health = await probe(loopback);
       const packed = packInvite({
         url: dialUrl,
@@ -33818,6 +34100,7 @@ function createServer() {
       return text(
         [
           created.resumed ? `Resumed hosting "${title}" as ${identity.displayName}.` : `Hosting "${title}" as ${identity.displayName}.`,
+          memory ? `Restored from the repository's ${LOG_BRANCH} branch: ${memory.upToSeq + 1} events, last saved ${new Date(memory.updatedAt).toLocaleString()}. Everyone else re-joins with the invite below and gets their own seat and tasks back.` : caughtUp > 0 ? `Caught up ${caughtUp} event(s) from the ${LOG_BRANCH} branch that happened while this server was away.` : "",
           "",
           "Send your teammate this line:",
           `  /ss:join ${packed}`,
@@ -33945,12 +34228,17 @@ function createServer() {
   server.registerTool(
     "ss_stop_host",
     {
-      description: "Stop the coordination server running on this machine. Everyone loses the session until it is started again; the event log survives.",
+      description: "Stop the coordination server running on this machine. The session is saved to the repository first, so /ss:host on this or any other machine carries on from where it stopped.",
       inputSchema: {}
     },
-    async () => text(
-      await stopDaemon() === "stopped" ? "Stopped." : "Nothing was running. (Any stale record of one has been cleared.)"
-    )
+    async () => {
+      const attached = readConfig(await repoRoot(REPO_ROOT));
+      const saved = attached ? await mirrorOnce(attached).catch(() => null) : null;
+      const note = saved?.pushed ? ` The session is saved on the ${LOG_BRANCH} branch; /ss:host on any machine picks it up from there.` : "";
+      return text(
+        await stopDaemon() === "stopped" ? `Stopped.${note}` : `Nothing was running. (Any stale record of one has been cleared.)${note}`
+      );
+    }
   );
   server.registerTool(
     "ss_status",
@@ -34492,6 +34780,7 @@ if (isEntrypoint) {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   startAutopilot();
+  startMirror();
   process.stderr.write("[session-share] mcp server ready\n");
 }
 export {
