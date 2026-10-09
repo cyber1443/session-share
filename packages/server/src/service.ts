@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import {
   type ActivityFrame,
   type AutopilotMode,
+  type Doing,
   type ChatMessage,
   type ClientCommand,
   type CommandResultMap,
@@ -133,6 +134,13 @@ export class SessionService {
    * a Claude Code is open right now is not history worth a log entry a minute.
    */
   readonly autopilots = new Map<ParticipantId, { mode: AutopilotMode; at: number }>()
+  /** What each seat's Claude is doing now. Memory only; see Doing. */
+  readonly doing = new Map<ParticipantId, Doing>()
+  /**
+   * Told when something boards show live (but that is not an event) changed,
+   * so it reaches them now rather than on the next heartbeat. Set by the gateway.
+   */
+  onLive: ((sessionId: SessionId) => void) | null = null
 
   constructor(
     private readonly store: Store,
@@ -260,6 +268,23 @@ export class SessionService {
     return open
   }
 
+  /** What every seat in a session is doing now, for seats that have said. */
+  doingIn(sessionId: SessionId): Record<string, Doing> {
+    const out: Record<string, Doing> = {}
+    for (const participant of this.state(sessionId).participants.values()) {
+      const doing = this.doing.get(participant.id)
+      if (doing) out[participant.id] = doing
+    }
+    return out
+  }
+
+  /** Records what a seat is doing and lets open boards know at once. */
+  setDoing(sessionId: SessionId, participantId: ParticipantId, text: string): void {
+    const previous = this.doing.get(participantId)
+    this.doing.set(participantId, { text: text.slice(0, 200), at: Date.now() })
+    if (previous?.text !== text) this.onLive?.(sessionId)
+  }
+
   /**
    * The snapshot everyone actually reads, with presence resolved from when each
    * participant was last heard from rather than from a flag nobody clears.
@@ -282,6 +307,7 @@ export class SessionService {
         connected: this.isPresent(participant, now),
       })),
       autopilots: this.autopilotsIn(sessionId),
+      doing: this.doingIn(sessionId),
     }
   }
 
@@ -369,6 +395,12 @@ export class SessionService {
         return this.reportActivity(command, ctx)
       case 'agent.heartbeat':
         return this.heartbeat(command, ctx)
+      case 'agent.doing': {
+        const { sessionId, participantId } = this.requireParticipant(ctx)
+        if (ctx.via === 'board') throw new ServiceError('forbidden', 'Only a checkout reports what its Claude is doing.')
+        this.setDoing(sessionId, participantId, command.text)
+        return { ok: true as const }
+      }
     }
   }
 
@@ -2349,6 +2381,10 @@ export class SessionService {
     ctx: CommandContext,
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    // The gate is asked before every edit, which makes it the cheapest "now" there is.
+    if (ctx.via !== 'board' && command.paths[0]) {
+      this.setDoing(sessionId, participantId, `editing ${command.paths.join(', ')}`)
+    }
     const denials: LeaseDenial[] = []
     const granted = this.grantedPaths(state, participantId)
     const frozen = state.frozenContractPaths()
@@ -2575,7 +2611,12 @@ export class SessionService {
     if (ctx.via === 'board') {
       throw new ServiceError('forbidden', 'Only a checkout can report its autopilot.')
     }
+    const before = this.autopilots.get(participantId)
     this.autopilots.set(participantId, { mode: command.autopilot, at: Date.now() })
+    // A Claude Code that just opened, or changed its mind, is news for the board now.
+    if (!before || before.mode !== command.autopilot || Date.now() - before.at > 60_000) {
+      this.onLive?.(this.requireSession(ctx))
+    }
     return { ok: true as const }
   }
 

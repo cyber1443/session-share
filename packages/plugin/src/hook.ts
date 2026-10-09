@@ -33,6 +33,42 @@ interface HookInput {
   cwd?: string
   /** Set when a Stop hook already blocked this turn; blocking again would loop. */
   stop_hook_active?: boolean
+  /** What was typed, on UserPromptSubmit. */
+  prompt?: string
+}
+
+/**
+ * What a shell command or a prompt looks like once anything that resembles a
+ * credential is masked. The board is shared; `export GITHUB_TOKEN=...` should
+ * not be.
+ */
+export function redact(text: string): string {
+  return text
+    .replace(/\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 ***')
+    .replace(/\b([A-Za-z_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASS|PWD|AUTH)[A-Za-z_]*\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1***')
+    .replace(/\b(ghp|gho|ghu|ghs|github_pat|sk|sk-ant|xox[abp]|ssx|ssj)_?[A-Za-z0-9_-]{12,}/g, '***')
+    .replace(/(--(?:password|token|secret|api-key)[= ])\S+/gi, '$1***')
+    .replace(/:\/\/[^/\s:@]+:[^/\s@]+@/g, '://***@')
+}
+
+/** Short: this runs before every shell command, so it may cost a blink, never a wait. */
+const DOING_TIMEOUT_MS = 400
+
+/**
+ * Tells the board what this Claude just started on. Best effort and quick:
+ * a board missing one line is nothing, a shell command waiting on a slow
+ * network is something.
+ */
+async function reportDoing(input: HookInput, text: string): Promise<void> {
+  const config = readConfig(input.cwd ?? process.cwd())
+  if (!config) return
+  const line = redact(text).replace(/\s+/g, ' ').trim().slice(0, 200)
+  if (!line) return
+  try {
+    await runCommand(config, { type: 'agent.doing', text: line }, DOING_TIMEOUT_MS)
+  } catch {
+    // The board can do without it.
+  }
 }
 
 interface DenyOutput {
@@ -187,6 +223,13 @@ export async function route(
 
   switch (event) {
     case 'PreToolUse':
+      // Edits are reported by the lease check itself; a shell command says what it runs.
+      if (input.tool_name === 'Bash') {
+        const command = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+        const said = typeof input.tool_input?.description === 'string' ? input.tool_input.description : ''
+        await reportDoing(input, `running ${said ? `${said}: ` : ''}${command}`)
+        return null
+      }
       return decide(input)
 
     /**
@@ -201,6 +244,7 @@ export async function route(
       const reason = input.stop_hook_active ? null : await collectRoom(input) // we already spoke this turn
       // Handing over a directive keeps the turn going; otherwise the agent is idle now.
       if (config && !reason && process.env.SESSION_SHARE_AUTOPILOT !== 'child') markIdle(config.repoPath)
+      await reportDoing(input, reason ? 'picking up an instruction from the room' : 'idle -- waiting for the next prompt')
       return reason ? { decision: 'block', reason } : null
     }
 
@@ -210,6 +254,13 @@ export async function route(
       if (event === 'UserPromptSubmit' && process.env.SESSION_SHARE_AUTOPILOT !== 'child') {
         const config = readConfig(input.cwd ?? process.cwd())
         if (config) markBusy(config.repoPath)
+      }
+      if (event === 'UserPromptSubmit') {
+        const first = (input.prompt ?? '').split('\n').find((line) => line.trim()) ?? ''
+        await reportDoing(
+          input,
+          process.env.SESSION_SHARE_AUTOPILOT === 'child' ? `autopilot: ${first}` : `on: ${first}`,
+        )
       }
       const additionalContext = await collectRoom(input)
       return additionalContext

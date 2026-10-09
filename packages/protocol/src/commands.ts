@@ -231,6 +231,11 @@ export const ClientCommand = z.discriminatedUnion('type', [
     type: z.literal('agent.heartbeat'),
     autopilot: AutopilotMode,
   }),
+  /** A line for the board's "now": what this checkout's Claude just started doing. */
+  z.object({
+    type: z.literal('agent.doing'),
+    text: z.string().max(200),
+  }),
 ])
 export type ClientCommand = z.infer<typeof ClientCommand>
 export type CommandType = ClientCommand['type']
@@ -315,6 +320,7 @@ export interface CommandResultMap {
   'usage.report': { ok: true }
   'activity.report': { ok: true }
   'agent.heartbeat': { ok: true }
+  'agent.doing': { ok: true }
 }
 
 export type CommandResult<T extends CommandType> = CommandResultMap[T]

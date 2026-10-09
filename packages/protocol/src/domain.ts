@@ -69,6 +69,18 @@ export type ParticipantActivity = z.infer<typeof ParticipantActivity>
 export const AutopilotMode = z.enum(['off', 'splits', 'full'])
 export type AutopilotMode = z.infer<typeof AutopilotMode>
 
+/**
+ * What a seat's Claude is doing this moment -- the prompt it is on, the file
+ * it is editing, the command it is running -- and when that was said. Lives
+ * in the server's memory only: it is the board's "now", not the project's
+ * history.
+ */
+export const Doing = z.object({
+  text: z.string().max(200),
+  at: z.number(),
+})
+export type Doing = z.infer<typeof Doing>
+
 export const Participant = z.object({
   id: ParticipantId,
   sessionId: SessionId,
@@ -492,6 +504,8 @@ export const SessionSnapshot = z.object({
    * is missing here is closed (or on a plugin too old to say).
    */
   autopilots: z.record(z.string(), AutopilotMode).optional(),
+  /** What each seat's Claude is doing now; see Doing. */
+  doing: z.record(z.string(), Doing).optional(),
   seq: z.number().int().nonnegative(),
 })
 export type SessionSnapshot = z.infer<typeof SessionSnapshot>

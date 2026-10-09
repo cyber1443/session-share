@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { ClientCommand } from './commands.js'
 import { EventEnvelope } from './events.js'
-import { AutopilotMode } from './domain.js'
+import { AutopilotMode, Doing } from './domain.js'
 import { ParticipantId, Seq } from './ids.js'
 import { ActivityFrame } from './transport.js'
 
@@ -78,6 +78,7 @@ export const ServerMessage = z.discriminatedUnion('kind', [
     present: z.array(ParticipantId),
     /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
     autopilots: z.record(z.string(), AutopilotMode).optional(),
+    doing: z.record(z.string(), Doing).optional(),
   }),
 ])
 export type ServerMessage = z.infer<typeof ServerMessage>

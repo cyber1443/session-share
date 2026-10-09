@@ -47,6 +47,7 @@ export class Gateway {
 
   attach(service: SessionService): void {
     this.service = service
+    service.onLive = (sessionId) => this.announceSoon(sessionId)
     this.wss.on('connection', (socket, request) => this.onConnection(socket, request))
     this.heartbeat = setInterval(() => this.sweep(), HEARTBEAT_MS)
   }
@@ -75,6 +76,8 @@ export class Gateway {
 
   async close(): Promise<void> {
     if (this.heartbeat) clearInterval(this.heartbeat)
+    for (const timer of this.pendingLive.values()) clearTimeout(timer)
+    this.pendingLive.clear()
     for (const connection of this.connections) connection.socket.terminate()
     this.connections.clear()
     await new Promise<void>((resolve) => this.wss.close(() => resolve()))
@@ -287,21 +290,40 @@ export class Gateway {
     this.announcePresence()
   }
 
+  private readonly pendingLive = new Map<SessionId, ReturnType<typeof setTimeout>>()
+
+  /**
+   * Live state changed in a session: say so within half a second, coalescing
+   * a burst -- an agent editing ten files in a row is one update, not ten.
+   */
+  private announceSoon(sessionId: SessionId): void {
+    if (this.pendingLive.has(sessionId)) return
+    const timer = setTimeout(() => {
+      this.pendingLive.delete(sessionId)
+      this.announceTo(sessionId)
+    }, 500)
+    timer.unref?.()
+    this.pendingLive.set(sessionId, timer)
+  }
+
+  private announceTo(sessionId: SessionId): void {
+    const message: ServerMessage = {
+      kind: 'presence',
+      present: this.service.presentIn(sessionId),
+      autopilots: this.service.autopilotsIn(sessionId),
+      doing: this.service.doingIn(sessionId),
+    }
+    for (const connection of this.connections) {
+      if (connection.ctx.sessionId === sessionId) send(connection.socket, message)
+    }
+  }
+
   private announcePresence(): void {
     const sessions = new Set<SessionId>()
     for (const connection of this.connections) {
       if (connection.ctx.sessionId) sessions.add(connection.ctx.sessionId)
     }
-    for (const sessionId of sessions) {
-      const message: ServerMessage = {
-        kind: 'presence',
-        present: this.service.presentIn(sessionId),
-        autopilots: this.service.autopilotsIn(sessionId),
-      }
-      for (const connection of this.connections) {
-        if (connection.ctx.sessionId === sessionId) send(connection.socket, message)
-      }
-    }
+    for (const sessionId of sessions) this.announceTo(sessionId)
   }
 }
 

@@ -685,3 +685,16 @@ describe('autopilot', () => {
     delete process.env.SESSION_SHARE_REPO
   })
 })
+
+describe('what the board is told a shell command was', () => {
+  it('masks anything that looks like a credential', async () => {
+    const { redact } = await import('../dist/hook.js')
+    const said = redact(
+      'export GITHUB_TOKEN=ghp_abcdefghijklmnop1234 && curl -H "Authorization: Bearer abc.def.ghi12345" https://u:pw@x.dev --password hunter22 sk-ant-abcdefghijklmnopqrstu',
+    )
+    for (const secret of ['ghp_abcdefghijklmnop1234', 'abc.def.ghi12345', 'u:pw@', 'hunter22', 'sk-ant-abcdefghijklmnopqrstu']) {
+      assert.ok(!said.includes(secret), `${secret} leaked: ${said}`)
+    }
+    assert.match(redact('npm test -- src/board'), /npm test -- src\/board/, 'ordinary commands read as they are')
+  })
+})
