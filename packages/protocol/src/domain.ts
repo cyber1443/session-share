@@ -506,6 +506,8 @@ export const SessionSnapshot = z.object({
   autopilots: z.record(z.string(), AutopilotMode).optional(),
   /** What each seat's Claude is doing now; see Doing. */
   doing: z.record(z.string(), Doing).optional(),
+  /** Seats whose account has hit its usage limit; their work goes to others. */
+  limited: z.array(z.string()).optional(),
   seq: z.number().int().nonnegative(),
 })
 export type SessionSnapshot = z.infer<typeof SessionSnapshot>

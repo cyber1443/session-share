@@ -445,7 +445,13 @@ export class SessionState {
    * they already have loaded, and the longest task goes first so the critical
    * path starts early rather than being discovered at the end.
    */
-  pickTaskFor(participantId: ParticipantId): Task | null {
+  /**
+   * `available` says whether a seat can do its own work right now -- its
+   * Claude Code is open and its account is not out of usage. Someone else's
+   * task is only taken when its assignee is not; otherwise two agents race for
+   * it and the faster one does the other's work on its own account.
+   */
+  pickTaskFor(participantId: ParticipantId, available?: (id: ParticipantId) => boolean): Task | null {
     const touched = new Set<string>()
     for (const task of this.tasks.values()) {
       if (task.ownerId !== participantId) continue
@@ -461,7 +467,15 @@ export class SessionState {
     const rank = (task: Task) =>
       task.assigneeId === participantId ? 0 : task.assigneeId === null ? 1 : 2
 
-    const claimable = this.readyTasks().filter((task) => this.contractLanded(task))
+    const claimable = this.readyTasks()
+      .filter((task) => this.contractLanded(task))
+      .filter(
+        (task) =>
+          !available ||
+          !task.assigneeId ||
+          task.assigneeId === participantId ||
+          !available(task.assigneeId),
+      )
     const scored = claimable.map((task) => {
       const affinity = task.ownedPaths.some((glob) => touched.has(topLevel(glob))) ? 1 : 0
       const unblocks = [...this.tasks.values()].filter((t) =>

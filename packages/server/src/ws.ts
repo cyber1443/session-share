@@ -312,6 +312,7 @@ export class Gateway {
       present: this.service.presentIn(sessionId),
       autopilots: this.service.autopilotsIn(sessionId),
       doing: this.service.doingIn(sessionId),
+      limited: this.service.limitedIn(sessionId),
     }
     for (const connection of this.connections) {
       if (connection.ctx.sessionId === sessionId) send(connection.socket, message)

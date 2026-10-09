@@ -79,6 +79,7 @@ export const ServerMessage = z.discriminatedUnion('kind', [
     /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
     autopilots: z.record(z.string(), AutopilotMode).optional(),
     doing: z.record(z.string(), Doing).optional(),
+    limited: z.array(z.string()).optional(),
   }),
 ])
 export type ServerMessage = z.infer<typeof ServerMessage>

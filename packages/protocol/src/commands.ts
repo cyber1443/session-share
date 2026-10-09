@@ -230,6 +230,11 @@ export const ClientCommand = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('agent.heartbeat'),
     autopilot: AutopilotMode,
+    /**
+     * This account has hit its usage limit, so nothing will run here until it
+     * resets. Work waiting on this seat is handed to someone who can do it.
+     */
+    limited: z.boolean().default(false),
   }),
   /** A line for the board's "now": what this checkout's Claude just started doing. */
   z.object({

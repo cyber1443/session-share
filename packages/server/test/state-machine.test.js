@@ -653,3 +653,26 @@ describe('presence that keeps a task', () => {
     s.fails(b, { type: 'task.forceRelease', taskId: 'one' }, 'conflict')
   })
 })
+
+describe('whose task an agent takes', () => {
+  it('leaves a teammate their own task while their Claude Code is open, and takes it once they are gone', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    liveTicket(s, a, b, 'A', 'src/a/c.ts', [spec('mine', ['src/a/x/**']), spec('theirs', ['src/a/y/**'])])
+    const tasks = s.state().tasks
+    const aliceTask = [...tasks.values()].find((t) => t.assigneeId === a.participantId)
+    const bobTask = [...tasks.values()].find((t) => t.assigneeId === b.participantId)
+    s.run(a, { type: 'task.claim', taskId: aliceTask.id })
+    s.run(a, { type: 'task.merged', taskId: aliceTask.id, commitSha: 'x' })
+
+    s.run(b, { type: 'agent.heartbeat', autopilot: 'full' })
+    const left = s.run(a, { type: 'task.claim' })
+    assert.equal(left.task, null, 'bob is there to do his own')
+    assert.match(left.reason, /leave it to them/)
+
+    s.run(b, { type: 'agent.heartbeat', autopilot: 'full', limited: true })
+    assert.equal(s.state().tasks.get(bobTask.id).assigneeId, a.participantId, 'out of usage: his task is handed on')
+    assert.equal(s.run(a, { type: 'task.claim' }).task.id, bobTask.id)
+  })
+})

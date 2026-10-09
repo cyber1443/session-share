@@ -133,7 +133,7 @@ export class SessionService {
    * Each seat's last autopilot heartbeat. Memory only, like presence: whether
    * a Claude Code is open right now is not history worth a log entry a minute.
    */
-  readonly autopilots = new Map<ParticipantId, { mode: AutopilotMode; at: number }>()
+  readonly autopilots = new Map<ParticipantId, { mode: AutopilotMode; at: number; limited?: boolean }>()
   /** What each seat's Claude is doing now. Memory only; see Doing. */
   readonly doing = new Map<ParticipantId, Doing>()
   /**
@@ -257,6 +257,26 @@ export class SessionService {
       .map((participant) => participant.id)
   }
 
+  /**
+   * Whether a seat can do its own work now: its Claude Code is open (it polled
+   * lately) and its account is not out of usage.
+   */
+  isAvailable(participantId: ParticipantId, now = Date.now()): boolean {
+    const beat = this.autopilots.get(participantId)
+    return Boolean(beat && now - beat.at < AUTOPILOT_FRESH_MS && !beat.limited)
+  }
+
+  /** Seats in a session whose account has hit its usage limit. */
+  limitedIn(sessionId: SessionId): string[] {
+    const now = Date.now()
+    return [...this.state(sessionId).participants.values()]
+      .filter((p) => {
+        const beat = this.autopilots.get(p.id)
+        return Boolean(beat?.limited && now - beat.at < AUTOPILOT_FRESH_MS)
+      })
+      .map((p) => p.id)
+  }
+
   /** Seats in a session whose Claude Code has polled lately, by autopilot mode. */
   autopilotsIn(sessionId: SessionId): Record<string, AutopilotMode> {
     const now = Date.now()
@@ -308,6 +328,7 @@ export class SessionService {
       })),
       autopilots: this.autopilotsIn(sessionId),
       doing: this.doingIn(sessionId),
+      limited: this.limitedIn(sessionId),
     }
   }
 
@@ -836,10 +857,51 @@ export class SessionService {
     return { ticket: this.requireTicket(state, command.ticketId) }
   }
 
-  /** Who runs the assembled thing: the author if they can, else any member with a checkout. */
+  /**
+   * Who runs the assembled thing. Someone whose Claude Code is open and has
+   * usage left, so it runs now rather than when they are back -- the author
+   * first, since they know what it was meant to do; failing that, the author
+   * or any member with a checkout, to run it when they can.
+   */
   private verifier(state: SessionState, ticket: Ticket): ParticipantId | null {
-    if (state.participants.get(ticket.authorId)?.repoPath) return ticket.authorId
-    return ticket.members.find((id) => state.participants.get(id)?.repoPath) ?? null
+    const checkout = (id: ParticipantId) => Boolean(state.participants.get(id)?.repoPath)
+    const members = [ticket.authorId, ...ticket.members.filter((id) => id !== ticket.authorId)].filter(checkout)
+    return members.find((id) => this.isAvailable(id)) ?? members[0] ?? null
+  }
+
+  /**
+   * A seat that just ran out of usage cannot do what it was handed. Its
+   * unstarted tasks go to a teammate who can, and a ticket waiting on it to be
+   * run end to end is handed to someone else to run.
+   */
+  private reroute(sessionId: SessionId, participantId: ParticipantId): void {
+    const state = this.state(sessionId)
+    const who = state.participants.get(participantId)?.displayName ?? 'Someone'
+    for (const task of [...state.tasks.values()]) {
+      if (task.assigneeId !== participantId || task.ownerId || task.state === 'merged') continue
+      const ticket = task.ticketId ? state.tickets.get(task.ticketId) : null
+      const others = (ticket?.members ?? [...state.participants.keys()]).filter(
+        (id) => {
+          const p = state.participants.get(id)
+          // Open with usage left, or at least at work in their checkout lately.
+          return id !== participantId && Boolean(p?.repoPath) && (this.isAvailable(id) || this.isWorking(p!))
+        },
+      )
+      const to = others.sort((a, b) => state.activeTaskCount(a) - state.activeTaskCount(b))[0]
+      if (!to) continue
+      this.emit(sessionId, null, { type: 'task.assigned', taskId: task.id, assigneeId: to })
+      this.systemDirective(
+        sessionId,
+        null,
+        [to],
+        `${who}'s account is out of usage, so ${task.id} -- ${task.title} -- is yours now. Claim it with ss_claim, do it, and finish with ss_done.`,
+      )
+    }
+    for (const ticket of [...state.tickets.values()]) {
+      if (ticket.state !== 'verify' || !ticket.members.includes(participantId)) continue
+      const next = this.verifier(state, ticket)
+      if (next && next !== participantId) this.askForVerification(sessionId, participantId, state, ticket)
+    }
   }
 
   /**
@@ -2016,7 +2078,7 @@ export class SessionService {
 
     const task = command.taskId
       ? (state.tasks.get(command.taskId) ?? null)
-      : state.pickTaskFor(participantId)
+      : state.pickTaskFor(participantId, (id) => this.isAvailable(id))
 
     if (!task) {
       return {
@@ -2024,7 +2086,9 @@ export class SessionService {
         lease: null,
         reason: command.taskId
           ? `No task "${command.taskId}" in this session.`
-          : state.readyTasks().length > 0
+          : state.readyTasks().some((t) => t.assigneeId && t.assigneeId !== participantId && this.isAvailable(t.assigneeId))
+            ? 'Nothing of yours is ready. The rest belongs to teammates whose Claude Code is open, so they will take it -- leave it to them.'
+            : state.readyTasks().length > 0
             ? 'Nothing is claimable right now -- the ready tasks are waiting for their contract to land.'
             : 'Nothing is ready right now -- every remaining task is waiting on a dependency.',
       }
@@ -2612,9 +2676,11 @@ export class SessionService {
       throw new ServiceError('forbidden', 'Only a checkout can report its autopilot.')
     }
     const before = this.autopilots.get(participantId)
-    this.autopilots.set(participantId, { mode: command.autopilot, at: Date.now() })
+    this.autopilots.set(participantId, { mode: command.autopilot, at: Date.now(), limited: command.limited })
+    // Out of usage just now: whatever was waiting on this seat goes to someone who can do it.
+    if (command.limited && !before?.limited) this.reroute(this.requireSession(ctx), participantId)
     // A Claude Code that just opened, or changed its mind, is news for the board now.
-    if (!before || before.mode !== command.autopilot || Date.now() - before.at > 60_000) {
+    if (!before || before.mode !== command.autopilot || before.limited !== command.limited || Date.now() - before.at > 60_000) {
       this.onLive?.(this.requireSession(ctx))
     }
     return { ok: true as const }
