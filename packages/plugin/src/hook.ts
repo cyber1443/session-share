@@ -5,7 +5,7 @@ import { readConfig, type SessionConfig } from './config.js'
 import { runCommand } from './client.js'
 import { markBusy, markIdle } from './busy.js'
 import { describeDirectives, pendingDirectives } from './inbox.js'
-import { readPreferences } from './preferences.js'
+import { readPreferences, TERSE_STYLE } from './preferences.js'
 import { usageSince } from './usage.js'
 
 /**
@@ -262,7 +262,13 @@ export async function route(
           process.env.SESSION_SHARE_AUTOPILOT === 'child' ? `autopilot: ${first}` : `on: ${first}`,
         )
       }
-      const additionalContext = await collectRoom(input)
+      const room = await collectRoom(input)
+      // Said once when a session starts (and again after a compaction), not on every prompt.
+      const style =
+        event === 'SessionStart' && readConfig(input.cwd ?? process.cwd()) && readPreferences().terse
+          ? TERSE_STYLE
+          : null
+      const additionalContext = [style, room].filter(Boolean).join('\n\n')
       return additionalContext
         ? { hookSpecificOutput: { hookEventName: event, additionalContext } }
         : null

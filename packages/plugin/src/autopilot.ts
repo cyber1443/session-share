@@ -7,7 +7,7 @@ import { runCommand } from './client.js'
 import { readConfig, type SessionConfig } from './config.js'
 import { acknowledge, describeDirectives, readInbox } from './inbox.js'
 import { isBusy } from './busy.js'
-import { readPreferences, type Preferences } from './preferences.js'
+import { readPreferences, TERSE_STYLE, type Preferences } from './preferences.js'
 
 /**
  * Queued work running itself while nobody is at the keyboard.
@@ -348,7 +348,7 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
      */
     const result = await runHeadless(
       config,
-      describeDirectives(waiting, new Map()),
+      [describeDirectives(waiting, new Map()), preferences.terse ? TERSE_STYLE : ''].filter(Boolean).join('\n\n'),
       planningOnly,
       options.command ?? 'claude',
     )
