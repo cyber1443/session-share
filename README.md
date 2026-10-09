@@ -155,9 +155,17 @@ your choices, not defaults baked in here — `/ss:setup` asks once and stores th
 answers. The cautious options are the defaults: nothing is committed until you
 run `/ss:done`.
 
-The guest has to be able to reach the host: same network works out of the box,
-different networks need a tunnel (`cloudflared tunnel --url http://127.0.0.1:4310`
-or Tailscale). The host machine has to stay awake — it is the server.
+The guest has to be able to reach the host: same network works out of the box.
+For different networks, `/ss:host` with `tunnel: true` (or `tunnel` on in
+`/ss:setup`) opens a Cloudflare quick tunnel and puts its public address in the
+invite -- it needs `cloudflared` installed (`brew install cloudflared`), no
+account. The address changes whenever the tunnel restarts, so hosting again
+hands out a fresh invite; for a fixed address use a named tunnel or Tailscale and
+pass it as `publicUrl`. The host machine has to stay awake — it is the server.
+
+**Terse replies.** On by default: every Claude in a session, autopilot runs
+included, is asked to skip preamble and recaps. Code, commits and files stay
+normal. Turn it off with `terse: false` in `/ss:setup`.
 
 **The repository is the session's memory.** Every attached checkout pushes the
 session's event log to an orphan branch, `session-share/log`, every couple of
