@@ -159,6 +159,28 @@ The guest has to be able to reach the host: same network works out of the box,
 different networks need a tunnel (`cloudflared tunnel --url http://127.0.0.1:4310`
 or Tailscale). The host machine has to stay awake — it is the server.
 
+**The repository is the session's memory.** Every attached checkout pushes the
+session's event log to an orphan branch, `session-share/log`, every couple of
+minutes, and `/ss:stop` saves it once more before stopping. Run `/ss:host` on a
+machine whose server has never seen the session -- a new laptop, a wiped one, a
+teammate taking over -- and it is rebuilt from that branch with the same ids:
+tickets, splits, tasks, history and usage carry on, and each person gets their
+own seat back when they re-join with the new invite. The branch is written with
+git plumbing, so nobody's working tree or checked-out branch is touched. It holds
+everything the board shows, the room included, so on a public repository that
+is public; turn it off with `mirror: false` in `/ss:setup`.
+
+**The board** has four views: the kanban and room; **history**, the whole
+project as a timeline with a weekly opened-versus-landed chart; **usage**, what
+each person's own Claude account spent over the project's life, by login, with
+shares weighted by API price ratios and a CSV export for settling up; and
+**github**, open pull requests and recent Actions runs, read by the server with
+its own `gh` sign-in (or `GITHUB_TOKEN`) so no browser holds a token.
+
+Tickets wait in the plan column until someone presses **start**. One person is
+enough; joining a ticket never starts anything, so let everyone who wants in
+join first -- the split is sized for whoever is in it.
+
 **Hosted** is for a team that wants verified identity and a server that outlives
 any one laptop: register a GitHub OAuth App, run the server somewhere, and
 people sign in properly. Set `GITHUB_CLIENT_ID` and the server switches to it.
@@ -408,11 +430,12 @@ only, and never gains write access to a repository.
 
 ## Not done yet
 
-- **CI status is not read.** `/ss:done` runs the acceptance command locally and merges on that; it does not wait for checks on the PR.
+- **CI does not gate merging.** The board shows Actions runs, but `/ss:done` merges on the local acceptance command and does not wait for checks on the PR.
 - **Merging is first-come, not queued.** Two people finishing at once both merge into the contract branch; git handles it because their files are disjoint, but there is no serialisation and no automatic conflict resolution.
 - The WebRTC mesh (P4). Agent activity lines already stream over `ws-fanout`, and they are ephemeral by design — reload the board and they are gone until the next one arrives.
 - Authorization is coarse: any signed-in user can read and join any session. Authentication is real; per-session membership rules are not.
 - Assignment is not enforced. `/ss:next` prefers your own tasks, but someone can still claim a task assigned to another person rather than sit idle. That is deliberate; if it turns out to be wrong, the fix is a rule, not a lock.
 - Presence is in memory. A task can be taken back from someone who has gone quiet for ten minutes -- *take it back* on the card, or `ss_release` with `abandoned: true` -- but a server restart starts that clock again for everyone.
 - **Bash writes are not gated.** The lease gate sees Edit, Write, MultiEdit and NotebookEdit. An agent that writes with `sed -i`, `>` or `mv` goes around it. Telling a shell write from a read reliably is not possible from a command string, and a gate that guesses wrong blocks people, so this is left to the agent's instructions and to `/ss:done`, which commits only the task's own paths.
-- Room directives are delivered on a hook, not pushed: they land when the recipient's agent finishes a turn. An agent sitting idle with nobody typing will not pick one up until something else wakes it.
+- Room directives reach an idle agent through autopilot, which lives in the plugin's MCP server: if that person's Claude Code is closed, nothing runs until they open it. The board says which case it is.
+- Usage is self-reported by each person's plugin from their own transcripts. A checkout with the hooks turned off reports nothing; it is a fair guide for splitting money, not an audit.
