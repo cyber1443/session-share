@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { ClientCommand } from './commands.js'
 import { EventEnvelope } from './events.js'
+import { AutopilotMode } from './domain.js'
 import { ParticipantId, Seq } from './ids.js'
 import { ActivityFrame } from './transport.js'
 
@@ -72,6 +73,11 @@ export const ServerMessage = z.discriminatedUnion('kind', [
    * event: leaving is noticed by silence, not announced, so an open board
    * would otherwise go on showing someone long gone as here.
    */
-  z.object({ kind: z.literal('presence'), present: z.array(ParticipantId) }),
+  z.object({
+    kind: z.literal('presence'),
+    present: z.array(ParticipantId),
+    /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
+    autopilots: z.record(z.string(), AutopilotMode).optional(),
+  }),
 ])
 export type ServerMessage = z.infer<typeof ServerMessage>

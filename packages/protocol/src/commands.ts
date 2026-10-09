@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   Assignment,
+  AutopilotMode,
   ChatMessage,
   Contract,
   Ticket,
@@ -221,6 +222,15 @@ export const ClientCommand = z.discriminatedUnion('type', [
     type: z.literal('activity.report'),
     activity: ParticipantActivity.omit({ updatedAt: true }),
   }),
+  /**
+   * A checkout's Claude Code saying it is open and what its autopilot will do,
+   * sent on every autopilot poll. It is how a board can tell "their agent will
+   * pick this up in a minute" from "it waits until they are back".
+   */
+  z.object({
+    type: z.literal('agent.heartbeat'),
+    autopilot: AutopilotMode,
+  }),
 ])
 export type ClientCommand = z.infer<typeof ClientCommand>
 export type CommandType = ClientCommand['type']
@@ -304,6 +314,7 @@ export interface CommandResultMap {
   'chat.read': { messages: ChatMessage[]; latestId: MessageId | null; cursorFound: boolean }
   'usage.report': { ok: true }
   'activity.report': { ok: true }
+  'agent.heartbeat': { ok: true }
 }
 
 export type CommandResult<T extends CommandType> = CommandResultMap[T]

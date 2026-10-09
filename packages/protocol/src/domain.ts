@@ -62,6 +62,13 @@ export const ParticipantActivity = z.object({
 })
 export type ParticipantActivity = z.infer<typeof ParticipantActivity>
 
+/**
+ * What a checkout's autopilot does with an instruction while nobody is at the
+ * keyboard: nothing, only splits, or anything it is handed.
+ */
+export const AutopilotMode = z.enum(['off', 'splits', 'full'])
+export type AutopilotMode = z.infer<typeof AutopilotMode>
+
 export const Participant = z.object({
   id: ParticipantId,
   sessionId: SessionId,
@@ -479,6 +486,12 @@ export const SessionSnapshot = z.object({
   chat: z.array(ChatMessage),
   usage: z.array(Usage).default([]),
   mergeQueue: z.array(MergeQueueEntry),
+  /**
+   * Seats whose Claude Code is open right now, by what its autopilot will do.
+   * Kept in the server's memory from a heartbeat, never logged, so a seat that
+   * is missing here is closed (or on a plugin too old to say).
+   */
+  autopilots: z.record(z.string(), AutopilotMode).optional(),
   seq: z.number().int().nonnegative(),
 })
 export type SessionSnapshot = z.infer<typeof SessionSnapshot>
