@@ -6922,7 +6922,7 @@ var require_dist = __commonJS({
 
 // packages/plugin/src/mcp.ts
 import { createHash as createHash3 } from "node:crypto";
-import { basename, resolve as resolve4 } from "node:path";
+import { basename as basename2, resolve as resolve4 } from "node:path";
 
 // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v3/helpers/util.js
 var util;
@@ -31107,6 +31107,22 @@ var TicketState = external_exports.enum([
   "review",
   "done"
 ]);
+var Attachment = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  name: external_exports.string().min(1).max(200),
+  type: external_exports.string().min(1).max(100),
+  size: external_exports.number().int().nonnegative(),
+  /** `brief` came with the ticket; `verify` is evidence from a run of it. */
+  kind: external_exports.enum(["brief", "verify"]).default("brief"),
+  /** Optional words about what it shows. */
+  caption: external_exports.string().max(300).default("")
+});
+var HumanCheck = external_exports.object({
+  passed: external_exports.boolean(),
+  note: external_exports.string().max(2e3).default(""),
+  by: ParticipantId,
+  at: Timestamp
+});
 var Ticket = external_exports.object({
   id: TicketId,
   sessionId: SessionId,
@@ -31133,6 +31149,14 @@ var Ticket = external_exports.object({
   prNumber: external_exports.number().int().nullable().default(null),
   /** When its pull request was merged; a merged ticket is done. */
   mergedAt: Timestamp.nullable().default(null),
+  attachments: external_exports.array(Attachment).default([]),
+  /**
+   * Whether a person has to look at the running thing before it can ship. The
+   * automated run always happens; this holds the ticket in verify after it
+   * passes until someone has clicked through it too.
+   */
+  needsHuman: external_exports.boolean().default(false),
+  humanCheck: HumanCheck.nullable().default(null),
   createdAt: Timestamp
 });
 var ContractFile = external_exports.object({
@@ -31430,6 +31454,9 @@ var EventBody = external_exports.discriminatedUnion("type", [
    * branch, and nothing here would be honest if it claimed otherwise.
    */
   external_exports.object({ type: external_exports.literal("ticket.deleted"), ticketId: TicketId }),
+  external_exports.object({ type: external_exports.literal("ticket.attached"), ticketId: TicketId, attachments: external_exports.array(Attachment) }),
+  external_exports.object({ type: external_exports.literal("ticket.needsHuman"), ticketId: TicketId, value: external_exports.boolean() }),
+  external_exports.object({ type: external_exports.literal("ticket.humanCheck"), ticketId: TicketId, check: HumanCheck.nullable() }),
   /** Its pull request was merged -- from the board or on GitHub. The ticket is done. */
   external_exports.object({
     type: external_exports.literal("ticket.merged"),
@@ -31604,8 +31631,30 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("ticket.create"),
     title: external_exports.string().min(1).max(200),
-    body: external_exports.string().max(4e3).default("")
+    body: external_exports.string().max(4e3).default(""),
+    /** Files already uploaded to the session, to go with the brief. */
+    attachments: external_exports.array(Attachment).max(20).default([]),
+    needsHuman: external_exports.boolean().default(false)
   }),
+  /** Adds files to a ticket: more of the brief, or screenshots from a run. */
+  external_exports.object({
+    type: external_exports.literal("ticket.attach"),
+    ticketId: TicketId,
+    attachments: external_exports.array(Attachment).min(1).max(20)
+  }),
+  external_exports.object({ type: external_exports.literal("ticket.needsHuman"), ticketId: TicketId, value: external_exports.boolean() }),
+  /**
+   * A person has clicked through the running thing. Passing lets it ship;
+   * failing is `ticket.verified` with `passed: false`, which reopens work.
+   */
+  external_exports.object({
+    type: external_exports.literal("ticket.humanCheck"),
+    ticketId: TicketId,
+    passed: external_exports.boolean(),
+    note: external_exports.string().max(2e3).default("")
+  }),
+  /** Asks the caller's own Claude Code to start the ticket's branch locally for them to try. */
+  external_exports.object({ type: external_exports.literal("ticket.runLocally"), ticketId: TicketId }),
   /** Opting in. This is the consent step -- there is no separate approval. */
   external_exports.object({ type: external_exports.literal("ticket.join"), ticketId: TicketId }),
   external_exports.object({ type: external_exports.literal("ticket.leave"), ticketId: TicketId }),
@@ -32404,10 +32453,62 @@ async function runCommand(config3, command, timeoutMs = 3e3) {
   }
 }
 
+// packages/plugin/src/files.ts
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { basename, extname, join as join2 } from "node:path";
+var TYPES = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp"
+};
+var EXTENSIONS = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/gif": ".gif",
+  "image/webp": ".webp"
+};
+var auth = (config3) => config3.participantToken ? { authorization: `Bearer ${config3.participantToken}` } : {};
+async function uploadPicture(config3, path, kind, caption = "") {
+  const type = TYPES[extname(path).toLowerCase()];
+  if (!type) throw new Error(`${path}: only PNG, JPEG, GIF and WebP pictures can be attached.`);
+  if (statSync2(path).size > 10 * 1024 * 1024) throw new Error(`${path} is larger than 10 MB.`);
+  const response = await fetch(new URL(`/sessions/${config3.sessionRef}/files`, config3.serverUrl), {
+    method: "POST",
+    headers: { "content-type": type, "x-file-name": encodeURIComponent(basename(path)), ...auth(config3) },
+    body: readFileSync2(path),
+    signal: AbortSignal.timeout(3e4)
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.id) throw new Error(payload.message ?? `upload failed (${response.status})`);
+  return { id: payload.id, name: payload.name ?? basename(path), type, size: payload.size ?? 0, kind, caption };
+}
+async function downloadPictures(config3, attachments) {
+  const dir = join2(STATE_DIR, "files");
+  mkdirSync2(dir, { recursive: true });
+  const saved = [];
+  for (const attachment of attachments) {
+    const path = join2(dir, `${attachment.id}${EXTENSIONS[attachment.type] ?? ""}`);
+    try {
+      statSync2(path);
+    } catch {
+      const response = await fetch(
+        new URL(`/sessions/${config3.sessionRef}/files/${attachment.id}`, config3.serverUrl),
+        { headers: auth(config3), signal: AbortSignal.timeout(3e4) }
+      );
+      if (!response.ok) continue;
+      writeFileSync2(path, Buffer.from(await response.arrayBuffer()));
+    }
+    saved.push({ path, name: attachment.name, kind: attachment.kind, caption: attachment.caption });
+  }
+  return saved;
+}
+
 // packages/plugin/src/config.ts
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname2, isAbsolute, join as join2, resolve as resolve2 } from "node:path";
+import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname2, isAbsolute, join as join3, resolve as resolve2 } from "node:path";
 var SessionConfig = external_exports.object({
   serverUrl: external_exports.string().min(1),
   sessionRef: external_exports.string().min(1),
@@ -32421,11 +32522,11 @@ var SessionConfig = external_exports.object({
   displayName: external_exports.string().min(1),
   repoPath: external_exports.string().min(1)
 });
-var CONFIG_RELATIVE_PATH = join2(".session-share", "session.json");
+var CONFIG_RELATIVE_PATH = join3(".session-share", "session.json");
 function findConfigPath(startDir) {
   let dir = resolve2(startDir);
   for (; ; ) {
-    const candidate = join2(dir, CONFIG_RELATIVE_PATH);
+    const candidate = join3(dir, CONFIG_RELATIVE_PATH);
     if (existsSync2(candidate)) return candidate;
     const parent = dirname2(dir);
     if (parent === dir) return null;
@@ -32436,15 +32537,15 @@ function readConfig(startDir) {
   const path = findConfigPath(startDir);
   if (!path) return null;
   try {
-    return SessionConfig.parse(JSON.parse(readFileSync2(path, "utf8")));
+    return SessionConfig.parse(JSON.parse(readFileSync3(path, "utf8")));
   } catch {
     return null;
   }
 }
 function writeConfig(repoPath, config3) {
-  const path = join2(repoPath, CONFIG_RELATIVE_PATH);
-  mkdirSync2(dirname2(path), { recursive: true });
-  writeFileSync2(path, `${JSON.stringify(config3, null, 2)}
+  const path = join3(repoPath, CONFIG_RELATIVE_PATH);
+  mkdirSync3(dirname2(path), { recursive: true });
+  writeFileSync3(path, `${JSON.stringify(config3, null, 2)}
 `, { mode: 384 });
   excludeFromGit(repoPath);
   return path;
@@ -32456,10 +32557,10 @@ function excludeFromGit(repoPath) {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
-    const exclude = join2(isAbsolute(common) ? common : join2(repoPath, common), "info", "exclude");
-    const current = existsSync2(exclude) ? readFileSync2(exclude, "utf8") : "";
+    const exclude = join3(isAbsolute(common) ? common : join3(repoPath, common), "info", "exclude");
+    const current = existsSync2(exclude) ? readFileSync3(exclude, "utf8") : "";
     if (current.split("\n").some((line) => line.trim() === ".session-share/")) return;
-    mkdirSync2(dirname2(exclude), { recursive: true });
+    mkdirSync3(dirname2(exclude), { recursive: true });
     appendFileSync(exclude, `${current && !current.endsWith("\n") ? "\n" : ""}.session-share/
 `);
   } catch {
@@ -32467,13 +32568,13 @@ function excludeFromGit(repoPath) {
 }
 
 // packages/plugin/src/inbox.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync4, renameSync, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 function stateDir() {
-  return process.env.SESSION_SHARE_HOME ?? join3(homedir2(), ".session-share");
+  return process.env.SESSION_SHARE_HOME ?? join4(homedir2(), ".session-share");
 }
-var inboxFile = () => join3(stateDir(), "inbox.json");
+var inboxFile = () => join4(stateDir(), "inbox.json");
 var PAGE = 200;
 function cursorKey(config3) {
   return `${config3.serverUrl}|${config3.sessionRef}|${config3.participantId}`;
@@ -32482,7 +32583,7 @@ function readCursors() {
   const path = inboxFile();
   if (!existsSync3(path)) return {};
   try {
-    return JSON.parse(readFileSync3(path, "utf8"));
+    return JSON.parse(readFileSync4(path, "utf8"));
   } catch {
     return {};
   }
@@ -32492,10 +32593,10 @@ function readCursor(key) {
   return typeof value === "string" ? value : void 0;
 }
 function writeCursor(key, value) {
-  mkdirSync3(stateDir(), { recursive: true });
+  mkdirSync4(stateDir(), { recursive: true });
   const path = inboxFile();
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync3(temporary, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
+  writeFileSync4(temporary, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
 `);
   renameSync(temporary, path);
 }
@@ -32581,20 +32682,20 @@ function describeDirectives(messages, names) {
 
 // packages/plugin/src/autopilot.ts
 import { spawn as spawn2 } from "node:child_process";
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync6, readFileSync as readFileSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync7, readFileSync as readFileSync6, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 
 // packages/plugin/src/busy.ts
 import { createHash as createHash2 } from "node:crypto";
-import { mkdirSync as mkdirSync4, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync5, rmSync as rmSync2, statSync as statSync3, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 var MAX_TURN_MS = 2 * 60 * 60 * 1e3;
 function marker(repoPath) {
-  const home = process.env.SESSION_SHARE_HOME ?? join4(homedir3(), ".session-share");
+  const home = process.env.SESSION_SHARE_HOME ?? join5(homedir3(), ".session-share");
   const id = createHash2("sha256").update(repoPath).digest("hex").slice(0, 16);
-  return join4(home, "busy", id);
+  return join5(home, "busy", id);
 }
 var autopilotMarker = (repoPath) => `${marker(repoPath)}.autopilot`;
 function markAutopilot(repoPath, running3) {
@@ -32604,23 +32705,23 @@ function markAutopilot(repoPath, running3) {
       rmSync2(path, { force: true });
       return;
     }
-    mkdirSync4(join4(path, ".."), { recursive: true });
-    writeFileSync4(path, `${process.pid}
+    mkdirSync5(join5(path, ".."), { recursive: true });
+    writeFileSync5(path, `${process.pid}
 `);
   } catch {
   }
 }
 function isBusy(repoPath) {
   try {
-    return Date.now() - statSync2(marker(repoPath)).mtimeMs < MAX_TURN_MS;
+    return Date.now() - statSync3(marker(repoPath)).mtimeMs < MAX_TURN_MS;
   } catch {
     return false;
   }
 }
 
 // packages/plugin/src/preferences.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname3, join as join5 } from "node:path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync6, readFileSync as readFileSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname3, join as join6 } from "node:path";
 var Preferences = external_exports.object({
   /**
    * explicit: nothing is committed until you run /ss:done.
@@ -32673,19 +32774,19 @@ var Preferences = external_exports.object({
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });
-var PREFERENCES_PATH = join5(STATE_DIR, "preferences.json");
+var PREFERENCES_PATH = join6(STATE_DIR, "preferences.json");
 function readPreferences() {
   if (!existsSync4(PREFERENCES_PATH)) return Preferences.parse({});
   try {
-    return Preferences.parse(JSON.parse(readFileSync4(PREFERENCES_PATH, "utf8")));
+    return Preferences.parse(JSON.parse(readFileSync5(PREFERENCES_PATH, "utf8")));
   } catch {
     return Preferences.parse({});
   }
 }
 function writePreferences(update) {
   const merged = Preferences.parse({ ...readPreferences(), ...update });
-  mkdirSync5(dirname3(PREFERENCES_PATH), { recursive: true });
-  writeFileSync5(PREFERENCES_PATH, `${JSON.stringify(merged, null, 2)}
+  mkdirSync6(dirname3(PREFERENCES_PATH), { recursive: true });
+  writeFileSync6(PREFERENCES_PATH, `${JSON.stringify(merged, null, 2)}
 `);
   return merged;
 }
@@ -32718,12 +32819,12 @@ var IDLE_GRACE_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_GRACE_MS ?? 0);
 var LIMIT_BACKOFF_MS = 30 * 60 * 1e3;
 var LIMIT_PATTERN = /spend limit|usage limit|rate limit|limit reached|hit your .*limit|credit balance|out of (credits|usage)|quota/i;
 function stateDir2() {
-  return process.env.SESSION_SHARE_HOME ?? join6(homedir4(), ".session-share");
+  return process.env.SESSION_SHARE_HOME ?? join7(homedir4(), ".session-share");
 }
-var spendFile = () => join6(stateDir2(), "autopilot.json");
+var spendFile = () => join7(stateDir2(), "autopilot.json");
 function readSpend(today) {
   try {
-    const spend = JSON.parse(readFileSync5(spendFile(), "utf8"));
+    const spend = JSON.parse(readFileSync6(spendFile(), "utf8"));
     return spend.day === today ? spend : { day: today, tokens: 0 };
   } catch {
     return { day: today, tokens: 0 };
@@ -32731,8 +32832,8 @@ function readSpend(today) {
 }
 function addSpend(today, tokens) {
   const spend = readSpend(today);
-  mkdirSync6(stateDir2(), { recursive: true });
-  writeFileSync6(spendFile(), `${JSON.stringify({ day: today, tokens: spend.tokens + tokens })}
+  mkdirSync7(stateDir2(), { recursive: true });
+  writeFileSync7(spendFile(), `${JSON.stringify({ day: today, tokens: spend.tokens + tokens })}
 `);
 }
 function decide(input) {
@@ -32753,7 +32854,7 @@ var PLANNING_TOOLS = [
   "Read",
   "Grep",
   "Glob",
-  ...mcpTools("ss_propose", "ss_tickets", "ss_get_contract", "ss_chat_post", "ss_chat_read", "ss_status")
+  ...mcpTools("ss_propose", "ss_tickets", "ss_ticket_files", "ss_get_contract", "ss_chat_post", "ss_chat_read", "ss_status")
 ];
 var BUILDING_TOOLS = [
   "Read",
@@ -32785,7 +32886,10 @@ var BUILDING_TOOLS = [
     "ss_inbox",
     "ss_ticket_verified",
     "ss_ticket_shipped",
-    "ss_ship"
+    "ss_ship",
+    "ss_attach",
+    "ss_ticket_files",
+    "ss_worktree"
   )
 ];
 var isPlanning = (messages) => messages.every((message) => /ss_propose|Split the ticket/.test(message.body));
@@ -32794,10 +32898,10 @@ var limitedUntil = 0;
 var firstSeen = /* @__PURE__ */ new Map();
 var failedUntil = 0;
 var FAILURE_BACKOFF_MS = 5 * 60 * 1e3;
-var logFile = () => join6(stateDir2(), "autopilot.log");
+var logFile = () => join7(stateDir2(), "autopilot.log");
 function log(line) {
   try {
-    mkdirSync6(stateDir2(), { recursive: true });
+    mkdirSync7(stateDir2(), { recursive: true });
     appendFileSync2(logFile(), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
   } catch {
@@ -32980,7 +33084,7 @@ function startAutopilot() {
 import { spawn as spawn3 } from "node:child_process";
 import { mkdtempSync, rmSync as rmSync3 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 var LOG_BRANCH = "session-share/log";
 var REMOTE_REF = `refs/remotes/origin/${LOG_BRANCH}`;
 var CHUNK = 1e3;
@@ -33002,6 +33106,33 @@ function git(cwd, args, options = {}) {
     });
     child.stdin.end(options.input ?? "");
   });
+}
+function gitBytes(cwd, args, input) {
+  return new Promise((resolve5, reject) => {
+    const child = spawn3("git", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => stdout += chunk);
+    child.on("error", reject);
+    child.on("close", (code) => code === 0 ? resolve5(stdout.trim()) : reject(new Error(`git ${args[0]} failed`)));
+    child.stdin.end(Buffer.from(input));
+  });
+}
+async function readMirroredFiles(cwd, sessionId) {
+  const head = await remoteHead(cwd);
+  if (!head) return [];
+  const index = JSON.parse(await show(cwd, head, `${sessionDir(sessionId)}/files.json`) ?? "[]");
+  const files = [];
+  for (const file2 of index) {
+    const bytes = await new Promise((resolve5) => {
+      const child = spawn3("git", ["cat-file", "blob", `${head}:${sessionDir(sessionId)}/files/${file2.id}`], { cwd });
+      const chunks = [];
+      child.stdout.on("data", (chunk) => chunks.push(chunk));
+      child.on("close", () => resolve5(Buffer.concat(chunks)));
+      child.on("error", () => resolve5(Buffer.alloc(0)));
+    });
+    if (bytes.length > 0) files.push({ ...file2, base64: bytes.toString("base64") });
+  }
+  return files;
 }
 var chunkName = (seq) => String(Math.floor(seq / CHUNK)).padStart(6, "0");
 var sessionDir = (sessionId) => `sessions/${sessionId}`;
@@ -33062,18 +33193,37 @@ async function pushLog(cwd, source, attempts = 3) {
     const metaPath = `${sessionDir(source.meta.sessionId)}/meta.json`;
     const current = parent ? await show(cwd, parent, metaPath) : null;
     const mirrored = current ? JSON.parse(current).upToSeq : -1;
-    if (mirrored >= source.maxSeq) return { pushed: false, reason: "the branch is already up to date" };
-    const dir = mkdtempSync(join7(tmpdir(), "ss-mirror-"));
-    const env = { GIT_INDEX_FILE: join7(dir, "index") };
+    const filesPath = `${sessionDir(source.meta.sessionId)}/files.json`;
+    const knownFiles = new Set(
+      (parent ? JSON.parse(await show(cwd, parent, filesPath) ?? "[]") : []).map((f) => f.id)
+    );
+    const newFiles = source.files ? (await source.files.ids()).filter((id) => !knownFiles.has(id)) : [];
+    if (mirrored >= source.maxSeq && newFiles.length === 0) {
+      return { pushed: false, reason: "the branch is already up to date" };
+    }
+    const dir = mkdtempSync(join8(tmpdir(), "ss-mirror-"));
+    const env = { GIT_INDEX_FILE: join8(dir, "index") };
     try {
       await git(cwd, parent ? ["read-tree", parent] : ["read-tree", "--empty"], { env });
       const write = async (path, content) => {
         const blob = await git(cwd, ["hash-object", "-w", "--stdin"], { input: content });
         await git(cwd, ["update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], { env });
       };
+      if (newFiles.length > 0 && source.files) {
+        const index = parent ? JSON.parse(await show(cwd, parent, filesPath) ?? "[]") : [];
+        for (const id of newFiles) {
+          const file2 = await source.files.read(id);
+          if (!file2) continue;
+          const blob = await gitBytes(cwd, ["hash-object", "-w", "--stdin"], file2.bytes);
+          await git(cwd, ["update-index", "--add", "--cacheinfo", `100644,${blob},${sessionDir(source.meta.sessionId)}/files/${id}`], { env });
+          index.push({ id, name: file2.name, type: file2.type });
+        }
+        await write(filesPath, `${JSON.stringify(index, null, 2)}
+`);
+      }
       const firstChunk = Math.floor((mirrored + 1) / CHUNK);
       const lastChunk = Math.floor(source.maxSeq / CHUNK);
-      for (let chunk = firstChunk; chunk <= lastChunk; chunk++) {
+      for (let chunk = mirrored >= source.maxSeq ? lastChunk + 1 : firstChunk; chunk <= lastChunk; chunk++) {
         const from = chunk * CHUNK;
         const to = Math.min(source.maxSeq, from + CHUNK - 1);
         const events = await source.read(from, to);
@@ -33083,7 +33233,7 @@ async function pushLog(cwd, source, attempts = 3) {
         await write(`${sessionDir(source.meta.sessionId)}/events/${chunkName(from)}.jsonl`, `${lines.join("\n")}
 `);
       }
-      const meta3 = { ...source.meta, upToSeq: source.maxSeq, updatedAt: Date.now() };
+      const meta3 = { ...source.meta, upToSeq: Math.max(source.maxSeq, mirrored), updatedAt: Date.now() };
       await write(metaPath, `${JSON.stringify(meta3, null, 2)}
 `);
       if (!parent) {
@@ -33122,12 +33272,12 @@ async function pushLog(cwd, source, attempts = 3) {
 
 // packages/plugin/src/tunnel.ts
 import { execFile, spawn as spawn4 } from "node:child_process";
-import { closeSync, existsSync as existsSync6, mkdirSync as mkdirSync7, openSync as openSync2, readFileSync as readFileSync6, rmSync as rmSync4, writeFileSync as writeFileSync7 } from "node:fs";
-import { join as join8 } from "node:path";
+import { closeSync, existsSync as existsSync6, mkdirSync as mkdirSync8, openSync as openSync2, readFileSync as readFileSync7, rmSync as rmSync4, writeFileSync as writeFileSync8 } from "node:fs";
+import { join as join9 } from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
-var TUNNEL_FILE = join8(STATE_DIR, "tunnel.json");
-var TUNNEL_LOG = join8(STATE_DIR, "tunnel.log");
+var TUNNEL_FILE = join9(STATE_DIR, "tunnel.json");
+var TUNNEL_LOG = join9(STATE_DIR, "tunnel.log");
 var QUICK_URL = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/;
 var alive = (pid) => {
   try {
@@ -33139,14 +33289,14 @@ var alive = (pid) => {
 };
 function readRecord() {
   try {
-    return JSON.parse(readFileSync6(TUNNEL_FILE, "utf8"));
+    return JSON.parse(readFileSync7(TUNNEL_FILE, "utf8"));
   } catch {
     return null;
   }
 }
 function registered() {
   try {
-    return /Registered tunnel connection/.test(readFileSync6(TUNNEL_LOG, "utf8"));
+    return /Registered tunnel connection/.test(readFileSync7(TUNNEL_LOG, "utf8"));
   } catch {
     return false;
   }
@@ -33170,8 +33320,8 @@ async function ensureTunnel(port) {
       "Tunnelling needs cloudflared, which is not installed here. Install it (macOS: `brew install cloudflared`; others: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and host again, or use Tailscale and pass its address as publicUrl."
     );
   }
-  mkdirSync7(STATE_DIR, { recursive: true });
-  writeFileSync7(TUNNEL_LOG, "");
+  mkdirSync8(STATE_DIR, { recursive: true });
+  writeFileSync8(TUNNEL_LOG, "");
   const log3 = openSync2(TUNNEL_LOG, "a");
   const child = spawn4(
     "cloudflared",
@@ -33183,7 +33333,7 @@ async function ensureTunnel(port) {
   const deadline = Date.now() + 3e4;
   let url2 = null;
   while (Date.now() < deadline) {
-    const found = readFileSync6(TUNNEL_LOG, "utf8").match(QUICK_URL);
+    const found = readFileSync7(TUNNEL_LOG, "utf8").match(QUICK_URL);
     if (found && registered()) {
       url2 = found[0];
       break;
@@ -33195,7 +33345,7 @@ async function ensureTunnel(port) {
     if (child.pid && alive(child.pid)) process.kill(child.pid);
     throw new Error(`cloudflared did not come up with an address. Its log is at ${TUNNEL_LOG}.`);
   }
-  writeFileSync7(TUNNEL_FILE, `${JSON.stringify({ pid: child.pid, url: url2, port })}
+  writeFileSync8(TUNNEL_FILE, `${JSON.stringify({ pid: child.pid, url: url2, port })}
 `);
   return url2;
 }
@@ -33212,14 +33362,14 @@ function stopTunnel() {
 }
 
 // packages/plugin/src/mirror-sync.ts
-import { appendFileSync as appendFileSync3, mkdirSync as mkdirSync8 } from "node:fs";
+import { appendFileSync as appendFileSync3, mkdirSync as mkdirSync9 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 var MIRROR_MS = Number(process.env.SESSION_SHARE_MIRROR_MS ?? 2 * 6e4);
-var logFile2 = () => join9(process.env.SESSION_SHARE_HOME ?? join9(homedir5(), ".session-share"), "mirror.log");
+var logFile2 = () => join10(process.env.SESSION_SHARE_HOME ?? join10(homedir5(), ".session-share"), "mirror.log");
 function log2(line) {
   try {
-    mkdirSync8(join9(logFile2(), ".."), { recursive: true });
+    mkdirSync9(join10(logFile2(), ".."), { recursive: true });
     appendFileSync3(logFile2(), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
   } catch {
@@ -33251,6 +33401,28 @@ async function mirrorOnce(config3) {
       repo: session.repo.owner === "local" ? null : { owner: session.repo.owner, name: session.repo.name }
     },
     maxSeq: first.maxSeq,
+    files: {
+      ids: async () => {
+        const response = await fetch(new URL(`/sessions/${config3.sessionRef}/files`, config3.serverUrl), {
+          headers: config3.participantToken ? { authorization: `Bearer ${config3.participantToken}` } : {},
+          signal: AbortSignal.timeout(15e3)
+        });
+        return response.ok ? (await response.json()).ids : [];
+      },
+      read: async (id) => {
+        const response = await fetch(new URL(`/sessions/${config3.sessionRef}/files/${id}`, config3.serverUrl), {
+          headers: config3.participantToken ? { authorization: `Bearer ${config3.participantToken}` } : {},
+          signal: AbortSignal.timeout(3e4)
+        });
+        if (!response.ok) return null;
+        return {
+          id,
+          name: id,
+          type: response.headers.get("content-type") ?? "application/octet-stream",
+          bytes: new Uint8Array(await response.arrayBuffer())
+        };
+      }
+    },
     read: async (from, to) => {
       const events = [];
       let next = from;
@@ -33291,11 +33463,11 @@ function startMirror() {
     clearTimeout(first);
   };
 }
-async function importInto(serverUrl, meta3, events) {
+async function importInto(serverUrl, meta3, events, files = []) {
   const response = await fetch(new URL("/api/sessions/import", serverUrl), {
     method: "POST",
     headers: { "content-type": "application/json", [HOST_HEADER]: hostKey() },
-    body: JSON.stringify({ sessionId: meta3.sessionId, slug: meta3.slug, events })
+    body: JSON.stringify({ sessionId: meta3.sessionId, slug: meta3.slug, events, files })
   });
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.message ?? payload.error ?? `import failed (${response.status})`);
@@ -33313,14 +33485,19 @@ async function restoreFromMirror(root, serverUrl, repo, slug) {
   const candidates = (await listMirrored(root)).filter((meta4) => !repo || !meta4.repo || meta4.repo.owner === repo.owner && meta4.repo.name === repo.name).filter((meta4) => !slug || meta4.slug === slug).sort((a, b) => b.updatedAt - a.updatedAt);
   const meta3 = candidates[0];
   if (!meta3) return null;
-  return importInto(serverUrl, meta3, await readMirrored(root, meta3.sessionId));
+  return importInto(serverUrl, meta3, await readMirrored(root, meta3.sessionId), await readMirroredFiles(root, meta3.sessionId));
 }
 async function catchUpFromMirror(root, serverUrl, slug) {
   try {
     if (!await fetchLog(root)) return 0;
     const meta3 = (await listMirrored(root)).find((m) => m.slug === slug);
     if (!meta3) return 0;
-    const restored = await importInto(serverUrl, meta3, await readMirrored(root, meta3.sessionId));
+    const restored = await importInto(
+      serverUrl,
+      meta3,
+      await readMirrored(root, meta3.sessionId),
+      await readMirroredFiles(root, meta3.sessionId)
+    );
     return restored.added;
   } catch (error51) {
     log2(`catch-up skipped: ${error51 instanceof Error ? error51.message : error51}`);
@@ -33352,7 +33529,7 @@ function boardUrl(serverUrl, packedInvite, as) {
 
 // packages/plugin/src/git.ts
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync7, mkdirSync as mkdirSync9, writeFileSync as writeFileSync8 } from "node:fs";
+import { existsSync as existsSync7, mkdirSync as mkdirSync10, writeFileSync as writeFileSync9 } from "node:fs";
 import { dirname as dirname4, isAbsolute as isAbsolute2, relative, resolve as resolve3 } from "node:path";
 import { promisify as promisify2 } from "node:util";
 var run2 = promisify2(execFile2);
@@ -33533,8 +33710,8 @@ async function writeFiles(cwd, files) {
   const written = [];
   for (const [index, file2] of files.entries()) {
     const absolute = targets[index];
-    mkdirSync9(dirname4(absolute), { recursive: true });
-    writeFileSync8(absolute, file2.contents);
+    mkdirSync10(dirname4(absolute), { recursive: true });
+    writeFileSync9(absolute, file2.contents);
     written.push(file2.path);
   }
   return written;
@@ -34213,7 +34390,7 @@ function createServer() {
     },
     async ({ title: given, issueRef, expose, publicUrl: givenPublicUrl, tunnel }) => {
       const root = await repoRoot(REPO_ROOT);
-      const title = given?.trim() || basename(root);
+      const title = given?.trim() || basename2(root);
       const identity = await localIdentity();
       let publicUrl = publicUrlOverride(givenPublicUrl);
       const tunnelled = !publicUrl && (tunnel ?? readPreferences().tunnel);
@@ -34224,11 +34401,11 @@ function createServer() {
       const remote = await repoRemote(root);
       const repo = {
         owner: remote?.owner ?? "local",
-        name: remote?.name ?? basename(root),
+        name: remote?.name ?? basename2(root),
         baseBranch: await baseBranch(root),
         remoteUrl: remote?.remoteUrl ?? root
       };
-      const slug = given?.trim() ? slugify2(title) : remote ? slugify2(`${remote.owner}-${remote.name}`) : `${slugify2(basename(root)).slice(0, 33)}-${shortHash(root)}`;
+      const slug = given?.trim() ? slugify2(title) : remote ? slugify2(`${remote.owner}-${remote.name}`) : `${slugify2(basename2(root)).slice(0, 33)}-${shortHash(root)}`;
       const sameRepo = (stored) => Boolean(stored) && (remote ? stored.owner === repo.owner && stored.name === repo.name : stored.remoteUrl === repo.remoteUrl);
       const open = async (candidate) => {
         try {
@@ -34265,7 +34442,7 @@ function createServer() {
         return restored?.invite ? { invite: restored.invite, resumed: true, slug: restored.slug } : null;
       };
       const attached = readConfig(root);
-      const created = (given?.trim() ? null : await resume(attached?.sessionRef)) ?? (given?.trim() ? null : await resume(slugify2(basename(root)))) ?? await restore() ?? await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? null;
+      const created = (given?.trim() ? null : await resume(attached?.sessionRef)) ?? (given?.trim() ? null : await resume(slugify2(basename2(root)))) ?? await restore() ?? await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? null;
       if (!created) {
         throw new Error(
           `Sessions named "${slug}" on this server belong to other repositories. Pass a title to name this one.`
@@ -34313,7 +34490,7 @@ function createServer() {
             'own port 4310. Re-run with expose="lan"' + (readPreferences().expose === "lan" ? " -- and check you are on a network, because no LAN address was found." : " to let a teammate on your network in.")
           ].join("\n") : publicUrl ? `Teammates dial ${publicUrl}. Anyone who has the invite can join; anyone who does not, cannot.` : `Reachable on your network at ${daemon.url}. Anyone who has the invite can join; anyone who does not, cannot.`,
           "",
-          `Every edit in ${basename(root)} is now checked against this session's file leases.`
+          `Every edit in ${basename2(root)} is now checked against this session's file leases.`
         ].join("\n")
       );
     }
@@ -34363,7 +34540,7 @@ function createServer() {
           `Joined "${result.sessionTitle}" as ${result.displayName}.`,
           board ? opened ? `Board opened: ${board}` : `Board: ${board}` : "",
           `Config at ${path}.`,
-          `Every edit in ${basename(root)} is now checked against the session's file leases.`
+          `Every edit in ${basename2(root)} is now checked against the session's file leases.`
         ].filter(Boolean).join("\n")
       );
     }
@@ -34407,7 +34584,7 @@ function createServer() {
     async ({ title, issueRef, invite }) => {
       const root = await repoRoot(REPO_ROOT);
       const slug = slugify2(title);
-      const path = resolve4(root, "..", `${basename(root)}-${slug}`);
+      const path = resolve4(root, "..", `${basename2(root)}-${slug}`);
       const branch = `ss/${slug}/work`;
       const created = await addWorktree(root, path, branch, await baseBranch(root));
       return text(
@@ -34558,17 +34735,60 @@ function createServer() {
       description: "Open a ticket for a piece of work. It waits in the plan column; everyone else is told it exists and can join it, and it is split when someone runs ss_ticket_start.",
       inputSchema: {
         title: external_exports.string().min(1).max(200),
-        body: external_exports.string().max(4e3).nullish().describe("The brief the planner works from")
+        body: external_exports.string().max(4e3).nullish().describe("The brief the planner works from"),
+        pictures: external_exports.array(external_exports.string()).max(20).nullish().describe("Paths of pictures that are part of the brief: mockups, screenshots of the bug. PNG, JPEG, GIF or WebP."),
+        needsHuman: external_exports.boolean().nullish().describe("Hold it in verify, after its automated run passes, until a person has tried it by hand")
       }
     },
-    async ({ title, body }) => {
+    async ({ title, body, pictures, needsHuman }) => {
       const cfg = config2();
-      const { ticket, plannerId } = await runCommand(cfg, {
-        type: "ticket.create",
-        title,
-        body: body ?? ""
-      });
+      const attachments = [];
+      for (const path of pictures ?? []) attachments.push(await uploadPicture(cfg, resolve4(path), "brief"));
+      const { ticket, plannerId } = await runCommand(
+        cfg,
+        {
+          type: "ticket.create",
+          title,
+          body: body ?? "",
+          attachments,
+          needsHuman: needsHuman ?? false
+        },
+        15e3
+      );
       return text([`Opened "${ticket.title}" (${ticket.id}).`, splitHint(cfg, ticket, plannerId)].join("\n"));
+    }
+  );
+  server.registerTool(
+    "ss_attach",
+    {
+      description: 'Attach pictures to a ticket: more of the brief (kind "brief"), or evidence from running it (kind "verify") -- screenshots taken while exercising the assembled thing, each with a caption saying what it shows.',
+      inputSchema: {
+        ticketId: external_exports.string(),
+        kind: external_exports.enum(["brief", "verify"]),
+        files: external_exports.array(external_exports.object({ path: external_exports.string(), caption: external_exports.string().max(300).nullish() })).min(1).max(20)
+      }
+    },
+    async ({ ticketId, kind, files }) => {
+      const cfg = config2();
+      const attachments = [];
+      for (const file2 of files) attachments.push(await uploadPicture(cfg, resolve4(file2.path), kind, file2.caption ?? ""));
+      await runCommand(cfg, { type: "ticket.attach", ticketId, attachments }, 15e3);
+      return text(`Attached ${attachments.length} picture(s) to the ticket. They show on the board.`);
+    }
+  );
+  server.registerTool(
+    "ss_ticket_files",
+    {
+      description: "Save a ticket's pictures -- its brief's mockups and screenshots, and any evidence from running it -- to this machine and return their paths, so you can look at them with Read.",
+      inputSchema: { ticketId: external_exports.string() }
+    },
+    async ({ ticketId }) => {
+      const cfg = config2();
+      const state = await snapshot(cfg);
+      const ticket = state.tickets.find((t) => t.id === ticketId);
+      if (!ticket) return text(`No ticket "${ticketId}".`);
+      if (ticket.attachments.length === 0) return text(`"${ticket.title}" has no pictures.`);
+      return text({ ticket: ticket.title, pictures: await downloadPictures(cfg, ticket.attachments) });
     }
   );
   server.registerTool(

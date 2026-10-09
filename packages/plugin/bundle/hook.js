@@ -14684,6 +14684,22 @@ var TicketState = external_exports.enum([
   "review",
   "done"
 ]);
+var Attachment = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  name: external_exports.string().min(1).max(200),
+  type: external_exports.string().min(1).max(100),
+  size: external_exports.number().int().nonnegative(),
+  /** `brief` came with the ticket; `verify` is evidence from a run of it. */
+  kind: external_exports.enum(["brief", "verify"]).default("brief"),
+  /** Optional words about what it shows. */
+  caption: external_exports.string().max(300).default("")
+});
+var HumanCheck = external_exports.object({
+  passed: external_exports.boolean(),
+  note: external_exports.string().max(2e3).default(""),
+  by: ParticipantId,
+  at: Timestamp
+});
 var Ticket = external_exports.object({
   id: TicketId,
   sessionId: SessionId,
@@ -14710,6 +14726,14 @@ var Ticket = external_exports.object({
   prNumber: external_exports.number().int().nullable().default(null),
   /** When its pull request was merged; a merged ticket is done. */
   mergedAt: Timestamp.nullable().default(null),
+  attachments: external_exports.array(Attachment).default([]),
+  /**
+   * Whether a person has to look at the running thing before it can ship. The
+   * automated run always happens; this holds the ticket in verify after it
+   * passes until someone has clicked through it too.
+   */
+  needsHuman: external_exports.boolean().default(false),
+  humanCheck: HumanCheck.nullable().default(null),
   createdAt: Timestamp
 });
 var ContractFile = external_exports.object({
@@ -15007,6 +15031,9 @@ var EventBody = external_exports.discriminatedUnion("type", [
    * branch, and nothing here would be honest if it claimed otherwise.
    */
   external_exports.object({ type: external_exports.literal("ticket.deleted"), ticketId: TicketId }),
+  external_exports.object({ type: external_exports.literal("ticket.attached"), ticketId: TicketId, attachments: external_exports.array(Attachment) }),
+  external_exports.object({ type: external_exports.literal("ticket.needsHuman"), ticketId: TicketId, value: external_exports.boolean() }),
+  external_exports.object({ type: external_exports.literal("ticket.humanCheck"), ticketId: TicketId, check: HumanCheck.nullable() }),
   /** Its pull request was merged -- from the board or on GitHub. The ticket is done. */
   external_exports.object({
     type: external_exports.literal("ticket.merged"),
@@ -15181,8 +15208,30 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("ticket.create"),
     title: external_exports.string().min(1).max(200),
-    body: external_exports.string().max(4e3).default("")
+    body: external_exports.string().max(4e3).default(""),
+    /** Files already uploaded to the session, to go with the brief. */
+    attachments: external_exports.array(Attachment).max(20).default([]),
+    needsHuman: external_exports.boolean().default(false)
   }),
+  /** Adds files to a ticket: more of the brief, or screenshots from a run. */
+  external_exports.object({
+    type: external_exports.literal("ticket.attach"),
+    ticketId: TicketId,
+    attachments: external_exports.array(Attachment).min(1).max(20)
+  }),
+  external_exports.object({ type: external_exports.literal("ticket.needsHuman"), ticketId: TicketId, value: external_exports.boolean() }),
+  /**
+   * A person has clicked through the running thing. Passing lets it ship;
+   * failing is `ticket.verified` with `passed: false`, which reopens work.
+   */
+  external_exports.object({
+    type: external_exports.literal("ticket.humanCheck"),
+    ticketId: TicketId,
+    passed: external_exports.boolean(),
+    note: external_exports.string().max(2e3).default("")
+  }),
+  /** Asks the caller's own Claude Code to start the ticket's branch locally for them to try. */
+  external_exports.object({ type: external_exports.literal("ticket.runLocally"), ticketId: TicketId }),
   /** Opting in. This is the consent step -- there is no separate approval. */
   external_exports.object({ type: external_exports.literal("ticket.join"), ticketId: TicketId }),
   external_exports.object({ type: external_exports.literal("ticket.leave"), ticketId: TicketId }),

@@ -47156,7 +47156,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes2, createHash: createHash2 } = __require("crypto");
+    var { randomBytes: randomBytes2, createHash: createHash3 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -47824,7 +47824,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash2("sha1").update(key + GUID).digest("base64");
+        const digest = createHash3("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -48193,7 +48193,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash: createHash2 } = __require("crypto");
+    var { createHash: createHash3 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -48500,7 +48500,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash2("sha1").update(key + GUID).digest("base64");
+        const digest = createHash3("sha1").update(key + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -48590,7 +48590,7 @@ var require_websocket_server = __commonJS({
 // packages/server/src/app.ts
 var import_fastify = __toESM(require_fastify(), 1);
 var import_static = __toESM(require_static(), 1);
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
 import { existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname3, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63207,6 +63207,22 @@ var TicketState = external_exports.enum([
   "review",
   "done"
 ]);
+var Attachment = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  name: external_exports.string().min(1).max(200),
+  type: external_exports.string().min(1).max(100),
+  size: external_exports.number().int().nonnegative(),
+  /** `brief` came with the ticket; `verify` is evidence from a run of it. */
+  kind: external_exports.enum(["brief", "verify"]).default("brief"),
+  /** Optional words about what it shows. */
+  caption: external_exports.string().max(300).default("")
+});
+var HumanCheck = external_exports.object({
+  passed: external_exports.boolean(),
+  note: external_exports.string().max(2e3).default(""),
+  by: ParticipantId,
+  at: Timestamp
+});
 var Ticket = external_exports.object({
   id: TicketId,
   sessionId: SessionId,
@@ -63233,6 +63249,14 @@ var Ticket = external_exports.object({
   prNumber: external_exports.number().int().nullable().default(null),
   /** When its pull request was merged; a merged ticket is done. */
   mergedAt: Timestamp.nullable().default(null),
+  attachments: external_exports.array(Attachment).default([]),
+  /**
+   * Whether a person has to look at the running thing before it can ship. The
+   * automated run always happens; this holds the ticket in verify after it
+   * passes until someone has clicked through it too.
+   */
+  needsHuman: external_exports.boolean().default(false),
+  humanCheck: HumanCheck.nullable().default(null),
   createdAt: Timestamp
 });
 var ContractFile = external_exports.object({
@@ -63530,6 +63554,9 @@ var EventBody = external_exports.discriminatedUnion("type", [
    * branch, and nothing here would be honest if it claimed otherwise.
    */
   external_exports.object({ type: external_exports.literal("ticket.deleted"), ticketId: TicketId }),
+  external_exports.object({ type: external_exports.literal("ticket.attached"), ticketId: TicketId, attachments: external_exports.array(Attachment) }),
+  external_exports.object({ type: external_exports.literal("ticket.needsHuman"), ticketId: TicketId, value: external_exports.boolean() }),
+  external_exports.object({ type: external_exports.literal("ticket.humanCheck"), ticketId: TicketId, check: HumanCheck.nullable() }),
   /** Its pull request was merged -- from the board or on GitHub. The ticket is done. */
   external_exports.object({
     type: external_exports.literal("ticket.merged"),
@@ -63704,8 +63731,30 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("ticket.create"),
     title: external_exports.string().min(1).max(200),
-    body: external_exports.string().max(4e3).default("")
+    body: external_exports.string().max(4e3).default(""),
+    /** Files already uploaded to the session, to go with the brief. */
+    attachments: external_exports.array(Attachment).max(20).default([]),
+    needsHuman: external_exports.boolean().default(false)
   }),
+  /** Adds files to a ticket: more of the brief, or screenshots from a run. */
+  external_exports.object({
+    type: external_exports.literal("ticket.attach"),
+    ticketId: TicketId,
+    attachments: external_exports.array(Attachment).min(1).max(20)
+  }),
+  external_exports.object({ type: external_exports.literal("ticket.needsHuman"), ticketId: TicketId, value: external_exports.boolean() }),
+  /**
+   * A person has clicked through the running thing. Passing lets it ship;
+   * failing is `ticket.verified` with `passed: false`, which reopens work.
+   */
+  external_exports.object({
+    type: external_exports.literal("ticket.humanCheck"),
+    ticketId: TicketId,
+    passed: external_exports.boolean(),
+    note: external_exports.string().max(2e3).default("")
+  }),
+  /** Asks the caller's own Claude Code to start the ticket's branch locally for them to try. */
+  external_exports.object({ type: external_exports.literal("ticket.runLocally"), ticketId: TicketId }),
   /** Opting in. This is the consent step -- there is no separate approval. */
   external_exports.object({ type: external_exports.literal("ticket.join"), ticketId: TicketId }),
   external_exports.object({ type: external_exports.literal("ticket.leave"), ticketId: TicketId }),
@@ -64556,7 +64605,30 @@ var SessionState = class {
       case "ticket.verified": {
         const ticket = this.tickets.get(body.ticketId);
         if (ticket)
-          this.tickets.set(body.ticketId, { ...ticket, verification: body.verification });
+          this.tickets.set(body.ticketId, { ...ticket, verification: body.verification, humanCheck: null });
+        break;
+      }
+      case "ticket.attached": {
+        const ticket = this.tickets.get(body.ticketId);
+        if (ticket) {
+          const known = new Set(ticket.attachments.map((a) => a.id));
+          this.tickets.set(body.ticketId, {
+            ...ticket,
+            attachments: [...ticket.attachments, ...body.attachments.filter((a) => !known.has(a.id))]
+          });
+        }
+        break;
+      }
+      case "ticket.needsHuman": {
+        const ticket = this.tickets.get(body.ticketId);
+        if (ticket)
+          this.tickets.set(body.ticketId, { ...ticket, needsHuman: body.value });
+        break;
+      }
+      case "ticket.humanCheck": {
+        const ticket = this.tickets.get(body.ticketId);
+        if (ticket)
+          this.tickets.set(body.ticketId, { ...ticket, humanCheck: body.check });
         break;
       }
       case "ticket.merged": {
@@ -64884,7 +64956,9 @@ var SessionState = class {
     if (tasks.length > 0) {
       if (!tasks.every((task) => task.state === "merged"))
         return "building";
-      return ticket.verification?.passed ? "review" : "verify";
+      if (!ticket.verification?.passed)
+        return "verify";
+      return !ticket.needsHuman || ticket.humanCheck?.passed ? "review" : "verify";
     }
     if (ticket.decompositionId)
       return "proposed";
@@ -65311,6 +65385,19 @@ CREATE TABLE IF NOT EXISTS join_tokens (
   used_at     INTEGER
 );
 
+/*
+ * Pictures and screenshots attached to tickets. Small, few, and owned by the
+ * session; the log carries references to them, never the bytes.
+ */
+CREATE TABLE IF NOT EXISTS files (
+  id          TEXT PRIMARY KEY,
+  session_id  TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  type        TEXT NOT NULL,
+  bytes       BLOB NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+
 /* CSRF state for the OAuth redirect, cleared as soon as it comes back. */
 CREATE TABLE IF NOT EXISTS oauth_states (
   state       TEXT PRIMARY KEY,
@@ -65426,6 +65513,18 @@ var Store = class {
       "SELECT session_id, seq, ts, actor_id, body FROM events WHERE session_id = ? AND seq >= ? ORDER BY seq LIMIT ?"
     ).all(sessionId, fromSeq, limit);
     return rows.map(rowToEnvelope);
+  }
+  saveFile(file2) {
+    this.db.prepare("INSERT OR IGNORE INTO files (id, session_id, name, type, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(file2.id, file2.sessionId, file2.name, file2.type, file2.bytes, Date.now());
+  }
+  readFile(sessionId, id) {
+    const row = this.db.prepare("SELECT name, type, bytes FROM files WHERE session_id = ? AND id = ?").get(sessionId, id);
+    return row ?? null;
+  }
+  listFileIds(sessionId) {
+    return this.db.prepare("SELECT id FROM files WHERE session_id = ? ORDER BY created_at").all(sessionId).map(
+      (row) => row.id
+    );
   }
   maxSeq(sessionId) {
     const row = this.db.prepare("SELECT COALESCE(MAX(seq), -1) AS max_seq FROM events WHERE session_id = ?").get(sessionId);
@@ -65607,6 +65706,108 @@ var SessionService = class {
       for (const sessionId of touched) this.states.delete(sessionId);
       throw error51;
     }
+  }
+  askToShip(sessionId, actorId, state, ticket, why) {
+    const shipper = this.verifier(state, ticket);
+    if (!shipper) return;
+    this.systemDirective(
+      sessionId,
+      actorId,
+      [shipper],
+      `"${ticket.title}" was ${why}. Open the pull request with ss_ship, then record its number with ss_ticket_shipped. Leave it open -- merging is not yours to decide.`
+    );
+  }
+  requireFiles(sessionId, attachments) {
+    const missing = attachments.filter((a) => !this.store.readFile(sessionId, a.id));
+    if (missing.length > 0) {
+      throw new ServiceError("bad_request", `Upload these first: ${missing.map((a) => a.id).join(", ")}.`);
+    }
+  }
+  attach(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    this.requireFiles(sessionId, command.attachments);
+    this.emit(sessionId, participantId, { type: "ticket.attached", ticketId: ticket.id, attachments: command.attachments });
+    return { ticket: this.requireTicket(state, ticket.id) };
+  }
+  setNeedsHuman(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    if (ticket.needsHuman !== command.value) {
+      this.emit(sessionId, participantId, { type: "ticket.needsHuman", ticketId: ticket.id, value: command.value });
+      const after = this.requireTicket(state, ticket.id);
+      this.refreshTicketStates(sessionId, participantId);
+      if (!command.value && after.verification?.passed && state.ticketStateFor(ticket.id) === "review" && !after.prNumber) {
+        this.askToShip(sessionId, participantId, state, after, "passed its run, and no longer waits for a person");
+      }
+    }
+    return { ticket: this.requireTicket(state, ticket.id) };
+  }
+  /**
+   * A person clicked through the running thing. Passing sends it on to its
+   * pull request; failing is a failed run, which reopens the work.
+   */
+  humanCheck(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    if (state.ticketStateFor(ticket.id) !== "verify" || !ticket.verification?.passed) {
+      throw new ServiceError("not_ready", `"${ticket.title}" is not waiting for a look: it needs its automated run to pass first.`);
+    }
+    const by = state.participants.get(participantId)?.displayName ?? "Someone";
+    if (!command.passed) {
+      return this.recordVerification(
+        {
+          type: "ticket.verified",
+          ticketId: ticket.id,
+          passed: false,
+          how: `checked by hand by ${by}`,
+          summary: command.note || "It does not work when tried by hand.",
+          broke: []
+        },
+        ctx
+      );
+    }
+    this.emit(sessionId, participantId, {
+      type: "ticket.humanCheck",
+      ticketId: ticket.id,
+      check: { passed: true, note: command.note, by: participantId, at: Date.now() }
+    });
+    this.refreshTicketStates(sessionId, participantId);
+    this.askToShip(sessionId, participantId, state, ticket, `checked by hand by ${by}${command.note ? ` (${command.note})` : ""}`);
+    return { ticket: this.requireTicket(state, ticket.id) };
+  }
+  /**
+   * Starts the ticket's assembled branch on the caller's own machine, for them
+   * to try. Their own Claude Code does it -- this server cannot run anything
+   * on anyone's laptop.
+   */
+  runLocally(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    const me = state.participants.get(participantId);
+    const login = me?.githubLogin.toLowerCase();
+    const checkout = me?.repoPath ? me : [...state.participants.values()].find(
+      (p) => p.repoPath && p.githubLogin.toLowerCase() === login && this.isPresent(p)
+    );
+    if (!checkout) {
+      throw new ServiceError("not_ready", "You have no checkout attached to start it in. Run /ss:join in a clone first.");
+    }
+    const branch = state.session?.contractBranch ?? "the contract branch";
+    this.systemDirective(
+      sessionId,
+      participantId,
+      [checkout.id],
+      [
+        `Start "${ticket.title}" so ${me?.displayName ?? "they"} can try it by hand.`,
+        `1. Make a separate worktree of ${branch} with ss_worktree (do not switch this checkout's branch).`,
+        "2. Install what it needs and start the app there, detached so it keeps running after this turn",
+        "   (for example `nohup npm run dev > run.log 2>&1 &`), and wait until it answers.",
+        "3. Post in the room with ss_chat_post how to reach it -- the local URL, or the command to run for a CLI --",
+        "   and what to try, from the ticket and its split.",
+        "Do not judge it yourself; they will pass or fail it on the board."
+      ].join("\n")
+    );
+    return { asked: checkout.id };
   }
   /**
    * A pull request was merged -- from the board or on GitHub. Whichever
@@ -65807,6 +66008,14 @@ var SessionService = class {
         return this.reportActivity(command, ctx);
       case "agent.heartbeat":
         return this.heartbeat(command, ctx);
+      case "ticket.attach":
+        return this.attach(command, ctx);
+      case "ticket.needsHuman":
+        return this.setNeedsHuman(command, ctx);
+      case "ticket.humanCheck":
+        return this.humanCheck(command, ctx);
+      case "ticket.runLocally":
+        return this.runLocally(command, ctx);
       case "agent.doing": {
         const { sessionId, participantId } = this.requireParticipant(ctx);
         if (ctx.via === "board") throw new ServiceError("forbidden", "Only a checkout reports what its Claude is doing.");
@@ -65946,8 +66155,12 @@ var SessionService = class {
       decompositionId: null,
       prNumber: null,
       mergedAt: null,
+      attachments: command.attachments.map((a) => ({ ...a, kind: "brief" })),
+      needsHuman: command.needsHuman,
+      humanCheck: null,
       createdAt: Date.now()
     };
+    this.requireFiles(sessionId, ticket.attachments);
     this.emit(sessionId, participantId, { type: "ticket.created", ticket });
     const author = state.participants.get(participantId);
     const others = [...state.participants.values()].filter(
@@ -66181,10 +66394,14 @@ var SessionService = class {
         "   Playwright or Cypress config, docker compose, an Xcode or Android target, a CLI.",
         "   Read the repo rather than assuming; the answer is in there.",
         "3. Start it and exercise the feature end to end, the way a person would. If it is a",
-        "   web app, drive the browser. If it is an app, use the simulator or emulator. If it",
-        "   is a library or CLI, run the real commands against real input.",
+        "   web app, drive a headless browser with Playwright (`npx playwright` -- install its",
+        "   chromium if it is missing), click through the flows the ticket describes, and save",
+        "   a screenshot at each meaningful step. If it is an app, use the simulator or emulator.",
+        "   If it is a library or CLI, run the real commands against real input and keep the output.",
         "4. Look at the seams specifically: each task passed its own tests in isolation, so the",
         "   interesting failures are where the pieces meet.",
+        '5. Attach the evidence to the ticket with ss_attach (kind "verify"): the screenshots,',
+        "   each with a caption saying what it shows. People decide from those.",
         "",
         "Then report with ss_ticket_verified: passed true or false, `how` you exercised it, and",
         "what you saw. Passing sends it to review. Failing reopens work, so it needs `broke`:",
@@ -66245,16 +66462,15 @@ var SessionService = class {
     }
     this.refreshTicketStates(sessionId, participantId);
     const by = state.participants.get(participantId)?.displayName ?? "Someone";
-    if (command.passed) {
-      const shipper = this.verifier(state, ticket);
-      if (shipper) {
-        this.systemDirective(
-          sessionId,
-          participantId,
-          [shipper],
-          `"${ticket.title}" was verified by ${by} (${command.how}). Open the pull request with ss_ship, then record its number with ss_ticket_shipped. Leave it open -- merging is not yours to decide.`
-        );
-      }
+    if (command.passed && ticket.needsHuman) {
+      this.systemMessage(
+        sessionId,
+        participantId,
+        ticket.members,
+        `"${ticket.title}" passed its automated run (${command.how}). It asked for a person's look as well: open it on the board, press "run it for me" to start it on your machine, click through, then pass or fail it.`
+      );
+    } else if (command.passed) {
+      this.askToShip(sessionId, participantId, state, ticket, `verified by ${by} (${command.how})`);
     } else {
       const others = ticket.members.filter((id) => state.participants.get(id)?.repoPath);
       if (others.length > 0) {
@@ -66335,6 +66551,8 @@ var SessionService = class {
         `Split the ticket "${ticket.title}" for ${people} person(s).`,
         ticket.body ? `
 ${ticket.body}` : "",
+        ticket.attachments.some((a) => a.kind === "brief") ? `
+The brief comes with ${ticket.attachments.filter((a) => a.kind === "brief").length} picture(s). Look at them first: ss_ticket_files (ticketId: ${ticket.id}) saves them where you can Read them.` : "",
         "",
         "Read the repository, then call ss_propose with:",
         `  ticketId: ${ticket.id}`,
@@ -68085,7 +68303,8 @@ var ImportSessionRequest = external_exports.object({
       actorId: ParticipantId.nullable(),
       body: EventBody
     })
-  ).max(2e5)
+  ).max(2e5),
+  files: external_exports.array(external_exports.object({ id: external_exports.string().max(64), name: external_exports.string().max(200), type: external_exports.string().max(100), base64: external_exports.string() })).default([])
 });
 function defaultWebRoot() {
   const here = dirname3(fileURLToPath(import.meta.url));
@@ -68337,9 +68556,12 @@ function createApp(options = {}) {
     if (!parsed.success) {
       return reply.code(400).send({ error: "bad_request", message: parsed.error.message });
     }
-    const { sessionId, slug, events } = parsed.data;
+    const { sessionId, slug, events, files } = parsed.data;
     try {
       const result = store.importEvents(sessionId, slug, events);
+      for (const file2 of files) {
+        store.saveFile({ id: file2.id, sessionId, name: file2.name, type: file2.type, bytes: Buffer.from(file2.base64, "base64") });
+      }
       service.reload(sessionId);
       if (auth.mode === "peer") {
         for (const participant of service.state(sessionId).participants.values()) {
@@ -68402,6 +68624,43 @@ function createApp(options = {}) {
     const sessionId = readable(request, reply);
     if (!sessionId) return reply;
     return service.snapshotOf(sessionId);
+  });
+  const IMAGE_TYPES = /* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+  const MAX_FILE_BYTES = 10 * 1024 * 1024;
+  fastify.addContentTypeParser(
+    [...IMAGE_TYPES],
+    { parseAs: "buffer", bodyLimit: MAX_FILE_BYTES },
+    (_request, body, done) => done(null, body)
+  );
+  fastify.post("/sessions/:ref/files", async (request, reply) => {
+    const sessionId = readable(request, reply);
+    if (!sessionId) return reply;
+    const type = String(request.headers["content-type"] ?? "").split(";")[0].trim();
+    if (!IMAGE_TYPES.has(type) || !Buffer.isBuffer(request.body)) {
+      return reply.code(415).send({ error: "bad_request", message: "Only PNG, JPEG, GIF and WebP pictures can be attached." });
+    }
+    const bytes = request.body;
+    let name = "picture";
+    try {
+      name = decodeURIComponent(String(request.headers["x-file-name"] ?? "picture")).slice(0, 200) || "picture";
+    } catch {
+    }
+    const id = createHash2("sha256").update(bytes).digest("hex").slice(0, 32);
+    store.saveFile({ id, sessionId, name, type, bytes });
+    return { id, name, type, size: bytes.length };
+  });
+  fastify.get("/sessions/:ref/files", async (request, reply) => {
+    const sessionId = readable(request, reply);
+    if (!sessionId) return reply;
+    return { ids: store.listFileIds(sessionId) };
+  });
+  fastify.get("/sessions/:ref/files/:id", async (request, reply) => {
+    const sessionId = readable(request, reply);
+    if (!sessionId) return reply;
+    const { id } = request.params;
+    const file2 = store.readFile(sessionId, id);
+    if (!file2) return reply.code(404).send({ error: "not_found" });
+    return reply.header("content-type", file2.type).header("x-content-type-options", "nosniff").header("content-security-policy", "default-src 'none'").header("cache-control", "private, max-age=31536000, immutable").send(Buffer.from(file2.bytes));
   });
   fastify.get("/sessions/:ref/history", async (request, reply) => {
     const sessionId = readable(request, reply);
