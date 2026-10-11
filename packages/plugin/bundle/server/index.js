@@ -33449,7 +33449,7 @@ var require_parse_url = __commonJS({
 var require_form_data = __commonJS({
   "node_modules/.pnpm/light-my-request@6.6.0/node_modules/light-my-request/lib/form-data.js"(exports, module) {
     "use strict";
-    var { randomUUID: randomUUID4 } = __require("node:crypto");
+    var { randomUUID: randomUUID5 } = __require("node:crypto");
     var { Readable } = __require("node:stream");
     var textEncoder;
     function isFormDataLike(payload) {
@@ -33457,7 +33457,7 @@ var require_form_data = __commonJS({
     }
     function formDataToStream(formdata) {
       textEncoder = textEncoder ?? new TextEncoder();
-      const boundary = `----formdata-${randomUUID4()}`;
+      const boundary = `----formdata-${randomUUID5()}`;
       const prefix = `--${boundary}\r
 Content-Disposition: form-data`;
       const escape2 = (str) => str.replace(/\n/g, "%0A").replace(/\r/g, "%0D").replace(/"/g, "%22");
@@ -48590,7 +48590,7 @@ var require_websocket_server = __commonJS({
 // packages/server/src/app.ts
 var import_fastify = __toESM(require_fastify(), 1);
 var import_static = __toESM(require_static(), 1);
-import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
+import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
 import { existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname3, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63119,6 +63119,85 @@ var TaskId = external_exports.string().regex(/^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/
 var Seq = external_exports.number().int().nonnegative();
 var Timestamp = external_exports.number().int().nonnegative();
 
+// packages/protocol/dist/terminal.js
+var TerminalStatus = external_exports.enum(["starting", "running", "exited"]);
+var TerminalInfo = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  ticketId: TicketId,
+  /** The seat whose checkout it runs in. */
+  hostId: ParticipantId,
+  openedBy: ParticipantId,
+  /**
+   * Who is at the keys. Null is Claude: nobody types, and work queued for the
+   * seat is handed to it as it goes idle. A seat is a person driving by hand.
+   */
+  driver: ParticipantId.nullable(),
+  status: TerminalStatus,
+  exitCode: external_exports.number().int().nullable(),
+  /** Why it stopped, when it did not stop by itself. */
+  reason: external_exports.string().max(300).nullable().default(null),
+  cols: external_exports.number().int().min(10).max(500),
+  rows: external_exports.number().int().min(5).max(200),
+  startedAt: Timestamp
+});
+var TerminalAccess = external_exports.enum(["off", "members"]);
+var Size = { cols: external_exports.number().int().min(10).max(500), rows: external_exports.number().int().min(5).max(200) };
+var Data = external_exports.string().max(1e6);
+var ViewerMessage = external_exports.discriminatedUnion("t", [
+  /** Start a Claude Code for a ticket on a member's machine, and watch it. */
+  external_exports.object({
+    t: external_exports.literal("open"),
+    ticketId: TicketId,
+    hostId: ParticipantId,
+    /** Typed into the new Claude as its first instruction. */
+    prompt: external_exports.string().max(4e3).nullable().default(null),
+    /** Who has the helm from the start: the opener, or Claude. */
+    drive: external_exports.enum(["me", "claude"]).default("me"),
+    ...Size
+  }),
+  external_exports.object({ t: external_exports.literal("attach"), terminalId: external_exports.string().min(1) }),
+  external_exports.object({ t: external_exports.literal("input"), data: Data }),
+  external_exports.object({ t: external_exports.literal("resize"), ...Size }),
+  /** Take the helm, or hand it to Claude. */
+  external_exports.object({ t: external_exports.literal("helm"), to: external_exports.enum(["me", "claude"]) }),
+  external_exports.object({ t: external_exports.literal("kill") })
+]);
+var ViewerEvent = external_exports.discriminatedUnion("t", [
+  external_exports.object({ t: external_exports.literal("state"), terminal: TerminalInfo }),
+  /** What it printed before this board was looking, so the screen is not blank. */
+  external_exports.object({ t: external_exports.literal("replay"), data: Data }),
+  external_exports.object({ t: external_exports.literal("output"), data: Data }),
+  external_exports.object({ t: external_exports.literal("error"), message: external_exports.string() })
+]);
+var HostCommand = external_exports.discriminatedUnion("t", [
+  external_exports.object({ t: external_exports.literal("welcome"), participantId: ParticipantId }),
+  external_exports.object({
+    t: external_exports.literal("open"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    ticketTitle: external_exports.string(),
+    prompt: external_exports.string().nullable(),
+    ...Size
+  }),
+  external_exports.object({ t: external_exports.literal("input"), terminalId: external_exports.string().min(1), data: Data }),
+  external_exports.object({ t: external_exports.literal("resize"), terminalId: external_exports.string().min(1), ...Size }),
+  external_exports.object({ t: external_exports.literal("helm"), terminalId: external_exports.string().min(1), claude: external_exports.boolean() }),
+  external_exports.object({ t: external_exports.literal("kill"), terminalId: external_exports.string().min(1) }),
+  external_exports.object({ t: external_exports.literal("refused"), message: external_exports.string() })
+]);
+var HostMessage = external_exports.discriminatedUnion("t", [
+  /** The checkout's own participant token: the first thing said, or nothing is heard. */
+  external_exports.object({ t: external_exports.literal("hello"), token: external_exports.string().min(1), access: TerminalAccess }),
+  external_exports.object({ t: external_exports.literal("started"), terminalId: external_exports.string().min(1) }),
+  external_exports.object({ t: external_exports.literal("output"), terminalId: external_exports.string().min(1), data: Data }),
+  external_exports.object({
+    t: external_exports.literal("exit"),
+    terminalId: external_exports.string().min(1),
+    code: external_exports.number().int().nullable(),
+    reason: external_exports.string().max(300).nullable().default(null)
+  })
+]);
+
 // packages/protocol/dist/domain.js
 var RepoRef = external_exports.object({
   owner: external_exports.string().min(1),
@@ -63223,12 +63302,22 @@ var HumanCheck = external_exports.object({
   by: ParticipantId,
   at: Timestamp
 });
+var TICKET_BODY_MAX = 2e4;
+var SubticketState = external_exports.enum(["todo", "doing", "done"]);
+var Subticket = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  title: external_exports.string().min(1).max(200),
+  state: SubticketState.default("todo"),
+  members: external_exports.array(ParticipantId).default([]),
+  createdBy: ParticipantId,
+  createdAt: Timestamp
+});
 var Ticket = external_exports.object({
   id: TicketId,
   sessionId: SessionId,
   title: external_exports.string().min(1).max(200),
   /** The brief the planner works from. Optional: a title is often enough. */
-  body: external_exports.string().max(4e3).default(""),
+  body: external_exports.string().max(TICKET_BODY_MAX).default(""),
   authorId: ParticipantId,
   /**
    * Who is working it. Joining is the whole consent step -- there is no
@@ -63257,6 +63346,38 @@ var Ticket = external_exports.object({
    */
   needsHuman: external_exports.boolean().default(false),
   humanCheck: HumanCheck.nullable().default(null),
+  subtickets: external_exports.array(Subticket).default([]),
+  /** The sprint it is planned into; null is the backlog. */
+  sprintId: external_exports.string().nullable().default(null),
+  /** When someone wants it finished by, for the timeline. */
+  dueAt: Timestamp.nullable().default(null),
+  /**
+   * When it first left the plan column. Set by the fold from the log, so the
+   * timeline can draw how long work actually took rather than how long the
+   * card has existed.
+   */
+  startedAt: Timestamp.nullable().default(null),
+  createdAt: Timestamp
+});
+var TicketComment = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  ticketId: TicketId,
+  authorId: ParticipantId,
+  /** Written by someone's Claude rather than typed by them. */
+  byAgent: external_exports.boolean().default(false),
+  body: external_exports.string().min(1).max(8e3),
+  createdAt: Timestamp,
+  editedAt: Timestamp.nullable().default(null)
+});
+var SprintState = external_exports.enum(["planned", "active", "closed"]);
+var Sprint = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  name: external_exports.string().min(1).max(100),
+  goal: external_exports.string().max(2e3).default(""),
+  startsAt: Timestamp,
+  endsAt: Timestamp,
+  state: SprintState.default("planned"),
+  createdBy: ParticipantId,
   createdAt: Timestamp
 });
 var ContractFile = external_exports.object({
@@ -63493,6 +63614,8 @@ var SessionSnapshot = external_exports.object({
   handoffs: external_exports.array(HandoffRequest),
   chat: external_exports.array(ChatMessage),
   usage: external_exports.array(Usage).default([]),
+  comments: external_exports.array(TicketComment).default([]),
+  sprints: external_exports.array(Sprint).default([]),
   mergeQueue: external_exports.array(MergeQueueEntry),
   /**
    * Seats whose Claude Code is open right now, by what its autopilot will do.
@@ -63504,6 +63627,10 @@ var SessionSnapshot = external_exports.object({
   doing: external_exports.record(external_exports.string(), Doing).optional(),
   /** Seats whose account has hit its usage limit; their work goes to others. */
   limited: external_exports.array(external_exports.string()).optional(),
+  /** Terminals open on members' machines. Memory only, like `doing`. */
+  terminals: external_exports.array(TerminalInfo).optional(),
+  /** Seats whose machine will run a terminal for the board right now. */
+  terminalHosts: external_exports.array(external_exports.string()).optional(),
   seq: external_exports.number().int().nonnegative()
 });
 
@@ -63564,6 +63691,45 @@ var EventBody = external_exports.discriminatedUnion("type", [
     prNumber: external_exports.number().int(),
     commitSha: external_exports.string().nullable()
   }),
+  /** Its title and description as they now read, whole rather than as a patch. */
+  external_exports.object({
+    type: external_exports.literal("ticket.edited"),
+    ticketId: TicketId,
+    title: external_exports.string().min(1).max(200),
+    body: external_exports.string().max(TICKET_BODY_MAX)
+  }),
+  external_exports.object({ type: external_exports.literal("ticket.due"), ticketId: TicketId, dueAt: Timestamp.nullable() }),
+  external_exports.object({ type: external_exports.literal("ticket.sprint"), ticketId: TicketId, sprintId: external_exports.string().nullable() }),
+  // -- subtickets -----------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("subticket.added"), ticketId: TicketId, subticket: Subticket }),
+  external_exports.object({
+    type: external_exports.literal("subticket.updated"),
+    ticketId: TicketId,
+    subticketId: external_exports.string().min(1),
+    title: external_exports.string().min(1).max(200),
+    state: SubticketState
+  }),
+  external_exports.object({
+    type: external_exports.literal("subticket.members"),
+    ticketId: TicketId,
+    subticketId: external_exports.string().min(1),
+    members: external_exports.array(ParticipantId)
+  }),
+  external_exports.object({ type: external_exports.literal("subticket.removed"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  // -- comments -------------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("comment.added"), comment: TicketComment }),
+  external_exports.object({
+    type: external_exports.literal("comment.edited"),
+    commentId: external_exports.string().min(1),
+    body: external_exports.string().min(1).max(8e3)
+  }),
+  external_exports.object({ type: external_exports.literal("comment.deleted"), commentId: external_exports.string().min(1) }),
+  // -- sprints --------------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("sprint.created"), sprint: Sprint }),
+  /** The sprint as it now stands, whole. */
+  external_exports.object({ type: external_exports.literal("sprint.updated"), sprint: Sprint }),
+  /** Its tickets go back to the backlog; nothing else about them changes. */
+  external_exports.object({ type: external_exports.literal("sprint.deleted"), sprintId: external_exports.string().min(1) }),
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
   external_exports.object({
@@ -63656,6 +63822,31 @@ var EventBody = external_exports.discriminatedUnion("type", [
   }),
   // -- chat -----------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("chat.message"), message: ChatMessage }),
+  // -- terminals ------------------------------------------------------------
+  /**
+   * Who opened a terminal on whose machine, and who held the helm when. The
+   * bytes are never logged; these are, because a terminal can run anything on
+   * the machine it is on.
+   */
+  external_exports.object({
+    type: external_exports.literal("terminal.opened"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    hostId: ParticipantId
+  }),
+  /** Null is Claude driving; a seat is that person at the keys. */
+  external_exports.object({
+    type: external_exports.literal("terminal.helm"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    driver: ParticipantId.nullable()
+  }),
+  external_exports.object({
+    type: external_exports.literal("terminal.closed"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    exitCode: external_exports.number().int().nullable()
+  }),
   // -- merge queue ----------------------------------------------------------
   external_exports.object({
     type: external_exports.literal("usage.recorded"),
@@ -63731,7 +63922,9 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("ticket.create"),
     title: external_exports.string().min(1).max(200),
-    body: external_exports.string().max(4e3).default(""),
+    body: external_exports.string().max(TICKET_BODY_MAX).default(""),
+    /** Straight into a sprint rather than the backlog. */
+    sprintId: external_exports.string().min(1).nullable().default(null),
     /** Files already uploaded to the session, to go with the brief. */
     attachments: external_exports.array(Attachment).max(20).default([]),
     needsHuman: external_exports.boolean().default(false)
@@ -63785,6 +63978,54 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
+  /** Rewrite the title or the description. Whatever is left out stays as it is. */
+  external_exports.object({
+    type: external_exports.literal("ticket.edit"),
+    ticketId: TicketId,
+    title: external_exports.string().trim().min(1).max(200).optional(),
+    body: external_exports.string().max(TICKET_BODY_MAX).optional()
+  }),
+  external_exports.object({ type: external_exports.literal("ticket.setDue"), ticketId: TicketId, dueAt: Timestamp.nullable() }),
+  /** Plan it into a sprint, or back to the backlog with null. */
+  external_exports.object({ type: external_exports.literal("ticket.setSprint"), ticketId: TicketId, sprintId: external_exports.string().min(1).nullable() }),
+  external_exports.object({ type: external_exports.literal("subticket.add"), ticketId: TicketId, title: external_exports.string().trim().min(1).max(200) }),
+  external_exports.object({
+    type: external_exports.literal("subticket.update"),
+    ticketId: TicketId,
+    subticketId: external_exports.string().min(1),
+    title: external_exports.string().trim().min(1).max(200).optional(),
+    state: SubticketState.optional()
+  }),
+  external_exports.object({ type: external_exports.literal("subticket.join"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  external_exports.object({ type: external_exports.literal("subticket.leave"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  external_exports.object({ type: external_exports.literal("subticket.remove"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  external_exports.object({
+    type: external_exports.literal("comment.add"),
+    ticketId: TicketId,
+    body: external_exports.string().trim().min(1).max(8e3),
+    asAgent: external_exports.boolean().default(false)
+  }),
+  /** Only the author can change or remove what they said. */
+  external_exports.object({ type: external_exports.literal("comment.edit"), commentId: external_exports.string().min(1), body: external_exports.string().trim().min(1).max(8e3) }),
+  external_exports.object({ type: external_exports.literal("comment.delete"), commentId: external_exports.string().min(1) }),
+  external_exports.object({
+    type: external_exports.literal("sprint.create"),
+    name: external_exports.string().trim().min(1).max(100),
+    goal: external_exports.string().max(2e3).default(""),
+    startsAt: Timestamp,
+    endsAt: Timestamp
+  }),
+  /** Change any of it. Starting a sprint is setting its state to active. */
+  external_exports.object({
+    type: external_exports.literal("sprint.update"),
+    sprintId: external_exports.string().min(1),
+    name: external_exports.string().trim().min(1).max(100).optional(),
+    goal: external_exports.string().max(2e3).optional(),
+    startsAt: Timestamp.optional(),
+    endsAt: Timestamp.optional(),
+    state: SprintState.optional()
+  }),
+  external_exports.object({ type: external_exports.literal("sprint.delete"), sprintId: external_exports.string().min(1) }),
   /**
    * Ask for a split from the board. Planning needs a repo and a model, neither
    * of which the browser has -- so this hands the brief to a participant's
@@ -64061,7 +64302,9 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
     /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
     autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
     doing: external_exports.record(external_exports.string(), Doing).optional(),
-    limited: external_exports.array(external_exports.string()).optional()
+    limited: external_exports.array(external_exports.string()).optional(),
+    terminals: external_exports.array(TerminalInfo).optional(),
+    terminalHosts: external_exports.array(external_exports.string()).optional()
   })
 ]);
 
@@ -64535,6 +64778,9 @@ var SessionState = class {
   chat = [];
   /** Keyed by `participant|ticket`, so both totals fall out of one map. */
   usage = /* @__PURE__ */ new Map();
+  /** Insertion-ordered, which is the order a ticket shows them. */
+  comments = /* @__PURE__ */ new Map();
+  sprints = /* @__PURE__ */ new Map();
   mergeQueue = [];
   apply(envelope) {
     if (envelope.seq <= this.seq)
@@ -64588,7 +64834,13 @@ var SessionState = class {
         break;
       }
       case "ticket.created":
-        this.tickets.set(body.ticket.id, body.ticket);
+        this.tickets.set(body.ticket.id, {
+          ...body.ticket,
+          subtickets: body.ticket.subtickets ?? [],
+          sprintId: body.ticket.sprintId ?? null,
+          dueAt: body.ticket.dueAt ?? null,
+          startedAt: body.ticket.startedAt ?? null
+        });
         break;
       case "ticket.members": {
         const ticket = this.tickets.get(body.ticketId);
@@ -64598,8 +64850,10 @@ var SessionState = class {
       }
       case "ticket.state": {
         const ticket = this.tickets.get(body.ticketId);
-        if (ticket)
-          this.tickets.set(body.ticketId, { ...ticket, state: body.state });
+        if (ticket) {
+          const startedAt = ticket.startedAt ?? (body.state === "plan" ? null : envelope.ts);
+          this.tickets.set(body.ticketId, { ...ticket, state: body.state, startedAt });
+        }
         break;
       }
       case "ticket.verified": {
@@ -64644,8 +64898,77 @@ var SessionState = class {
           this.tickets.set(body.ticketId, { ...ticket, prNumber: body.prNumber });
         break;
       }
+      case "ticket.edited": {
+        const ticket = this.tickets.get(body.ticketId);
+        if (ticket)
+          this.tickets.set(body.ticketId, { ...ticket, title: body.title, body: body.body });
+        break;
+      }
+      case "ticket.due": {
+        const ticket = this.tickets.get(body.ticketId);
+        if (ticket)
+          this.tickets.set(body.ticketId, { ...ticket, dueAt: body.dueAt });
+        break;
+      }
+      case "ticket.sprint": {
+        const ticket = this.tickets.get(body.ticketId);
+        if (ticket)
+          this.tickets.set(body.ticketId, { ...ticket, sprintId: body.sprintId });
+        break;
+      }
+      case "subticket.added": {
+        const ticket = this.tickets.get(body.ticketId);
+        if (ticket && !ticket.subtickets.some((s) => s.id === body.subticket.id)) {
+          this.tickets.set(body.ticketId, { ...ticket, subtickets: [...ticket.subtickets, body.subticket] });
+        }
+        break;
+      }
+      case "subticket.updated":
+        this.updateSubticket(body.ticketId, body.subticketId, (s) => ({ ...s, title: body.title, state: body.state }));
+        break;
+      case "subticket.members":
+        this.updateSubticket(body.ticketId, body.subticketId, (s) => ({ ...s, members: body.members }));
+        break;
+      case "subticket.removed": {
+        const ticket = this.tickets.get(body.ticketId);
+        if (ticket) {
+          this.tickets.set(body.ticketId, {
+            ...ticket,
+            subtickets: ticket.subtickets.filter((s) => s.id !== body.subticketId)
+          });
+        }
+        break;
+      }
+      case "comment.added":
+        this.comments.set(body.comment.id, body.comment);
+        break;
+      case "comment.edited": {
+        const comment = this.comments.get(body.commentId);
+        if (comment)
+          this.comments.set(comment.id, { ...comment, body: body.body, editedAt: envelope.ts });
+        break;
+      }
+      case "comment.deleted":
+        this.comments.delete(body.commentId);
+        break;
+      case "sprint.created":
+      case "sprint.updated":
+        this.sprints.set(body.sprint.id, body.sprint);
+        break;
+      case "sprint.deleted": {
+        this.sprints.delete(body.sprintId);
+        for (const ticket of this.tickets.values()) {
+          if (ticket.sprintId === body.sprintId)
+            this.tickets.set(ticket.id, { ...ticket, sprintId: null });
+        }
+        break;
+      }
       case "ticket.deleted": {
         this.tickets.delete(body.ticketId);
+        for (const comment of [...this.comments.values()]) {
+          if (comment.ticketId === body.ticketId)
+            this.comments.delete(comment.id);
+        }
         for (const task of [...this.tasks.values()]) {
           if (task.ticketId !== body.ticketId)
             continue;
@@ -64815,6 +65138,15 @@ var SessionState = class {
     const split = key ? this.decompositions.get(key) : void 0;
     if (split)
       this.decompositions.set(split.id, change(split));
+  }
+  updateSubticket(ticketId, subticketId, change) {
+    const ticket = this.tickets.get(ticketId);
+    if (!ticket)
+      return;
+    this.tickets.set(ticketId, {
+      ...ticket,
+      subtickets: ticket.subtickets.map((s) => s.id === subticketId ? change(s) : s)
+    });
   }
   /**
    * A handoff opens a path for one piece of work. When the lease it was carved
@@ -65009,8 +65341,15 @@ var SessionState = class {
       this.participants.set(participant.id, participant);
     }
     this.tickets.clear();
-    for (const ticket of snapshot.tickets ?? [])
-      this.tickets.set(ticket.id, ticket);
+    for (const ticket of snapshot.tickets ?? []) {
+      this.tickets.set(ticket.id, {
+        ...ticket,
+        subtickets: ticket.subtickets ?? [],
+        sprintId: ticket.sprintId ?? null,
+        dueAt: ticket.dueAt ?? null,
+        startedAt: ticket.startedAt ?? null
+      });
+    }
     this.decompositions.clear();
     this.validations.clear();
     const splits = { ...snapshot.decompositions ?? {} };
@@ -65047,6 +65386,12 @@ var SessionState = class {
     for (const entry of snapshot.usage ?? []) {
       this.usage.set(`${entry.participantId}|${entry.ticketId ?? ""}`, entry);
     }
+    this.comments.clear();
+    for (const comment of snapshot.comments ?? [])
+      this.comments.set(comment.id, comment);
+    this.sprints.clear();
+    for (const sprint of snapshot.sprints ?? [])
+      this.sprints.set(sprint.id, sprint);
     this.mergeQueue = snapshot.mergeQueue;
     this.seq = snapshot.seq;
   }
@@ -65076,6 +65421,8 @@ var SessionState = class {
       handoffs: [...this.handoffs.values()],
       chat: this.chat,
       usage: [...this.usage.values()],
+      comments: [...this.comments.values()],
+      sprints: [...this.sprints.values()],
       mergeQueue: this.mergeQueue,
       seq: this.seq
     };
@@ -65662,6 +66009,8 @@ var SessionService = class {
    * so it reaches them now rather than on the next heartbeat. Set by the gateway.
    */
   onLive = null;
+  /** The terminals open in a session and whose machines take one. Set by the terminal relay. */
+  terminalsOf = null;
   // -- state access --------------------------------------------------------
   /** Folds the log on first touch; afterwards the map is the live projection. */
   state(sessionId) {
@@ -65929,8 +66278,34 @@ var SessionService = class {
       })),
       autopilots: this.autopilotsIn(sessionId),
       doing: this.doingIn(sessionId),
-      limited: this.limitedIn(sessionId)
+      limited: this.limitedIn(sessionId),
+      ...this.liveTerminals(sessionId)
     };
+  }
+  /** Terminals for the board's live state; nothing when no relay is attached. */
+  liveTerminals(sessionId) {
+    const live = this.terminalsOf?.(sessionId);
+    return live ? { terminals: live.terminals, terminalHosts: live.hosts } : {};
+  }
+  /**
+   * Appends an event from outside a command: the terminal relay saying who
+   * opened what on whose machine. Same log, same broadcast.
+   */
+  record(sessionId, actorId, body) {
+    this.atomically(() => {
+      this.emit(sessionId, actorId, body);
+    });
+  }
+  /** Whether two seats are one person -- the same login in two checkouts is. */
+  samePerson(state, a, b) {
+    if (a === b) return true;
+    const one = state.participants.get(a);
+    const two = state.participants.get(b);
+    return Boolean(one && two && personOf(one) === personOf(two));
+  }
+  /** Whether the person in a seat is in a ticket, through any of their seats. */
+  isTicketMember(state, ticket, participantId) {
+    return ticket.members.some((member) => this.samePerson(state, member, participantId));
   }
   readEvents(sessionId, fromSeq, limit) {
     return this.store.readEvents(sessionId, fromSeq, limit);
@@ -66016,6 +66391,33 @@ var SessionService = class {
         return this.humanCheck(command, ctx);
       case "ticket.runLocally":
         return this.runLocally(command, ctx);
+      case "ticket.edit":
+        return this.editTicket(command, ctx);
+      case "ticket.setDue":
+        return this.setDue(command, ctx);
+      case "ticket.setSprint":
+        return this.setSprint(command, ctx);
+      case "subticket.add":
+        return this.addSubticket(command, ctx);
+      case "subticket.update":
+        return this.updateSubticket(command, ctx);
+      case "subticket.join":
+      case "subticket.leave":
+        return this.subticketMembership(command, ctx);
+      case "subticket.remove":
+        return this.removeSubticket(command, ctx);
+      case "comment.add":
+        return this.addComment(command, ctx);
+      case "comment.edit":
+        return this.editComment(command, ctx);
+      case "comment.delete":
+        return this.deleteComment(command, ctx);
+      case "sprint.create":
+        return this.createSprint(command, ctx);
+      case "sprint.update":
+        return this.updateSprint(command, ctx);
+      case "sprint.delete":
+        return this.deleteSprint(command, ctx);
       case "agent.doing": {
         const { sessionId, participantId } = this.requireParticipant(ctx);
         if (ctx.via === "board") throw new ServiceError("forbidden", "Only a checkout reports what its Claude is doing.");
@@ -66133,6 +66535,243 @@ var SessionService = class {
     return ticket;
   }
   /**
+   * What people have said on a ticket, for an agent about to act on it. The
+   * newest few, each cut short: the comments are context for the brief, and a
+   * long thread pasted whole would drown the brief it is about.
+   */
+  commentDigest(state, ticketId) {
+    const comments = [...state.comments.values()].filter((c) => c.ticketId === ticketId).slice(-10);
+    if (comments.length === 0) return "";
+    const lines = comments.map((c) => {
+      const who = state.participants.get(c.authorId)?.displayName ?? "someone";
+      const body = c.body.length > 500 ? `${c.body.slice(0, 500)}\u2026` : c.body;
+      return `- ${who}${c.byAgent ? "'s Claude" : ""}: ${body.replace(/\n+/g, " ")}`;
+    });
+    return `
+What people have said on it (read all of it with ss_ticket):
+${lines.join("\n")}`;
+  }
+  requireSprint(state, sprintId) {
+    const sprint = state.sprints.get(sprintId);
+    if (!sprint) throw new ServiceError("not_found", `No sprint "${sprintId}".`);
+    return sprint;
+  }
+  requireSubticket(ticket, subticketId) {
+    const subticket = ticket.subtickets.find((s) => s.id === subticketId);
+    if (!subticket) throw new ServiceError("not_found", `"${ticket.title}" has no subticket "${subticketId}".`);
+    return subticket;
+  }
+  /**
+   * Anyone in the room can reword a ticket, like anyone can delete one. Once
+   * it has been split the planner has already read it, so a change then is
+   * said in the room -- the people building it should hear the brief moved.
+   */
+  editTicket(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    const title = command.title ?? ticket.title;
+    const body = command.body ?? ticket.body;
+    if (title === ticket.title && body === ticket.body) return { ticket };
+    this.emit(sessionId, participantId, { type: "ticket.edited", ticketId: ticket.id, title, body });
+    if (ticket.decompositionId && body !== ticket.body) {
+      const by = state.participants.get(participantId)?.displayName ?? "Someone";
+      const others = ticket.members.filter((id) => id !== participantId);
+      this.systemMessage(
+        sessionId,
+        participantId,
+        others,
+        `${by} changed the description of "${title}" after it was split. Read it again before going on.`
+      );
+    }
+    return { ticket: this.requireTicket(state, ticket.id) };
+  }
+  setDue(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    if (ticket.dueAt !== command.dueAt) {
+      this.emit(sessionId, participantId, { type: "ticket.due", ticketId: ticket.id, dueAt: command.dueAt });
+    }
+    return { ticket: this.requireTicket(state, ticket.id) };
+  }
+  setSprint(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    if (command.sprintId) {
+      const sprint = this.requireSprint(state, command.sprintId);
+      if (sprint.state === "closed") {
+        throw new ServiceError("conflict", `"${sprint.name}" is closed. Plan it into an open sprint, or reopen that one.`);
+      }
+    }
+    if (ticket.sprintId !== command.sprintId) {
+      this.emit(sessionId, participantId, { type: "ticket.sprint", ticketId: ticket.id, sprintId: command.sprintId });
+    }
+    return { ticket: this.requireTicket(state, ticket.id) };
+  }
+  /** Whoever adds a piece of a ticket is on it until they say otherwise. */
+  addSubticket(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    if (ticket.subtickets.length >= 100) {
+      throw new ServiceError("bad_request", `"${ticket.title}" already has 100 subtickets. Split it into another ticket.`);
+    }
+    const subticket = {
+      id: randomUUID2(),
+      title: command.title,
+      state: "todo",
+      members: [participantId],
+      createdBy: participantId,
+      createdAt: Date.now()
+    };
+    this.emit(sessionId, participantId, { type: "subticket.added", ticketId: ticket.id, subticket });
+    return { subticket };
+  }
+  updateSubticket(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    const subticket = this.requireSubticket(ticket, command.subticketId);
+    const title = command.title ?? subticket.title;
+    const next = command.state ?? subticket.state;
+    if (title !== subticket.title || next !== subticket.state) {
+      this.emit(sessionId, participantId, {
+        type: "subticket.updated",
+        ticketId: ticket.id,
+        subticketId: subticket.id,
+        title,
+        state: next
+      });
+    }
+    return { subticket: this.requireSubticket(this.requireTicket(state, ticket.id), subticket.id) };
+  }
+  /**
+   * Joining a piece of a ticket says who is looking after it. It does not join
+   * the ticket itself: that is the step that puts someone into its split, and
+   * offering to tick off one item is not agreeing to take on tasks.
+   */
+  subticketMembership(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    const subticket = this.requireSubticket(ticket, command.subticketId);
+    const joining = command.type === "subticket.join";
+    const has = subticket.members.includes(participantId);
+    if (joining !== has) {
+      this.emit(sessionId, participantId, {
+        type: "subticket.members",
+        ticketId: ticket.id,
+        subticketId: subticket.id,
+        members: joining ? [...subticket.members, participantId] : subticket.members.filter((id) => id !== participantId)
+      });
+    }
+    return { subticket: this.requireSubticket(this.requireTicket(state, ticket.id), subticket.id) };
+  }
+  removeSubticket(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    const subticket = this.requireSubticket(ticket, command.subticketId);
+    this.emit(sessionId, participantId, { type: "subticket.removed", ticketId: ticket.id, subticketId: subticket.id });
+    return { ok: true };
+  }
+  /**
+   * A comment stays with the card. Members other than the author are told in
+   * the room, as a message rather than an instruction -- reading a comment is
+   * a person's call, not something to hand their agent.
+   */
+  addComment(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.requireTicket(state, command.ticketId);
+    const comment = {
+      id: randomUUID2(),
+      ticketId: ticket.id,
+      authorId: participantId,
+      byAgent: command.asAgent,
+      body: command.body,
+      createdAt: Date.now(),
+      editedAt: null
+    };
+    this.emit(sessionId, participantId, { type: "comment.added", comment });
+    return { comment };
+  }
+  requireOwnComment(state, commentId, participantId) {
+    const comment = state.comments.get(commentId);
+    if (!comment) throw new ServiceError("not_found", `No comment "${commentId}".`);
+    const author = state.participants.get(comment.authorId);
+    const me = state.participants.get(participantId);
+    const same = comment.authorId === participantId || author && me && personOf(author) === personOf(me);
+    if (!same) throw new ServiceError("forbidden", "Only whoever wrote a comment can change or remove it.");
+    return comment;
+  }
+  editComment(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const comment = this.requireOwnComment(state, command.commentId, participantId);
+    if (comment.body !== command.body) {
+      this.emit(sessionId, participantId, { type: "comment.edited", commentId: comment.id, body: command.body });
+    }
+    return { comment: state.comments.get(comment.id) };
+  }
+  deleteComment(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const comment = this.requireOwnComment(state, command.commentId, participantId);
+    this.emit(sessionId, participantId, { type: "comment.deleted", commentId: comment.id });
+    return { ok: true };
+  }
+  // -- sprints ---------------------------------------------------------------
+  checkSprintDates(startsAt, endsAt) {
+    if (endsAt <= startsAt) throw new ServiceError("bad_request", "A sprint has to end after it starts.");
+    if (endsAt - startsAt > 180 * 24 * 60 * 60 * 1e3) {
+      throw new ServiceError("bad_request", "A sprint longer than six months is a roadmap, not a sprint.");
+    }
+  }
+  createSprint(command, ctx) {
+    const { sessionId, participantId } = this.requireParticipant(ctx);
+    this.checkSprintDates(command.startsAt, command.endsAt);
+    const sprint = {
+      id: randomUUID2(),
+      name: command.name,
+      goal: command.goal,
+      startsAt: command.startsAt,
+      endsAt: command.endsAt,
+      state: "planned",
+      createdBy: participantId,
+      createdAt: Date.now()
+    };
+    this.emit(sessionId, participantId, { type: "sprint.created", sprint });
+    return { sprint };
+  }
+  /**
+   * One sprint runs at a time. Starting another closes nothing by itself --
+   * that would quietly strand whatever was unfinished -- so it is refused, and
+   * the person decides what happens to the one still running.
+   */
+  updateSprint(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const sprint = this.requireSprint(state, command.sprintId);
+    const next = {
+      ...sprint,
+      name: command.name ?? sprint.name,
+      goal: command.goal ?? sprint.goal,
+      startsAt: command.startsAt ?? sprint.startsAt,
+      endsAt: command.endsAt ?? sprint.endsAt,
+      state: command.state ?? sprint.state
+    };
+    this.checkSprintDates(next.startsAt, next.endsAt);
+    if (next.state === "active" && sprint.state !== "active") {
+      const running = [...state.sprints.values()].find((s) => s.state === "active" && s.id !== sprint.id);
+      if (running) {
+        throw new ServiceError("conflict", `"${running.name}" is still active. Close it first.`);
+      }
+    }
+    if (JSON.stringify(next) !== JSON.stringify(sprint)) {
+      this.emit(sessionId, participantId, { type: "sprint.updated", sprint: next });
+    }
+    return { sprint: next };
+  }
+  deleteSprint(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const sprint = this.requireSprint(state, command.sprintId);
+    const moved = [...state.tickets.values()].filter((t) => t.sprintId === sprint.id).length;
+    this.emit(sessionId, participantId, { type: "sprint.deleted", sprintId: sprint.id });
+    return { ticketsMoved: moved };
+  }
+  /**
    * Anyone can open a ticket. The author is in it from the start, and everyone
    * else is told it exists -- as a message, not a directive, because joining is
    * a person's decision and hijacking their agent to make it is not an offer.
@@ -66158,6 +66797,10 @@ var SessionService = class {
       attachments: command.attachments.map((a) => ({ ...a, kind: "brief" })),
       needsHuman: command.needsHuman,
       humanCheck: null,
+      subtickets: [],
+      sprintId: command.sprintId ? this.requireSprint(state, command.sprintId).id : null,
+      dueAt: null,
+      startedAt: null,
       createdAt: Date.now()
     };
     this.requireFiles(sessionId, ticket.attachments);
@@ -66553,6 +67196,10 @@ var SessionService = class {
 ${ticket.body}` : "",
         ticket.attachments.some((a) => a.kind === "brief") ? `
 The brief comes with ${ticket.attachments.filter((a) => a.kind === "brief").length} picture(s). Look at them first: ss_ticket_files (ticketId: ${ticket.id}) saves them where you can Read them.` : "",
+        ticket.subtickets.length > 0 ? `
+It is broken into these pieces, which the split should cover:
+${ticket.subtickets.map((s) => `- ${s.title}${s.state === "done" ? " (already done)" : ""}`).join("\n")}` : "",
+        this.commentDigest(state, ticket.id),
         "",
         "Read the repository, then call ss_propose with:",
         `  ticketId: ${ticket.id}`,
@@ -67969,10 +68616,15 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 var SYNC_BATCH = 500;
 var HEARTBEAT_MS = 3e4;
 var Gateway = class {
-  constructor(server, path, auth, store) {
+  /**
+   * Upgrades are routed to this by path rather than this listening on the
+   * server: `ws` answers 400 to any path that is not its own, so two socket
+   * endpoints on one server would each refuse the other's connections.
+   */
+  constructor(auth, store) {
     this.auth = auth;
     this.store = store;
-    this.wss = new import_websocket_server.default({ server, path });
+    this.wss = new import_websocket_server.default({ noServer: true });
   }
   auth;
   store;
@@ -67980,6 +68632,9 @@ var Gateway = class {
   wss;
   heartbeat = null;
   service;
+  handleUpgrade(request, socket, head) {
+    this.wss.handleUpgrade(request, socket, head, (ws) => this.wss.emit("connection", ws, request));
+  }
   attach(service) {
     this.service = service;
     service.onLive = (sessionId) => this.announceSoon(sessionId);
@@ -68202,7 +68857,8 @@ var Gateway = class {
       present: this.service.presentIn(sessionId),
       autopilots: this.service.autopilotsIn(sessionId),
       doing: this.service.doingIn(sessionId),
-      limited: this.service.limitedIn(sessionId)
+      limited: this.service.limitedIn(sessionId),
+      ...this.service.liveTerminals(sessionId)
     };
     for (const connection of this.connections) {
       if (connection.ctx.sessionId === sessionId) send(connection.socket, message);
@@ -68226,6 +68882,338 @@ function reqIdOf(raw) {
 }
 function send(socket, message) {
   if (socket.readyState !== socket.OPEN) return;
+  socket.send(JSON.stringify(message));
+}
+
+// packages/server/src/terminals.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+var SCROLLBACK_BYTES = 256 * 1024;
+var KEEP_EXITED_MS = 10 * 60 * 1e3;
+var HELLO_TIMEOUT_MS = 1e4;
+var PING_MS = 3e4;
+var Refusal = class extends Error {
+};
+var Terminals = class {
+  constructor(auth, store, service) {
+    this.auth = auth;
+    this.store = store;
+    this.service = service;
+    this.wss.on("connection", (socket, request) => this.onConnection(socket, request));
+    service.terminalsOf = (sessionId) => this.of(sessionId);
+    this.pinger = setInterval(() => {
+      for (const socket of this.wss.clients) {
+        if (this.alive.get(socket) === false) {
+          socket.terminate();
+          continue;
+        }
+        this.alive.set(socket, false);
+        socket.ping();
+      }
+    }, PING_MS);
+    this.pinger.unref?.();
+  }
+  auth;
+  store;
+  service;
+  wss = new import_websocket_server.default({ noServer: true, maxPayload: 2 * 1024 * 1024 });
+  hosts = /* @__PURE__ */ new Map();
+  live = /* @__PURE__ */ new Map();
+  alive = /* @__PURE__ */ new WeakMap();
+  pinger;
+  handleUpgrade(request, socket, head) {
+    this.wss.handleUpgrade(request, socket, head, (ws) => this.wss.emit("connection", ws, request));
+  }
+  /** What boards are told: the terminals in a session, and whose machine takes one now. */
+  of(sessionId) {
+    const now = Date.now();
+    for (const [id, term] of this.live) {
+      if (term.exitedAt && now - term.exitedAt > KEEP_EXITED_MS) this.live.delete(id);
+    }
+    return {
+      terminals: [...this.live.values()].filter((t) => t.sessionId === sessionId).map((t) => t.info),
+      hosts: [...this.hosts.values()].filter((h) => h.sessionId === sessionId && h.access === "members").map((h) => h.participantId)
+    };
+  }
+  async close() {
+    clearInterval(this.pinger);
+    for (const socket of this.wss.clients) socket.terminate();
+    await new Promise((resolve2) => this.wss.close(() => resolve2()));
+  }
+  // -- connections -----------------------------------------------------------
+  onConnection(socket, request) {
+    this.alive.set(socket, true);
+    socket.on("pong", () => this.alive.set(socket, true));
+    const url2 = new URL(request.url ?? "/term", "http://localhost");
+    if (url2.searchParams.get("role") === "host") this.acceptHost(socket);
+    else this.acceptViewer(socket, url2);
+  }
+  /**
+   * A machine's terminal host. It proves which checkout it is with that
+   * checkout's own participant token, sent as its first message rather than in
+   * the URL, where a long-lived credential would end up in logs.
+   */
+  acceptHost(socket) {
+    let link = null;
+    const timer = setTimeout(() => {
+      if (!link) socket.close(4001, "no hello");
+    }, HELLO_TIMEOUT_MS);
+    socket.on("message", (raw) => {
+      let message;
+      try {
+        message = HostMessage.parse(JSON.parse(raw.toString()));
+      } catch {
+        return;
+      }
+      if (!link) {
+        if (message.t !== "hello") return;
+        clearTimeout(timer);
+        link = this.registerHost(socket, message.token, message.access);
+        return;
+      }
+      this.onHostMessage(link, message);
+    });
+    socket.on("close", () => {
+      clearTimeout(timer);
+      if (link) this.dropHost(link);
+    });
+    socket.on("error", () => socket.terminate());
+  }
+  registerHost(socket, token, access) {
+    const claims = readParticipantToken(this.auth, token);
+    const refuse = (message) => {
+      sendTo(socket, { t: "refused", message });
+      socket.close(4003, "refused");
+      return null;
+    };
+    if (!claims || claims.board) return refuse("That is not a checkout token this server signed.");
+    const state = this.service.state(claims.sessionId);
+    const seat = state.participants.get(claims.participantId);
+    if (!seat?.repoPath) return refuse("That seat has no checkout attached.");
+    const previous = this.hosts.get(seat.id);
+    if (previous) {
+      previous.socket.close(4e3, "replaced");
+      this.dropHost(previous, "the terminal host on that machine restarted");
+    }
+    const link = { socket, sessionId: claims.sessionId, participantId: seat.id, access };
+    this.hosts.set(seat.id, link);
+    sendTo(socket, { t: "welcome", participantId: seat.id });
+    this.service.onLive?.(link.sessionId);
+    return link;
+  }
+  dropHost(link, reason = "the machine running it went away") {
+    if (this.hosts.get(link.participantId) === link) this.hosts.delete(link.participantId);
+    for (const term of this.live.values()) {
+      if (term.host === link && term.info.status !== "exited") this.finish(term, null, reason);
+    }
+    this.service.onLive?.(link.sessionId);
+  }
+  onHostMessage(link, message) {
+    const term = "terminalId" in message ? this.live.get(message.terminalId) : void 0;
+    if (!term || term.host !== link) return;
+    switch (message.t) {
+      case "started":
+        term.info = { ...term.info, status: "running" };
+        this.announce(term);
+        return;
+      case "output": {
+        const chunk = Buffer.from(message.data, "base64");
+        term.scrollback.push(chunk);
+        term.size += chunk.length;
+        while (term.size > SCROLLBACK_BYTES && term.scrollback.length > 1) term.size -= term.scrollback.shift().length;
+        for (const viewer of term.viewers) sendTo(viewer.socket, { t: "output", data: message.data });
+        return;
+      }
+      case "exit":
+        this.finish(term, message.code, message.reason);
+        return;
+    }
+  }
+  /**
+   * A board. It authenticates the way the main socket does -- a minute-long
+   * ticket traded for its cookie or token -- and is then one person looking
+   * at one terminal.
+   */
+  acceptViewer(socket, url2) {
+    let viewer;
+    try {
+      viewer = this.identifyViewer(socket, url2);
+    } catch (error51) {
+      sendTo(socket, { t: "error", message: error51 instanceof Error ? error51.message : "refused" });
+      socket.close(4003, "refused");
+      return;
+    }
+    socket.on("message", (raw) => {
+      let message;
+      try {
+        message = ViewerMessage.parse(JSON.parse(raw.toString()));
+      } catch (error51) {
+        sendTo(socket, { t: "error", message: "That message could not be read." });
+        return;
+      }
+      try {
+        this.onViewerMessage(viewer, message);
+      } catch (error51) {
+        sendTo(socket, { t: "error", message: error51 instanceof Error ? error51.message : "failed" });
+      }
+    });
+    socket.on("close", () => {
+      if (viewer.terminalId) this.live.get(viewer.terminalId)?.viewers.delete(viewer);
+    });
+    socket.on("error", () => socket.terminate());
+  }
+  identifyViewer(socket, url2) {
+    const ticket = url2.searchParams.get("ticket");
+    const checked = ticket ? readWsTicket(this.auth, ticket) : null;
+    if (!checked?.ok) throw new Refusal("This socket needs a fresh ticket from /api/ws-ticket.");
+    const claims = checked.claims;
+    const named = url2.searchParams.get("session");
+    const sessionId = claims.sessionId ?? (named ? this.store.findSessionIdByRef(named) : null);
+    if (!sessionId) throw new Refusal("Say which session with ?session=.");
+    if (claims.sessionId && named && this.store.findSessionIdByRef(named) !== claims.sessionId) {
+      throw new Refusal("This ticket was minted for another session.");
+    }
+    const state = this.service.state(sessionId);
+    const participantId = claims.participantId ?? [...state.participants.values()].find((p) => p.userId === claims.userId)?.id ?? null;
+    if (!participantId || !state.participants.has(participantId)) throw new Refusal("Join the session first.");
+    return { socket, sessionId, participantId, terminalId: null };
+  }
+  onViewerMessage(viewer, message) {
+    if (message.t === "open") return this.open(viewer, message);
+    if (message.t === "attach") return this.attach(viewer, message.terminalId);
+    const term = viewer.terminalId ? this.live.get(viewer.terminalId) : void 0;
+    if (!term) throw new Refusal("Open or attach to a terminal first.");
+    const state = this.service.state(term.sessionId);
+    const ticket = state.tickets.get(term.info.ticketId);
+    const me = viewer.participantId;
+    const mayDrive = () => ticket && this.service.isTicketMember(state, ticket, me) || this.service.samePerson(state, me, term.info.hostId);
+    switch (message.t) {
+      case "input": {
+        if (term.info.status !== "running") return;
+        if (term.info.driver === null) throw new Refusal("Claude has the helm. Take it to type.");
+        if (!this.service.samePerson(state, term.info.driver, me)) {
+          const who = state.participants.get(term.info.driver)?.displayName ?? "Someone else";
+          throw new Refusal(`${who} has the helm. Take it to type.`);
+        }
+        sendTo(term.host?.socket, { t: "input", terminalId: term.info.id, data: message.data });
+        return;
+      }
+      case "resize": {
+        const sizer = term.info.driver ?? term.info.openedBy;
+        if (!this.service.samePerson(state, sizer, me)) return;
+        if (message.cols === term.info.cols && message.rows === term.info.rows) return;
+        term.info = { ...term.info, cols: message.cols, rows: message.rows };
+        sendTo(term.host?.socket, { t: "resize", terminalId: term.info.id, cols: message.cols, rows: message.rows });
+        this.announce(term);
+        return;
+      }
+      case "helm": {
+        if (!mayDrive()) throw new Refusal("Only people in this ticket, or whoever owns that machine, can take the helm.");
+        const driver = message.to === "me" ? me : null;
+        if (driver === term.info.driver) return;
+        term.info = { ...term.info, driver };
+        this.record(term, me, { type: "terminal.helm", terminalId: term.info.id, ticketId: term.info.ticketId, driver });
+        sendTo(term.host?.socket, { t: "helm", terminalId: term.info.id, claude: driver === null });
+        this.announce(term);
+        return;
+      }
+      case "kill": {
+        if (!mayDrive()) throw new Refusal("Only people in this ticket, or whoever owns that machine, can stop it.");
+        if (term.info.status === "exited") return;
+        if (term.host) sendTo(term.host.socket, { t: "kill", terminalId: term.info.id });
+        else this.finish(term, null, "stopped from the board");
+        return;
+      }
+    }
+  }
+  open(viewer, message) {
+    const state = this.service.state(viewer.sessionId);
+    const ticket = state.tickets.get(message.ticketId);
+    if (!ticket) throw new Refusal("That ticket is gone.");
+    if (!this.service.isTicketMember(state, ticket, viewer.participantId)) {
+      throw new Refusal("Join the ticket to open a terminal on it.");
+    }
+    const host = this.hosts.get(message.hostId);
+    if (!host || host.sessionId !== viewer.sessionId || host.access !== "members") {
+      throw new Refusal("That machine is not taking terminals right now. Its owner turns them on with /ss:setup.");
+    }
+    if (!this.service.isTicketMember(state, ticket, host.participantId)) {
+      throw new Refusal("A terminal runs on the machine of someone in the ticket, and that machine's owner is not.");
+    }
+    const busy = [...this.live.values()].find((t) => t.host === host && t.info.status !== "exited");
+    if (busy) {
+      const on = state.tickets.get(busy.info.ticketId)?.title ?? "another ticket";
+      throw new Refusal(`That checkout is already running a terminal for "${on}". Stop it first.`);
+    }
+    const info = {
+      id: randomUUID3(),
+      ticketId: ticket.id,
+      hostId: host.participantId,
+      openedBy: viewer.participantId,
+      driver: message.drive === "me" ? viewer.participantId : null,
+      status: "starting",
+      exitCode: null,
+      reason: null,
+      cols: message.cols,
+      rows: message.rows,
+      startedAt: Date.now()
+    };
+    const term = { info, sessionId: viewer.sessionId, scrollback: [], size: 0, viewers: /* @__PURE__ */ new Set([viewer]), host, exitedAt: null };
+    this.live.set(info.id, term);
+    viewer.terminalId = info.id;
+    this.record(term, viewer.participantId, {
+      type: "terminal.opened",
+      terminalId: info.id,
+      ticketId: ticket.id,
+      hostId: host.participantId
+    });
+    this.record(term, viewer.participantId, {
+      type: "terminal.helm",
+      terminalId: info.id,
+      ticketId: ticket.id,
+      driver: info.driver
+    });
+    sendTo(host.socket, {
+      t: "open",
+      terminalId: info.id,
+      ticketId: ticket.id,
+      ticketTitle: ticket.title,
+      prompt: message.prompt,
+      cols: info.cols,
+      rows: info.rows
+    });
+    sendTo(host.socket, { t: "helm", terminalId: info.id, claude: info.driver === null });
+    this.announce(term);
+  }
+  attach(viewer, terminalId) {
+    const term = this.live.get(terminalId);
+    if (!term || term.sessionId !== viewer.sessionId) throw new Refusal("That terminal is gone.");
+    if (viewer.terminalId) this.live.get(viewer.terminalId)?.viewers.delete(viewer);
+    viewer.terminalId = terminalId;
+    term.viewers.add(viewer);
+    sendTo(viewer.socket, { t: "state", terminal: term.info });
+    if (term.size > 0) sendTo(viewer.socket, { t: "replay", data: Buffer.concat(term.scrollback).toString("base64") });
+  }
+  finish(term, code, reason) {
+    if (term.info.status === "exited") return;
+    term.info = { ...term.info, status: "exited", exitCode: code, reason, driver: null };
+    term.exitedAt = Date.now();
+    this.record(term, null, { type: "terminal.closed", terminalId: term.info.id, ticketId: term.info.ticketId, exitCode: code });
+    this.announce(term);
+  }
+  /** Tells the boards looking at it, and every board's list of terminals. */
+  announce(term) {
+    for (const viewer of term.viewers) sendTo(viewer.socket, { t: "state", terminal: term.info });
+    this.service.onLive?.(term.sessionId);
+  }
+  record(term, actorId, body) {
+    try {
+      this.service.record(term.sessionId, actorId, body);
+    } catch {
+    }
+  }
+};
+function sendTo(socket, message) {
+  if (!socket || socket.readyState !== socket.OPEN) return;
   socket.send(JSON.stringify(message));
 }
 
@@ -68321,13 +69309,20 @@ function createApp(options = {}) {
   const auth = { ...loadAuthConfig(), ...options.auth };
   const store = new Store(options.dbPath ?? ".data/session-share.db");
   const fastify = (0, import_fastify.default)({ logger: options.logger ?? false });
-  const gateway = new Gateway(fastify.server, "/ws", auth, store);
+  const gateway = new Gateway(auth, store);
   const service = new SessionService(
     store,
     (sessionId, envelope) => gateway.broadcast(sessionId, envelope),
     (sessionId, from, frame) => gateway.relayFrame(sessionId, from, frame)
   );
   gateway.attach(service);
+  const terminals = new Terminals(auth, store, service);
+  fastify.server.on("upgrade", (request, socket, head) => {
+    const path = (request.url ?? "").split("?")[0];
+    if (path === "/ws") gateway.handleUpgrade(request, socket, head);
+    else if (path === "/term") terminals.handleUpgrade(request, socket, head);
+    else socket.destroy();
+  });
   const history = new History(store);
   const github = options.github ?? new GitHubReader();
   const toAuthUser = (user) => ({
@@ -68401,7 +69396,7 @@ function createApp(options = {}) {
       });
     }
     const { redirect_to: redirectTo } = request.query;
-    const state = randomUUID3();
+    const state = randomUUID4();
     store.createOauthState(state, redirectTo ?? "/", Date.now());
     return reply.redirect(githubAuthorizeUrl(auth, state));
   });
@@ -68910,6 +69905,7 @@ function createApp(options = {}) {
     fastify,
     service,
     gateway,
+    terminals,
     store,
     auth,
     webRoot: webRoot && existsSync2(webRoot) ? webRoot : null,
@@ -68917,6 +69913,7 @@ function createApp(options = {}) {
       return fastify.listen({ port, host });
     },
     async close() {
+      await terminals.close();
       await gateway.close();
       await fastify.close();
       store.close();

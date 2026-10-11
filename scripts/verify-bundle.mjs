@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = 'packages/plugin/bundle'
 
-const EXECUTABLES = [`${BUNDLE}/server`, `${BUNDLE}/mcp.js`, `${BUNDLE}/hook.js`]
+const EXECUTABLES = [`${BUNDLE}/server`, `${BUNDLE}/mcp.js`, `${BUNDLE}/hook.js`, `${BUNDLE}/terminal.js`]
 
 function changedFiles(paths) {
   const output = execFileSync('git', ['diff', '--name-only', '--', ...paths], {

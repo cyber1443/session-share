@@ -66,6 +66,13 @@ await build({
   outfile: join(out, 'hook.js'),
 })
 
+console.log('bundling the terminal host…')
+await build({
+  ...shared,
+  entryPoints: [join(root, 'packages/plugin/src/terminal-host.ts')],
+  outfile: join(out, 'terminal.js'),
+})
+
 if (!existsSync(webOut)) {
   console.error(`\nMissing ${webOut}. Run: pnpm --filter @session-share/web export`)
   process.exit(1)
@@ -76,7 +83,7 @@ cpSync(webOut, join(out, 'web'), { recursive: true })
 // Stamped last, so a bundle that failed halfway is never marked current.
 writeFileSync(join(out, '.stamp'), `${computeHash()}\n`)
 
-const sizes = ['server/index.js', 'mcp.js', 'hook.js'].map((file) => {
+const sizes = ['server/index.js', 'mcp.js', 'hook.js', 'terminal.js'].map((file) => {
   const bytes = statSync(join(out, file)).size
   return `  ${file.padEnd(18)} ${(bytes / 1024).toFixed(0)} kB`
 })

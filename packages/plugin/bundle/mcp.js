@@ -2989,7 +2989,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve5.call(this, root, ref);
+      let _sch = resolve6.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3016,7 +3016,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve5(root, ref) {
+    function resolve6(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3647,7 +3647,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve5(baseURI, relativeURI, options) {
+    function resolve6(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
       const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
@@ -3931,7 +3931,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve5,
+      resolve: resolve6,
       resolveComponent,
       equal,
       serialize,
@@ -6921,8 +6921,8 @@ var require_dist = __commonJS({
 });
 
 // packages/plugin/src/mcp.ts
-import { createHash as createHash3 } from "node:crypto";
-import { basename as basename2, resolve as resolve4 } from "node:path";
+import { createHash as createHash4 } from "node:crypto";
+import { basename as basename2, resolve as resolve5 } from "node:path";
 
 // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v3/helpers/util.js
 var util;
@@ -28882,7 +28882,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
+        await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error51) {
@@ -28899,7 +28899,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       const earlyReject = (error51) => {
         reject(error51);
       };
@@ -28977,7 +28977,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve5(parseResult.data);
+            resolve6(parseResult.data);
           }
         } catch (error51) {
           reject(error51);
@@ -29238,12 +29238,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve5, interval);
+      const timeoutId = setTimeout(resolve6, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -30334,7 +30334,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
+      await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -30998,12 +30998,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve5) => {
+    return new Promise((resolve6) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve5();
+        resolve6();
       } else {
-        this._stdout.once("drain", resolve5);
+        this._stdout.once("drain", resolve6);
       }
     });
   }
@@ -31018,6 +31018,85 @@ var TicketId = external_exports.string().min(1).brand();
 var TaskId = external_exports.string().regex(/^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/, "task id must be kebab-case, 3-40 chars").brand();
 var Seq = external_exports.number().int().nonnegative();
 var Timestamp = external_exports.number().int().nonnegative();
+
+// packages/protocol/dist/terminal.js
+var TerminalStatus = external_exports.enum(["starting", "running", "exited"]);
+var TerminalInfo = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  ticketId: TicketId,
+  /** The seat whose checkout it runs in. */
+  hostId: ParticipantId,
+  openedBy: ParticipantId,
+  /**
+   * Who is at the keys. Null is Claude: nobody types, and work queued for the
+   * seat is handed to it as it goes idle. A seat is a person driving by hand.
+   */
+  driver: ParticipantId.nullable(),
+  status: TerminalStatus,
+  exitCode: external_exports.number().int().nullable(),
+  /** Why it stopped, when it did not stop by itself. */
+  reason: external_exports.string().max(300).nullable().default(null),
+  cols: external_exports.number().int().min(10).max(500),
+  rows: external_exports.number().int().min(5).max(200),
+  startedAt: Timestamp
+});
+var TerminalAccess = external_exports.enum(["off", "members"]);
+var Size = { cols: external_exports.number().int().min(10).max(500), rows: external_exports.number().int().min(5).max(200) };
+var Data = external_exports.string().max(1e6);
+var ViewerMessage = external_exports.discriminatedUnion("t", [
+  /** Start a Claude Code for a ticket on a member's machine, and watch it. */
+  external_exports.object({
+    t: external_exports.literal("open"),
+    ticketId: TicketId,
+    hostId: ParticipantId,
+    /** Typed into the new Claude as its first instruction. */
+    prompt: external_exports.string().max(4e3).nullable().default(null),
+    /** Who has the helm from the start: the opener, or Claude. */
+    drive: external_exports.enum(["me", "claude"]).default("me"),
+    ...Size
+  }),
+  external_exports.object({ t: external_exports.literal("attach"), terminalId: external_exports.string().min(1) }),
+  external_exports.object({ t: external_exports.literal("input"), data: Data }),
+  external_exports.object({ t: external_exports.literal("resize"), ...Size }),
+  /** Take the helm, or hand it to Claude. */
+  external_exports.object({ t: external_exports.literal("helm"), to: external_exports.enum(["me", "claude"]) }),
+  external_exports.object({ t: external_exports.literal("kill") })
+]);
+var ViewerEvent = external_exports.discriminatedUnion("t", [
+  external_exports.object({ t: external_exports.literal("state"), terminal: TerminalInfo }),
+  /** What it printed before this board was looking, so the screen is not blank. */
+  external_exports.object({ t: external_exports.literal("replay"), data: Data }),
+  external_exports.object({ t: external_exports.literal("output"), data: Data }),
+  external_exports.object({ t: external_exports.literal("error"), message: external_exports.string() })
+]);
+var HostCommand = external_exports.discriminatedUnion("t", [
+  external_exports.object({ t: external_exports.literal("welcome"), participantId: ParticipantId }),
+  external_exports.object({
+    t: external_exports.literal("open"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    ticketTitle: external_exports.string(),
+    prompt: external_exports.string().nullable(),
+    ...Size
+  }),
+  external_exports.object({ t: external_exports.literal("input"), terminalId: external_exports.string().min(1), data: Data }),
+  external_exports.object({ t: external_exports.literal("resize"), terminalId: external_exports.string().min(1), ...Size }),
+  external_exports.object({ t: external_exports.literal("helm"), terminalId: external_exports.string().min(1), claude: external_exports.boolean() }),
+  external_exports.object({ t: external_exports.literal("kill"), terminalId: external_exports.string().min(1) }),
+  external_exports.object({ t: external_exports.literal("refused"), message: external_exports.string() })
+]);
+var HostMessage = external_exports.discriminatedUnion("t", [
+  /** The checkout's own participant token: the first thing said, or nothing is heard. */
+  external_exports.object({ t: external_exports.literal("hello"), token: external_exports.string().min(1), access: TerminalAccess }),
+  external_exports.object({ t: external_exports.literal("started"), terminalId: external_exports.string().min(1) }),
+  external_exports.object({ t: external_exports.literal("output"), terminalId: external_exports.string().min(1), data: Data }),
+  external_exports.object({
+    t: external_exports.literal("exit"),
+    terminalId: external_exports.string().min(1),
+    code: external_exports.number().int().nullable(),
+    reason: external_exports.string().max(300).nullable().default(null)
+  })
+]);
 
 // packages/protocol/dist/domain.js
 var RepoRef = external_exports.object({
@@ -31123,12 +31202,22 @@ var HumanCheck = external_exports.object({
   by: ParticipantId,
   at: Timestamp
 });
+var TICKET_BODY_MAX = 2e4;
+var SubticketState = external_exports.enum(["todo", "doing", "done"]);
+var Subticket = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  title: external_exports.string().min(1).max(200),
+  state: SubticketState.default("todo"),
+  members: external_exports.array(ParticipantId).default([]),
+  createdBy: ParticipantId,
+  createdAt: Timestamp
+});
 var Ticket = external_exports.object({
   id: TicketId,
   sessionId: SessionId,
   title: external_exports.string().min(1).max(200),
   /** The brief the planner works from. Optional: a title is often enough. */
-  body: external_exports.string().max(4e3).default(""),
+  body: external_exports.string().max(TICKET_BODY_MAX).default(""),
   authorId: ParticipantId,
   /**
    * Who is working it. Joining is the whole consent step -- there is no
@@ -31157,6 +31246,38 @@ var Ticket = external_exports.object({
    */
   needsHuman: external_exports.boolean().default(false),
   humanCheck: HumanCheck.nullable().default(null),
+  subtickets: external_exports.array(Subticket).default([]),
+  /** The sprint it is planned into; null is the backlog. */
+  sprintId: external_exports.string().nullable().default(null),
+  /** When someone wants it finished by, for the timeline. */
+  dueAt: Timestamp.nullable().default(null),
+  /**
+   * When it first left the plan column. Set by the fold from the log, so the
+   * timeline can draw how long work actually took rather than how long the
+   * card has existed.
+   */
+  startedAt: Timestamp.nullable().default(null),
+  createdAt: Timestamp
+});
+var TicketComment = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  ticketId: TicketId,
+  authorId: ParticipantId,
+  /** Written by someone's Claude rather than typed by them. */
+  byAgent: external_exports.boolean().default(false),
+  body: external_exports.string().min(1).max(8e3),
+  createdAt: Timestamp,
+  editedAt: Timestamp.nullable().default(null)
+});
+var SprintState = external_exports.enum(["planned", "active", "closed"]);
+var Sprint = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  name: external_exports.string().min(1).max(100),
+  goal: external_exports.string().max(2e3).default(""),
+  startsAt: Timestamp,
+  endsAt: Timestamp,
+  state: SprintState.default("planned"),
+  createdBy: ParticipantId,
   createdAt: Timestamp
 });
 var ContractFile = external_exports.object({
@@ -31393,6 +31514,8 @@ var SessionSnapshot = external_exports.object({
   handoffs: external_exports.array(HandoffRequest),
   chat: external_exports.array(ChatMessage),
   usage: external_exports.array(Usage).default([]),
+  comments: external_exports.array(TicketComment).default([]),
+  sprints: external_exports.array(Sprint).default([]),
   mergeQueue: external_exports.array(MergeQueueEntry),
   /**
    * Seats whose Claude Code is open right now, by what its autopilot will do.
@@ -31404,6 +31527,10 @@ var SessionSnapshot = external_exports.object({
   doing: external_exports.record(external_exports.string(), Doing).optional(),
   /** Seats whose account has hit its usage limit; their work goes to others. */
   limited: external_exports.array(external_exports.string()).optional(),
+  /** Terminals open on members' machines. Memory only, like `doing`. */
+  terminals: external_exports.array(TerminalInfo).optional(),
+  /** Seats whose machine will run a terminal for the board right now. */
+  terminalHosts: external_exports.array(external_exports.string()).optional(),
   seq: external_exports.number().int().nonnegative()
 });
 
@@ -31464,6 +31591,45 @@ var EventBody = external_exports.discriminatedUnion("type", [
     prNumber: external_exports.number().int(),
     commitSha: external_exports.string().nullable()
   }),
+  /** Its title and description as they now read, whole rather than as a patch. */
+  external_exports.object({
+    type: external_exports.literal("ticket.edited"),
+    ticketId: TicketId,
+    title: external_exports.string().min(1).max(200),
+    body: external_exports.string().max(TICKET_BODY_MAX)
+  }),
+  external_exports.object({ type: external_exports.literal("ticket.due"), ticketId: TicketId, dueAt: Timestamp.nullable() }),
+  external_exports.object({ type: external_exports.literal("ticket.sprint"), ticketId: TicketId, sprintId: external_exports.string().nullable() }),
+  // -- subtickets -----------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("subticket.added"), ticketId: TicketId, subticket: Subticket }),
+  external_exports.object({
+    type: external_exports.literal("subticket.updated"),
+    ticketId: TicketId,
+    subticketId: external_exports.string().min(1),
+    title: external_exports.string().min(1).max(200),
+    state: SubticketState
+  }),
+  external_exports.object({
+    type: external_exports.literal("subticket.members"),
+    ticketId: TicketId,
+    subticketId: external_exports.string().min(1),
+    members: external_exports.array(ParticipantId)
+  }),
+  external_exports.object({ type: external_exports.literal("subticket.removed"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  // -- comments -------------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("comment.added"), comment: TicketComment }),
+  external_exports.object({
+    type: external_exports.literal("comment.edited"),
+    commentId: external_exports.string().min(1),
+    body: external_exports.string().min(1).max(8e3)
+  }),
+  external_exports.object({ type: external_exports.literal("comment.deleted"), commentId: external_exports.string().min(1) }),
+  // -- sprints --------------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("sprint.created"), sprint: Sprint }),
+  /** The sprint as it now stands, whole. */
+  external_exports.object({ type: external_exports.literal("sprint.updated"), sprint: Sprint }),
+  /** Its tickets go back to the backlog; nothing else about them changes. */
+  external_exports.object({ type: external_exports.literal("sprint.deleted"), sprintId: external_exports.string().min(1) }),
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
   external_exports.object({
@@ -31556,6 +31722,31 @@ var EventBody = external_exports.discriminatedUnion("type", [
   }),
   // -- chat -----------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("chat.message"), message: ChatMessage }),
+  // -- terminals ------------------------------------------------------------
+  /**
+   * Who opened a terminal on whose machine, and who held the helm when. The
+   * bytes are never logged; these are, because a terminal can run anything on
+   * the machine it is on.
+   */
+  external_exports.object({
+    type: external_exports.literal("terminal.opened"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    hostId: ParticipantId
+  }),
+  /** Null is Claude driving; a seat is that person at the keys. */
+  external_exports.object({
+    type: external_exports.literal("terminal.helm"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    driver: ParticipantId.nullable()
+  }),
+  external_exports.object({
+    type: external_exports.literal("terminal.closed"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    exitCode: external_exports.number().int().nullable()
+  }),
   // -- merge queue ----------------------------------------------------------
   external_exports.object({
     type: external_exports.literal("usage.recorded"),
@@ -31631,7 +31822,9 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("ticket.create"),
     title: external_exports.string().min(1).max(200),
-    body: external_exports.string().max(4e3).default(""),
+    body: external_exports.string().max(TICKET_BODY_MAX).default(""),
+    /** Straight into a sprint rather than the backlog. */
+    sprintId: external_exports.string().min(1).nullable().default(null),
     /** Files already uploaded to the session, to go with the brief. */
     attachments: external_exports.array(Attachment).max(20).default([]),
     needsHuman: external_exports.boolean().default(false)
@@ -31685,6 +31878,54 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
+  /** Rewrite the title or the description. Whatever is left out stays as it is. */
+  external_exports.object({
+    type: external_exports.literal("ticket.edit"),
+    ticketId: TicketId,
+    title: external_exports.string().trim().min(1).max(200).optional(),
+    body: external_exports.string().max(TICKET_BODY_MAX).optional()
+  }),
+  external_exports.object({ type: external_exports.literal("ticket.setDue"), ticketId: TicketId, dueAt: Timestamp.nullable() }),
+  /** Plan it into a sprint, or back to the backlog with null. */
+  external_exports.object({ type: external_exports.literal("ticket.setSprint"), ticketId: TicketId, sprintId: external_exports.string().min(1).nullable() }),
+  external_exports.object({ type: external_exports.literal("subticket.add"), ticketId: TicketId, title: external_exports.string().trim().min(1).max(200) }),
+  external_exports.object({
+    type: external_exports.literal("subticket.update"),
+    ticketId: TicketId,
+    subticketId: external_exports.string().min(1),
+    title: external_exports.string().trim().min(1).max(200).optional(),
+    state: SubticketState.optional()
+  }),
+  external_exports.object({ type: external_exports.literal("subticket.join"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  external_exports.object({ type: external_exports.literal("subticket.leave"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  external_exports.object({ type: external_exports.literal("subticket.remove"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  external_exports.object({
+    type: external_exports.literal("comment.add"),
+    ticketId: TicketId,
+    body: external_exports.string().trim().min(1).max(8e3),
+    asAgent: external_exports.boolean().default(false)
+  }),
+  /** Only the author can change or remove what they said. */
+  external_exports.object({ type: external_exports.literal("comment.edit"), commentId: external_exports.string().min(1), body: external_exports.string().trim().min(1).max(8e3) }),
+  external_exports.object({ type: external_exports.literal("comment.delete"), commentId: external_exports.string().min(1) }),
+  external_exports.object({
+    type: external_exports.literal("sprint.create"),
+    name: external_exports.string().trim().min(1).max(100),
+    goal: external_exports.string().max(2e3).default(""),
+    startsAt: Timestamp,
+    endsAt: Timestamp
+  }),
+  /** Change any of it. Starting a sprint is setting its state to active. */
+  external_exports.object({
+    type: external_exports.literal("sprint.update"),
+    sprintId: external_exports.string().min(1),
+    name: external_exports.string().trim().min(1).max(100).optional(),
+    goal: external_exports.string().max(2e3).optional(),
+    startsAt: Timestamp.optional(),
+    endsAt: Timestamp.optional(),
+    state: SprintState.optional()
+  }),
+  external_exports.object({ type: external_exports.literal("sprint.delete"), sprintId: external_exports.string().min(1) }),
   /**
    * Ask for a split from the board. Planning needs a repo and a model, neither
    * of which the browser has -- so this hands the brief to a participant's
@@ -31961,7 +32202,9 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
     /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
     autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
     doing: external_exports.record(external_exports.string(), Doing).optional(),
-    limited: external_exports.array(external_exports.string()).optional()
+    limited: external_exports.array(external_exports.string()).optional(),
+    terminals: external_exports.array(TerminalInfo).optional(),
+    terminalHosts: external_exports.array(external_exports.string()).optional()
   })
 ]);
 
@@ -32374,7 +32617,7 @@ function forgetDaemon() {
 function openLog() {
   return openSync(LOG_FILE, "a");
 }
-var sleep = (ms) => new Promise((resolve5) => setTimeout(resolve5, ms));
+var sleep = (ms) => new Promise((resolve6) => setTimeout(resolve6, ms));
 
 // packages/plugin/src/client.ts
 var CommandError = class extends Error {
@@ -32682,13 +32925,13 @@ function describeDirectives(messages, names) {
 
 // packages/plugin/src/autopilot.ts
 import { spawn as spawn2 } from "node:child_process";
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync7, readFileSync as readFileSync6, writeFileSync as writeFileSync7 } from "node:fs";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync7, readFileSync as readFileSync7, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join7 } from "node:path";
 
 // packages/plugin/src/busy.ts
 import { createHash as createHash2 } from "node:crypto";
-import { mkdirSync as mkdirSync5, rmSync as rmSync2, statSync as statSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync5, rmSync as rmSync2, statSync as statSync3, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join5 } from "node:path";
 var MAX_TURN_MS = 2 * 60 * 60 * 1e3;
@@ -32718,9 +32961,20 @@ function isBusy(repoPath) {
     return false;
   }
 }
+var terminalMarker = (repoPath) => `${marker(repoPath)}.terminal`;
+function isTerminalOpen(repoPath) {
+  try {
+    const pid = Number(readFileSync5(terminalMarker(repoPath), "utf8").trim());
+    if (!pid) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // packages/plugin/src/preferences.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync6, readFileSync as readFileSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync6, readFileSync as readFileSync6, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname3, join as join6 } from "node:path";
 var Preferences = external_exports.object({
   /**
@@ -32771,6 +33025,12 @@ var Preferences = external_exports.object({
    * a lot of it that nobody reads.
    */
   terse: external_exports.boolean().default(true),
+  /**
+   * Whether people in a ticket may open a Claude Code in a real terminal on
+   * this machine, from the board, and type into it. That is running commands
+   * here: anyone with the invite who joins the ticket can. Off unless chosen.
+   */
+  terminal: external_exports.enum(["off", "members"]).default("off"),
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });
@@ -32778,7 +33038,7 @@ var PREFERENCES_PATH = join6(STATE_DIR, "preferences.json");
 function readPreferences() {
   if (!existsSync4(PREFERENCES_PATH)) return Preferences.parse({});
   try {
-    return Preferences.parse(JSON.parse(readFileSync5(PREFERENCES_PATH, "utf8")));
+    return Preferences.parse(JSON.parse(readFileSync6(PREFERENCES_PATH, "utf8")));
   } catch {
     return Preferences.parse({});
   }
@@ -32808,6 +33068,7 @@ function describePreferences(preferences) {
     `room:     ${preferences.acceptDirectives ? "directives from the room run in this session" : "read-only; nothing from the room reaches your agent"}`,
     `tunnel:   ${preferences.tunnel ? "hosting opens a public tunnel, so teammates on any network can join" : "hosting is reachable as set above; pass tunnel: true to /ss:host for other networks"}`,
     `replies:  ${preferences.terse ? "terse, to save tokens (code and commits stay normal)" : "normal length"}`,
+    `terminal: ${preferences.terminal === "members" ? "people in a ticket can open and drive a Claude Code on this machine from the board -- that is running commands here" : "off -- nobody can open a terminal on this machine from the board"}`,
     `memory:   ${preferences.mirror ? "the session log is saved to the repo's session-share/log branch, so it survives this machine" : "the session lives only on the hosting machine"}`,
     `autopilot: ${preferences.autopilot === "off" ? "off \u2014 queued work waits for you" : preferences.autopilot === "splits" ? `planning runs itself when you are idle (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)` : `everything runs itself when you are idle, including writing and pushing code (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)`}`
   ].join("\n");
@@ -32824,7 +33085,7 @@ function stateDir2() {
 var spendFile = () => join7(stateDir2(), "autopilot.json");
 function readSpend(today) {
   try {
-    const spend = JSON.parse(readFileSync6(spendFile(), "utf8"));
+    const spend = JSON.parse(readFileSync7(spendFile(), "utf8"));
     return spend.day === today ? spend : { day: today, tokens: 0 };
   } catch {
     return { day: today, tokens: 0 };
@@ -32854,7 +33115,16 @@ var PLANNING_TOOLS = [
   "Read",
   "Grep",
   "Glob",
-  ...mcpTools("ss_propose", "ss_tickets", "ss_ticket_files", "ss_get_contract", "ss_chat_post", "ss_chat_read", "ss_status")
+  ...mcpTools(
+    "ss_propose",
+    "ss_tickets",
+    "ss_ticket",
+    "ss_ticket_files",
+    "ss_get_contract",
+    "ss_chat_post",
+    "ss_chat_read",
+    "ss_status"
+  )
 ];
 var BUILDING_TOOLS = [
   "Read",
@@ -32889,6 +33159,9 @@ var BUILDING_TOOLS = [
     "ss_ship",
     "ss_attach",
     "ss_ticket_files",
+    "ss_ticket",
+    "ss_ticket_comment",
+    "ss_subticket",
     "ss_worktree"
   )
 ];
@@ -32929,7 +33202,7 @@ function readOutcome(stdout, allowed) {
   }
 }
 function runHeadless(config3, prompt, planningOnly, command = "claude") {
-  return new Promise((resolve5) => {
+  return new Promise((resolve6) => {
     const args = ["-p", prompt, "--add-dir", config3.repoPath, "--output-format", "json"];
     if (planningOnly) args.push("--allowedTools", ...PLANNING_TOOLS);
     else args.push("--permission-mode", "acceptEdits", "--allowedTools", ...BUILDING_TOOLS);
@@ -32953,14 +33226,14 @@ function runHeadless(config3, prompt, planningOnly, command = "claude") {
     child.stderr.on("data", keep);
     child.on("error", (error51) => {
       log(`spawn failed: ${error51.message}`);
-      resolve5({ ok: false, code: null, detail: error51.message });
+      resolve6({ ok: false, code: null, detail: error51.message });
     });
     child.on("close", (code) => {
       const outcome = readOutcome(stdout, planningOnly ? PLANNING_TOOLS : BUILDING_TOOLS);
       log(`exit ${code}
 ${outcome.detail}
 ${tail}`);
-      resolve5({
+      resolve6({
         ok: code === 0 && outcome.ok,
         limited: outcome.limited || LIMIT_PATTERN.test(tail),
         code,
@@ -33000,6 +33273,9 @@ async function tickOnce(options = {}) {
   if (!verdict.run) return { ran: false, ok: false, reason: verdict.reason };
   if (isBusy(config3.repoPath)) {
     return { ran: false, ok: false, reason: "the interactive session is mid-turn" };
+  }
+  if (isTerminalOpen(config3.repoPath)) {
+    return { ran: false, ok: false, reason: "a board terminal is running here and takes it" };
   }
   const now = Date.now();
   for (const message of waiting) if (!firstSeen.has(message.id)) firstSeen.set(message.id, now);
@@ -33080,17 +33356,94 @@ function startAutopilot() {
   return () => clearInterval(timer);
 }
 
-// packages/plugin/src/mirror.ts
+// packages/plugin/src/terminal-launch.ts
 import { spawn as spawn3 } from "node:child_process";
-import { mkdtempSync, rmSync as rmSync3 } from "node:fs";
+import { createHash as createHash3 } from "node:crypto";
+import { existsSync as existsSync6, mkdirSync as mkdirSync8, openSync as openSync2, readFileSync as readFileSync8, rmSync as rmSync3, statSync as statSync4, writeFileSync as writeFileSync8 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { dirname as dirname4, join as join8, resolve as resolve3 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+function stateDir3() {
+  return process.env.SESSION_SHARE_HOME ?? join8(homedir5(), ".session-share");
+}
+var lockFile = (repoPath) => join8(stateDir3(), "terminal", `${createHash3("sha256").update(resolve3(repoPath)).digest("hex").slice(0, 16)}.json`);
+var terminalLogFile = () => join8(stateDir3(), "terminal.log");
+function terminalHostEntry() {
+  const here = dirname4(fileURLToPath2(import.meta.url));
+  const candidates = [
+    process.env.SESSION_SHARE_TERMINAL_ENTRY,
+    resolve3(here, "terminal.js"),
+    resolve3(here, "terminal-host.js")
+  ].filter((value) => Boolean(value));
+  return candidates.find((candidate) => existsSync6(candidate)) ?? null;
+}
+function buildOf(entry) {
+  const stat = statSync4(entry);
+  return `${stat.size}-${Math.round(stat.mtimeMs)}`;
+}
+function readLock(repoPath) {
+  try {
+    return JSON.parse(readFileSync8(lockFile(repoPath), "utf8"));
+  } catch {
+    return null;
+  }
+}
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function ensureTerminalHost(repoPath) {
+  if (readPreferences().terminal === "off") return "off";
+  const config3 = readConfig(repoPath);
+  if (!config3?.participantToken) return "not in a session";
+  const entry = terminalHostEntry();
+  if (!entry) return "missing";
+  const lock = readLock(config3.repoPath);
+  if (lock && isAlive(lock.pid)) {
+    if (lock.build === buildOf(entry)) return "running";
+    try {
+      process.kill(lock.pid, "SIGTERM");
+    } catch {
+    }
+  }
+  mkdirSync8(stateDir3(), { recursive: true });
+  const out = openSync2(terminalLogFile(), "a");
+  const child = spawn3(process.execPath, [entry], {
+    detached: true,
+    stdio: ["ignore", out, out],
+    cwd: config3.repoPath,
+    env: { ...process.env, SESSION_SHARE_REPO: config3.repoPath, SESSION_SHARE_AUTOPILOT: "off" }
+  });
+  child.unref();
+  return "started";
+}
+function stopTerminalHost(repoPath) {
+  const config3 = readConfig(repoPath);
+  const lock = readLock(config3?.repoPath ?? repoPath);
+  if (!lock || !isAlive(lock.pid)) return false;
+  try {
+    process.kill(lock.pid, "SIGTERM");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// packages/plugin/src/mirror.ts
+import { spawn as spawn4 } from "node:child_process";
+import { mkdtempSync, rmSync as rmSync4 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 var LOG_BRANCH = "session-share/log";
 var REMOTE_REF = `refs/remotes/origin/${LOG_BRANCH}`;
 var CHUNK = 1e3;
 function git(cwd, args, options = {}) {
-  return new Promise((resolve5, reject) => {
-    const child = spawn3("git", args, {
+  return new Promise((resolve6, reject) => {
+    const child = spawn4("git", args, {
       cwd,
       env: { ...process.env, ...options.env },
       stdio: ["pipe", "pipe", "pipe"]
@@ -33101,19 +33454,19 @@ function git(cwd, args, options = {}) {
     child.stderr.on("data", (chunk) => stderr += chunk);
     child.on("error", reject);
     child.on("close", (code) => {
-      if (code === 0) resolve5(stdout.trim());
+      if (code === 0) resolve6(stdout.trim());
       else reject(new Error(`git ${args[0]} failed: ${stderr.trim().split("\n").at(-1) ?? code}`));
     });
     child.stdin.end(options.input ?? "");
   });
 }
 function gitBytes(cwd, args, input) {
-  return new Promise((resolve5, reject) => {
-    const child = spawn3("git", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+  return new Promise((resolve6, reject) => {
+    const child = spawn4("git", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     child.stdout.on("data", (chunk) => stdout += chunk);
     child.on("error", reject);
-    child.on("close", (code) => code === 0 ? resolve5(stdout.trim()) : reject(new Error(`git ${args[0]} failed`)));
+    child.on("close", (code) => code === 0 ? resolve6(stdout.trim()) : reject(new Error(`git ${args[0]} failed`)));
     child.stdin.end(Buffer.from(input));
   });
 }
@@ -33123,12 +33476,12 @@ async function readMirroredFiles(cwd, sessionId) {
   const index = JSON.parse(await show(cwd, head, `${sessionDir(sessionId)}/files.json`) ?? "[]");
   const files = [];
   for (const file2 of index) {
-    const bytes = await new Promise((resolve5) => {
-      const child = spawn3("git", ["cat-file", "blob", `${head}:${sessionDir(sessionId)}/files/${file2.id}`], { cwd });
+    const bytes = await new Promise((resolve6) => {
+      const child = spawn4("git", ["cat-file", "blob", `${head}:${sessionDir(sessionId)}/files/${file2.id}`], { cwd });
       const chunks = [];
       child.stdout.on("data", (chunk) => chunks.push(chunk));
-      child.on("close", () => resolve5(Buffer.concat(chunks)));
-      child.on("error", () => resolve5(Buffer.alloc(0)));
+      child.on("close", () => resolve6(Buffer.concat(chunks)));
+      child.on("error", () => resolve6(Buffer.alloc(0)));
     });
     if (bytes.length > 0) files.push({ ...file2, base64: bytes.toString("base64") });
   }
@@ -33201,8 +33554,8 @@ async function pushLog(cwd, source, attempts = 3) {
     if (mirrored >= source.maxSeq && newFiles.length === 0) {
       return { pushed: false, reason: "the branch is already up to date" };
     }
-    const dir = mkdtempSync(join8(tmpdir(), "ss-mirror-"));
-    const env = { GIT_INDEX_FILE: join8(dir, "index") };
+    const dir = mkdtempSync(join9(tmpdir(), "ss-mirror-"));
+    const env = { GIT_INDEX_FILE: join9(dir, "index") };
     try {
       await git(cwd, parent ? ["read-tree", parent] : ["read-tree", "--empty"], { env });
       const write = async (path, content) => {
@@ -33264,20 +33617,20 @@ async function pushLog(cwd, source, attempts = 3) {
         }
       }
     } finally {
-      rmSync3(dir, { recursive: true, force: true });
+      rmSync4(dir, { recursive: true, force: true });
     }
   }
   return { pushed: false, reason: "gave up after repeated push races" };
 }
 
 // packages/plugin/src/tunnel.ts
-import { execFile, spawn as spawn4 } from "node:child_process";
-import { closeSync, existsSync as existsSync6, mkdirSync as mkdirSync8, openSync as openSync2, readFileSync as readFileSync7, rmSync as rmSync4, writeFileSync as writeFileSync8 } from "node:fs";
-import { join as join9 } from "node:path";
+import { execFile, spawn as spawn5 } from "node:child_process";
+import { closeSync, existsSync as existsSync7, mkdirSync as mkdirSync9, openSync as openSync3, readFileSync as readFileSync9, rmSync as rmSync5, writeFileSync as writeFileSync9 } from "node:fs";
+import { join as join10 } from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
-var TUNNEL_FILE = join9(STATE_DIR, "tunnel.json");
-var TUNNEL_LOG = join9(STATE_DIR, "tunnel.log");
+var TUNNEL_FILE = join10(STATE_DIR, "tunnel.json");
+var TUNNEL_LOG = join10(STATE_DIR, "tunnel.log");
 var QUICK_URL = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/;
 var alive = (pid) => {
   try {
@@ -33289,19 +33642,19 @@ var alive = (pid) => {
 };
 function readRecord() {
   try {
-    return JSON.parse(readFileSync7(TUNNEL_FILE, "utf8"));
+    return JSON.parse(readFileSync9(TUNNEL_FILE, "utf8"));
   } catch {
     return null;
   }
 }
 function registered() {
   try {
-    return /Registered tunnel connection/.test(readFileSync7(TUNNEL_LOG, "utf8"));
+    return /Registered tunnel connection/.test(readFileSync9(TUNNEL_LOG, "utf8"));
   } catch {
     return false;
   }
 }
-var wait = (ms) => new Promise((resolve5) => setTimeout(resolve5, ms));
+var wait = (ms) => new Promise((resolve6) => setTimeout(resolve6, ms));
 async function ensureTunnel(port) {
   const existing = readRecord();
   if (existing && existing.port === port && alive(existing.pid) && registered()) {
@@ -33320,10 +33673,10 @@ async function ensureTunnel(port) {
       "Tunnelling needs cloudflared, which is not installed here. Install it (macOS: `brew install cloudflared`; others: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and host again, or use Tailscale and pass its address as publicUrl."
     );
   }
-  mkdirSync8(STATE_DIR, { recursive: true });
-  writeFileSync8(TUNNEL_LOG, "");
-  const log3 = openSync2(TUNNEL_LOG, "a");
-  const child = spawn4(
+  mkdirSync9(STATE_DIR, { recursive: true });
+  writeFileSync9(TUNNEL_LOG, "");
+  const log3 = openSync3(TUNNEL_LOG, "a");
+  const child = spawn5(
     "cloudflared",
     ["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${port}`],
     { detached: true, stdio: ["ignore", log3, log3] }
@@ -33333,7 +33686,7 @@ async function ensureTunnel(port) {
   const deadline = Date.now() + 3e4;
   let url2 = null;
   while (Date.now() < deadline) {
-    const found = readFileSync7(TUNNEL_LOG, "utf8").match(QUICK_URL);
+    const found = readFileSync9(TUNNEL_LOG, "utf8").match(QUICK_URL);
     if (found && registered()) {
       url2 = found[0];
       break;
@@ -33345,13 +33698,13 @@ async function ensureTunnel(port) {
     if (child.pid && alive(child.pid)) process.kill(child.pid);
     throw new Error(`cloudflared did not come up with an address. Its log is at ${TUNNEL_LOG}.`);
   }
-  writeFileSync8(TUNNEL_FILE, `${JSON.stringify({ pid: child.pid, url: url2, port })}
+  writeFileSync9(TUNNEL_FILE, `${JSON.stringify({ pid: child.pid, url: url2, port })}
 `);
   return url2;
 }
 function stopTunnel() {
   const record2 = readRecord();
-  if (existsSync6(TUNNEL_FILE)) rmSync4(TUNNEL_FILE, { force: true });
+  if (existsSync7(TUNNEL_FILE)) rmSync5(TUNNEL_FILE, { force: true });
   if (!record2 || !alive(record2.pid)) return false;
   try {
     process.kill(record2.pid);
@@ -33362,14 +33715,14 @@ function stopTunnel() {
 }
 
 // packages/plugin/src/mirror-sync.ts
-import { appendFileSync as appendFileSync3, mkdirSync as mkdirSync9 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { join as join10 } from "node:path";
+import { appendFileSync as appendFileSync3, mkdirSync as mkdirSync10 } from "node:fs";
+import { homedir as homedir6 } from "node:os";
+import { join as join11 } from "node:path";
 var MIRROR_MS = Number(process.env.SESSION_SHARE_MIRROR_MS ?? 2 * 6e4);
-var logFile2 = () => join10(process.env.SESSION_SHARE_HOME ?? join10(homedir5(), ".session-share"), "mirror.log");
+var logFile2 = () => join11(process.env.SESSION_SHARE_HOME ?? join11(homedir6(), ".session-share"), "mirror.log");
 function log2(line) {
   try {
-    mkdirSync9(join10(logFile2(), ".."), { recursive: true });
+    mkdirSync10(join11(logFile2(), ".."), { recursive: true });
     appendFileSync3(logFile2(), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
   } catch {
@@ -33506,12 +33859,12 @@ async function catchUpFromMirror(root, serverUrl, slug) {
 }
 
 // packages/plugin/src/open.ts
-import { spawn as spawn5 } from "node:child_process";
+import { spawn as spawn6 } from "node:child_process";
 function openInBrowser(url2) {
   if (process.env.SESSION_SHARE_NO_OPEN === "1") return false;
   const [command, args] = process.platform === "darwin" ? ["open", [url2]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url2]] : ["xdg-open", [url2]];
   try {
-    const child = spawn5(command, args, {
+    const child = spawn6(command, args, {
       detached: true,
       stdio: "ignore"
     });
@@ -33529,8 +33882,8 @@ function boardUrl(serverUrl, packedInvite, as) {
 
 // packages/plugin/src/git.ts
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync7, mkdirSync as mkdirSync10, writeFileSync as writeFileSync9 } from "node:fs";
-import { dirname as dirname4, isAbsolute as isAbsolute2, relative, resolve as resolve3 } from "node:path";
+import { existsSync as existsSync8, mkdirSync as mkdirSync11, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname5, isAbsolute as isAbsolute2, relative, resolve as resolve4 } from "node:path";
 import { promisify as promisify2 } from "node:util";
 var run2 = promisify2(execFile2);
 var GitError = class extends Error {
@@ -33667,9 +34020,9 @@ async function updateLocalBranch(cwd, branch) {
   if (local === upstream) return "unchanged";
   if (await isAncestor(cwd, upstream, local)) return "unchanged";
   if (!await isAncestor(cwd, local, upstream)) return "diverged";
-  const here = resolve3(await git2(cwd, ["rev-parse", "--show-toplevel"]));
+  const here = resolve4(await git2(cwd, ["rev-parse", "--show-toplevel"]));
   const elsewhere = (await listWorktrees(cwd)).find(
-    (tree) => tree.branch === branch && resolve3(tree.path) !== here
+    (tree) => tree.branch === branch && resolve4(tree.path) !== here
   );
   if (elsewhere) {
     try {
@@ -33694,8 +34047,8 @@ async function isAncestor(cwd, ancestor, of) {
   }
 }
 function insideRepo(cwd, path) {
-  const root = resolve3(cwd);
-  const absolute = resolve3(root, path);
+  const root = resolve4(cwd);
+  const absolute = resolve4(root, path);
   const rel = relative(root, absolute);
   if (isAbsolute2(path) || rel === "" || rel.startsWith("..") || isAbsolute2(rel)) {
     throw new Error(`Refusing to write "${path}": it is outside the repository.`);
@@ -33710,8 +34063,8 @@ async function writeFiles(cwd, files) {
   const written = [];
   for (const [index, file2] of files.entries()) {
     const absolute = targets[index];
-    mkdirSync10(dirname4(absolute), { recursive: true });
-    writeFileSync9(absolute, file2.contents);
+    mkdirSync11(dirname5(absolute), { recursive: true });
+    writeFileSync10(absolute, file2.contents);
     written.push(file2.path);
   }
   return written;
@@ -33798,7 +34151,7 @@ async function existingPullRequest(cwd, head) {
   }
 }
 async function addWorktree(cwd, path, branch, from) {
-  if (existsSync7(path)) return "existing";
+  if (existsSync8(path)) return "existing";
   await fetch2(cwd);
   const base = await remoteBranchExists(cwd, from) ? `origin/${from}` : from;
   const args = await branchExists(cwd, branch) ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, base];
@@ -33905,7 +34258,7 @@ function registerGitTools(server, ctx) {
   server.registerTool(
     "ss_settings",
     {
-      description: "Read or change how session-share touches this machine: whether queued work runs itself while you are idle (autopilot) and what it may spend, when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, whether the room can drive this agent, whether the session log is saved to the repository (mirror), whether hosting opens a public tunnel, and whether agents reply tersely to save tokens.",
+      description: "Read or change how session-share touches this machine: whether queued work runs itself while you are idle (autopilot) and what it may spend, when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, whether the room can drive this agent, whether the session log is saved to the repository (mirror), whether hosting opens a public tunnel, whether agents reply tersely to save tokens, and whether people in a ticket may open and drive a Claude Code terminal on this machine from the board.",
       inputSchema: {
         commitPolicy: external_exports.enum(["explicit", "auto-on-green"]).nullish(),
         push: external_exports.boolean().nullish(),
@@ -33917,7 +34270,10 @@ function registerGitTools(server, ctx) {
         autopilotBudget: external_exports.number().int().min(0).nullish(),
         mirror: external_exports.boolean().nullish(),
         tunnel: external_exports.boolean().nullish(),
-        terse: external_exports.boolean().nullish()
+        terse: external_exports.boolean().nullish(),
+        terminal: external_exports.enum(["off", "members"]).nullish().describe(
+          "members: people in a ticket can open a Claude Code in a real terminal on this machine from the board and type into it -- which is running commands here. Off by default."
+        )
       }
     },
     async (input) => {
@@ -33925,7 +34281,13 @@ function registerGitTools(server, ctx) {
       for (const [key, value] of Object.entries(input)) {
         if (value !== null && value !== void 0) update[key] = value;
       }
+      const before = readPreferences().terminal;
       const preferences = Object.keys(update).length > 0 ? writePreferences({ ...update, configured: true }) : readPreferences();
+      if (preferences.terminal !== before) {
+        const root = await ctx.repoRoot();
+        if (preferences.terminal === "off") stopTerminalHost(root);
+        else ensureTerminalHost(root);
+      }
       return ctx.text(
         `${describePreferences(preferences)}
 
@@ -33991,6 +34353,15 @@ Stored in ${PREFERENCES_FILE}.${preferences.configured ? "" : "\n\nThese are def
         const reason = refusal.reason ?? null;
         lines.push(
           !attached ? "session    this checkout is not attached \u2014 run /ss:host or /ss:join" : reason === "seat_gone" ? "session    the session is there, but this checkout's seat has left it. Join again with the invite" : reason === "session_gone" || status === 404 ? "session    the server answered but has no such session \u2014 it was hosted on another server, or its database was reset. Ask for a fresh invite" : reason === "other_session" || status === 403 ? "session    attached, but the token is for a different session than the one configured here. Join again with a fresh invite" : reason === "token_invalid" || status === 401 ? "session    attached, but the server does not accept this checkout's token \u2014 it was minted by a different server or a different secret. Join again with a fresh invite" : `session    attached, but the server did not answer: ${message}`
+        );
+      }
+      if (preferences.terminal === "off") {
+        lines.push("terminal   off -- nobody can open a terminal on this machine from the board");
+      } else {
+        const lock = readLock(root);
+        const entry = terminalHostEntry();
+        lines.push(
+          lock && isAlive(lock.pid) ? `terminal   host running (pid ${lock.pid})${entry && lock.build !== buildOf(entry) ? " but from an older plugin -- restart Claude Code here to replace it" : ""}` : `terminal   on, but no host is running here -- restart Claude Code in this checkout, and see ${terminalLogFile()}`
         );
       }
       lines.push("");
@@ -34309,7 +34680,7 @@ async function mintInvite(serverUrl, slug) {
   return { invite: payload.invite, repo: payload.repo ?? null };
 }
 function shortHash(value) {
-  return createHash3("sha256").update(value).digest("hex").slice(0, 6);
+  return createHash4("sha256").update(value).digest("hex").slice(0, 6);
 }
 function splitHint(cfg, ticket, plannerId) {
   if (plannerId && plannerId === cfg.participantId) {
@@ -34471,6 +34842,7 @@ function createServer() {
       };
       writeConfig(root, cfg);
       await markCaughtUp(cfg);
+      ensureTerminalHost(root);
       const board = boardUrl(publicUrl ? loopback : daemon.url, packed, joined.githubLogin);
       const opened = readPreferences().openBoard && openInBrowser(board);
       const loopbackOnly = isLoopbackUrl(dialUrl);
@@ -34529,6 +34901,7 @@ function createServer() {
       };
       const path = writeConfig(root, cfg);
       await markCaughtUp(cfg);
+      ensureTerminalHost(root);
       const board = packed ? boardUrl(
         dial,
         dial === packed.url ? trimmed : packInvite({ ...packed, url: dial }),
@@ -34584,7 +34957,7 @@ function createServer() {
     async ({ title, issueRef, invite }) => {
       const root = await repoRoot(REPO_ROOT);
       const slug = slugify2(title);
-      const path = resolve4(root, "..", `${basename2(root)}-${slug}`);
+      const path = resolve5(root, "..", `${basename2(root)}-${slug}`);
       const branch = `ss/${slug}/work`;
       const created = await addWorktree(root, path, branch, await baseBranch(root));
       return text(
@@ -34612,6 +34985,7 @@ function createServer() {
       const attached = readConfig(await repoRoot(REPO_ROOT));
       const saved = attached ? await mirrorOnce(attached).catch(() => null) : null;
       stopTunnel();
+      if (attached) stopTerminalHost(attached.repoPath);
       const note = saved?.pushed ? ` The session is saved on the ${LOG_BRANCH} branch; /ss:host on any machine picks it up from there.` : "";
       return text(
         await stopDaemon() === "stopped" ? `Stopped.${note}` : `Nothing was running. (Any stale record of one has been cleared.)${note}`
@@ -34735,7 +35109,7 @@ function createServer() {
       description: "Open a ticket for a piece of work. It waits in the plan column; everyone else is told it exists and can join it, and it is split when someone runs ss_ticket_start.",
       inputSchema: {
         title: external_exports.string().min(1).max(200),
-        body: external_exports.string().max(4e3).nullish().describe("The brief the planner works from"),
+        body: external_exports.string().max(2e4).nullish().describe("The description the planner works from"),
         pictures: external_exports.array(external_exports.string()).max(20).nullish().describe("Paths of pictures that are part of the brief: mockups, screenshots of the bug. PNG, JPEG, GIF or WebP."),
         needsHuman: external_exports.boolean().nullish().describe("Hold it in verify, after its automated run passes, until a person has tried it by hand")
       }
@@ -34743,13 +35117,14 @@ function createServer() {
     async ({ title, body, pictures, needsHuman }) => {
       const cfg = config2();
       const attachments = [];
-      for (const path of pictures ?? []) attachments.push(await uploadPicture(cfg, resolve4(path), "brief"));
+      for (const path of pictures ?? []) attachments.push(await uploadPicture(cfg, resolve5(path), "brief"));
       const { ticket, plannerId } = await runCommand(
         cfg,
         {
           type: "ticket.create",
           title,
           body: body ?? "",
+          sprintId: null,
           attachments,
           needsHuman: needsHuman ?? false
         },
@@ -34771,7 +35146,7 @@ function createServer() {
     async ({ ticketId, kind, files }) => {
       const cfg = config2();
       const attachments = [];
-      for (const file2 of files) attachments.push(await uploadPicture(cfg, resolve4(file2.path), kind, file2.caption ?? ""));
+      for (const file2 of files) attachments.push(await uploadPicture(cfg, resolve5(file2.path), kind, file2.caption ?? ""));
       await runCommand(cfg, { type: "ticket.attach", ticketId, attachments }, 15e3);
       return text(`Attached ${attachments.length} picture(s) to the ticket. They show on the board.`);
     }
@@ -34789,6 +35164,80 @@ function createServer() {
       if (!ticket) return text(`No ticket "${ticketId}".`);
       if (ticket.attachments.length === 0) return text(`"${ticket.title}" has no pictures.`);
       return text({ ticket: ticket.title, pictures: await downloadPictures(cfg, ticket.attachments) });
+    }
+  );
+  server.registerTool(
+    "ss_ticket",
+    {
+      description: "Everything written on one ticket: its description, its subtickets and who is on each, its sprint and due date, and every comment. Read this before splitting or working a ticket.",
+      inputSchema: { ticketId: external_exports.string() }
+    },
+    async ({ ticketId }) => {
+      const cfg = config2();
+      const state = await snapshot(cfg);
+      const ticket = state.tickets.find((t) => t.id === ticketId);
+      if (!ticket) return text(`No ticket "${ticketId}".`);
+      const names = new Map(state.participants.map((p) => [p.id, p.displayName]));
+      const sprint = (state.sprints ?? []).find((s) => s.id === ticket.sprintId);
+      return text({
+        id: ticket.id,
+        title: ticket.title,
+        column: ticket.state,
+        description: ticket.body || "(none)",
+        members: ticket.members.map((id) => names.get(id) ?? id),
+        sprint: sprint ? `${sprint.name} (${sprint.state})` : "backlog",
+        due: ticket.dueAt ? new Date(ticket.dueAt).toISOString().slice(0, 10) : null,
+        subtickets: (ticket.subtickets ?? []).map((sub) => ({
+          id: sub.id,
+          title: sub.title,
+          state: sub.state,
+          members: sub.members.map((id) => names.get(id) ?? id)
+        })),
+        comments: (state.comments ?? []).filter((c) => c.ticketId === ticket.id).map((c) => ({
+          by: `${names.get(c.authorId) ?? "someone"}${c.byAgent ? "'s Claude" : ""}`,
+          at: new Date(c.createdAt).toISOString(),
+          body: c.body
+        }))
+      });
+    }
+  );
+  server.registerTool(
+    "ss_ticket_comment",
+    {
+      description: "Leave a comment on a ticket: a finding, a decision, a question for the people on it. It stays on the card for the next person or agent who opens it, unlike chat, which scrolls away.",
+      inputSchema: { ticketId: external_exports.string(), body: external_exports.string().min(1).max(8e3) }
+    },
+    async ({ ticketId, body }) => {
+      await runCommand(config2(), { type: "comment.add", ticketId, body, asAgent: true });
+      return text("Commented. It shows on the ticket.");
+    }
+  );
+  server.registerTool(
+    "ss_subticket",
+    {
+      description: "Add a subticket to a ticket (give a title and no subticketId), or move one along (give its subticketId and a state). Subtickets are the pieces people tick off; they have no split or leases of their own.",
+      inputSchema: {
+        ticketId: external_exports.string(),
+        subticketId: external_exports.string().nullish(),
+        title: external_exports.string().min(1).max(200).nullish(),
+        state: external_exports.enum(["todo", "doing", "done"]).nullish()
+      }
+    },
+    async ({ ticketId, subticketId, title, state }) => {
+      const cfg = config2();
+      if (!subticketId) {
+        if (!title) return text("Give a title to add a subticket, or a subticketId to change one.");
+        const { subticket: subticket2 } = await runCommand(cfg, { type: "subticket.add", ticketId, title });
+        return text(`Added "${subticket2.title}" (${subticket2.id}).`);
+      }
+      const { subticket } = await runCommand(cfg, {
+        type: "subticket.update",
+        ticketId,
+        subticketId,
+        ...title ? { title } : {},
+        ...state ? { state } : {}
+      });
+      return text(`"${subticket.title}" is ${subticket.state}.`);
     }
   );
   server.registerTool(
@@ -35202,6 +35651,12 @@ if (isEntrypoint) {
   await server.connect(transport);
   startAutopilot();
   startMirror();
+  if (process.env.SESSION_SHARE_AUTOPILOT !== "off") {
+    try {
+      ensureTerminalHost(REPO_ROOT);
+    } catch {
+    }
+  }
   process.stderr.write("[session-share] mcp server ready\n");
 }
 export {

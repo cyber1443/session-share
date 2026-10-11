@@ -14596,6 +14596,85 @@ var TaskId = external_exports.string().regex(/^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/
 var Seq = external_exports.number().int().nonnegative();
 var Timestamp = external_exports.number().int().nonnegative();
 
+// packages/protocol/dist/terminal.js
+var TerminalStatus = external_exports.enum(["starting", "running", "exited"]);
+var TerminalInfo = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  ticketId: TicketId,
+  /** The seat whose checkout it runs in. */
+  hostId: ParticipantId,
+  openedBy: ParticipantId,
+  /**
+   * Who is at the keys. Null is Claude: nobody types, and work queued for the
+   * seat is handed to it as it goes idle. A seat is a person driving by hand.
+   */
+  driver: ParticipantId.nullable(),
+  status: TerminalStatus,
+  exitCode: external_exports.number().int().nullable(),
+  /** Why it stopped, when it did not stop by itself. */
+  reason: external_exports.string().max(300).nullable().default(null),
+  cols: external_exports.number().int().min(10).max(500),
+  rows: external_exports.number().int().min(5).max(200),
+  startedAt: Timestamp
+});
+var TerminalAccess = external_exports.enum(["off", "members"]);
+var Size = { cols: external_exports.number().int().min(10).max(500), rows: external_exports.number().int().min(5).max(200) };
+var Data = external_exports.string().max(1e6);
+var ViewerMessage = external_exports.discriminatedUnion("t", [
+  /** Start a Claude Code for a ticket on a member's machine, and watch it. */
+  external_exports.object({
+    t: external_exports.literal("open"),
+    ticketId: TicketId,
+    hostId: ParticipantId,
+    /** Typed into the new Claude as its first instruction. */
+    prompt: external_exports.string().max(4e3).nullable().default(null),
+    /** Who has the helm from the start: the opener, or Claude. */
+    drive: external_exports.enum(["me", "claude"]).default("me"),
+    ...Size
+  }),
+  external_exports.object({ t: external_exports.literal("attach"), terminalId: external_exports.string().min(1) }),
+  external_exports.object({ t: external_exports.literal("input"), data: Data }),
+  external_exports.object({ t: external_exports.literal("resize"), ...Size }),
+  /** Take the helm, or hand it to Claude. */
+  external_exports.object({ t: external_exports.literal("helm"), to: external_exports.enum(["me", "claude"]) }),
+  external_exports.object({ t: external_exports.literal("kill") })
+]);
+var ViewerEvent = external_exports.discriminatedUnion("t", [
+  external_exports.object({ t: external_exports.literal("state"), terminal: TerminalInfo }),
+  /** What it printed before this board was looking, so the screen is not blank. */
+  external_exports.object({ t: external_exports.literal("replay"), data: Data }),
+  external_exports.object({ t: external_exports.literal("output"), data: Data }),
+  external_exports.object({ t: external_exports.literal("error"), message: external_exports.string() })
+]);
+var HostCommand = external_exports.discriminatedUnion("t", [
+  external_exports.object({ t: external_exports.literal("welcome"), participantId: ParticipantId }),
+  external_exports.object({
+    t: external_exports.literal("open"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    ticketTitle: external_exports.string(),
+    prompt: external_exports.string().nullable(),
+    ...Size
+  }),
+  external_exports.object({ t: external_exports.literal("input"), terminalId: external_exports.string().min(1), data: Data }),
+  external_exports.object({ t: external_exports.literal("resize"), terminalId: external_exports.string().min(1), ...Size }),
+  external_exports.object({ t: external_exports.literal("helm"), terminalId: external_exports.string().min(1), claude: external_exports.boolean() }),
+  external_exports.object({ t: external_exports.literal("kill"), terminalId: external_exports.string().min(1) }),
+  external_exports.object({ t: external_exports.literal("refused"), message: external_exports.string() })
+]);
+var HostMessage = external_exports.discriminatedUnion("t", [
+  /** The checkout's own participant token: the first thing said, or nothing is heard. */
+  external_exports.object({ t: external_exports.literal("hello"), token: external_exports.string().min(1), access: TerminalAccess }),
+  external_exports.object({ t: external_exports.literal("started"), terminalId: external_exports.string().min(1) }),
+  external_exports.object({ t: external_exports.literal("output"), terminalId: external_exports.string().min(1), data: Data }),
+  external_exports.object({
+    t: external_exports.literal("exit"),
+    terminalId: external_exports.string().min(1),
+    code: external_exports.number().int().nullable(),
+    reason: external_exports.string().max(300).nullable().default(null)
+  })
+]);
+
 // packages/protocol/dist/domain.js
 var RepoRef = external_exports.object({
   owner: external_exports.string().min(1),
@@ -14700,12 +14779,22 @@ var HumanCheck = external_exports.object({
   by: ParticipantId,
   at: Timestamp
 });
+var TICKET_BODY_MAX = 2e4;
+var SubticketState = external_exports.enum(["todo", "doing", "done"]);
+var Subticket = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  title: external_exports.string().min(1).max(200),
+  state: SubticketState.default("todo"),
+  members: external_exports.array(ParticipantId).default([]),
+  createdBy: ParticipantId,
+  createdAt: Timestamp
+});
 var Ticket = external_exports.object({
   id: TicketId,
   sessionId: SessionId,
   title: external_exports.string().min(1).max(200),
   /** The brief the planner works from. Optional: a title is often enough. */
-  body: external_exports.string().max(4e3).default(""),
+  body: external_exports.string().max(TICKET_BODY_MAX).default(""),
   authorId: ParticipantId,
   /**
    * Who is working it. Joining is the whole consent step -- there is no
@@ -14734,6 +14823,38 @@ var Ticket = external_exports.object({
    */
   needsHuman: external_exports.boolean().default(false),
   humanCheck: HumanCheck.nullable().default(null),
+  subtickets: external_exports.array(Subticket).default([]),
+  /** The sprint it is planned into; null is the backlog. */
+  sprintId: external_exports.string().nullable().default(null),
+  /** When someone wants it finished by, for the timeline. */
+  dueAt: Timestamp.nullable().default(null),
+  /**
+   * When it first left the plan column. Set by the fold from the log, so the
+   * timeline can draw how long work actually took rather than how long the
+   * card has existed.
+   */
+  startedAt: Timestamp.nullable().default(null),
+  createdAt: Timestamp
+});
+var TicketComment = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  ticketId: TicketId,
+  authorId: ParticipantId,
+  /** Written by someone's Claude rather than typed by them. */
+  byAgent: external_exports.boolean().default(false),
+  body: external_exports.string().min(1).max(8e3),
+  createdAt: Timestamp,
+  editedAt: Timestamp.nullable().default(null)
+});
+var SprintState = external_exports.enum(["planned", "active", "closed"]);
+var Sprint = external_exports.object({
+  id: external_exports.string().min(1).max(64),
+  name: external_exports.string().min(1).max(100),
+  goal: external_exports.string().max(2e3).default(""),
+  startsAt: Timestamp,
+  endsAt: Timestamp,
+  state: SprintState.default("planned"),
+  createdBy: ParticipantId,
   createdAt: Timestamp
 });
 var ContractFile = external_exports.object({
@@ -14970,6 +15091,8 @@ var SessionSnapshot = external_exports.object({
   handoffs: external_exports.array(HandoffRequest),
   chat: external_exports.array(ChatMessage),
   usage: external_exports.array(Usage).default([]),
+  comments: external_exports.array(TicketComment).default([]),
+  sprints: external_exports.array(Sprint).default([]),
   mergeQueue: external_exports.array(MergeQueueEntry),
   /**
    * Seats whose Claude Code is open right now, by what its autopilot will do.
@@ -14981,6 +15104,10 @@ var SessionSnapshot = external_exports.object({
   doing: external_exports.record(external_exports.string(), Doing).optional(),
   /** Seats whose account has hit its usage limit; their work goes to others. */
   limited: external_exports.array(external_exports.string()).optional(),
+  /** Terminals open on members' machines. Memory only, like `doing`. */
+  terminals: external_exports.array(TerminalInfo).optional(),
+  /** Seats whose machine will run a terminal for the board right now. */
+  terminalHosts: external_exports.array(external_exports.string()).optional(),
   seq: external_exports.number().int().nonnegative()
 });
 
@@ -15041,6 +15168,45 @@ var EventBody = external_exports.discriminatedUnion("type", [
     prNumber: external_exports.number().int(),
     commitSha: external_exports.string().nullable()
   }),
+  /** Its title and description as they now read, whole rather than as a patch. */
+  external_exports.object({
+    type: external_exports.literal("ticket.edited"),
+    ticketId: TicketId,
+    title: external_exports.string().min(1).max(200),
+    body: external_exports.string().max(TICKET_BODY_MAX)
+  }),
+  external_exports.object({ type: external_exports.literal("ticket.due"), ticketId: TicketId, dueAt: Timestamp.nullable() }),
+  external_exports.object({ type: external_exports.literal("ticket.sprint"), ticketId: TicketId, sprintId: external_exports.string().nullable() }),
+  // -- subtickets -----------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("subticket.added"), ticketId: TicketId, subticket: Subticket }),
+  external_exports.object({
+    type: external_exports.literal("subticket.updated"),
+    ticketId: TicketId,
+    subticketId: external_exports.string().min(1),
+    title: external_exports.string().min(1).max(200),
+    state: SubticketState
+  }),
+  external_exports.object({
+    type: external_exports.literal("subticket.members"),
+    ticketId: TicketId,
+    subticketId: external_exports.string().min(1),
+    members: external_exports.array(ParticipantId)
+  }),
+  external_exports.object({ type: external_exports.literal("subticket.removed"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  // -- comments -------------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("comment.added"), comment: TicketComment }),
+  external_exports.object({
+    type: external_exports.literal("comment.edited"),
+    commentId: external_exports.string().min(1),
+    body: external_exports.string().min(1).max(8e3)
+  }),
+  external_exports.object({ type: external_exports.literal("comment.deleted"), commentId: external_exports.string().min(1) }),
+  // -- sprints --------------------------------------------------------------
+  external_exports.object({ type: external_exports.literal("sprint.created"), sprint: Sprint }),
+  /** The sprint as it now stands, whole. */
+  external_exports.object({ type: external_exports.literal("sprint.updated"), sprint: Sprint }),
+  /** Its tickets go back to the backlog; nothing else about them changes. */
+  external_exports.object({ type: external_exports.literal("sprint.deleted"), sprintId: external_exports.string().min(1) }),
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
   external_exports.object({
@@ -15133,6 +15299,31 @@ var EventBody = external_exports.discriminatedUnion("type", [
   }),
   // -- chat -----------------------------------------------------------------
   external_exports.object({ type: external_exports.literal("chat.message"), message: ChatMessage }),
+  // -- terminals ------------------------------------------------------------
+  /**
+   * Who opened a terminal on whose machine, and who held the helm when. The
+   * bytes are never logged; these are, because a terminal can run anything on
+   * the machine it is on.
+   */
+  external_exports.object({
+    type: external_exports.literal("terminal.opened"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    hostId: ParticipantId
+  }),
+  /** Null is Claude driving; a seat is that person at the keys. */
+  external_exports.object({
+    type: external_exports.literal("terminal.helm"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    driver: ParticipantId.nullable()
+  }),
+  external_exports.object({
+    type: external_exports.literal("terminal.closed"),
+    terminalId: external_exports.string().min(1),
+    ticketId: TicketId,
+    exitCode: external_exports.number().int().nullable()
+  }),
   // -- merge queue ----------------------------------------------------------
   external_exports.object({
     type: external_exports.literal("usage.recorded"),
@@ -15208,7 +15399,9 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   external_exports.object({
     type: external_exports.literal("ticket.create"),
     title: external_exports.string().min(1).max(200),
-    body: external_exports.string().max(4e3).default(""),
+    body: external_exports.string().max(TICKET_BODY_MAX).default(""),
+    /** Straight into a sprint rather than the backlog. */
+    sprintId: external_exports.string().min(1).nullable().default(null),
     /** Files already uploaded to the session, to go with the brief. */
     attachments: external_exports.array(Attachment).max(20).default([]),
     needsHuman: external_exports.boolean().default(false)
@@ -15262,6 +15455,54 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
   }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
+  /** Rewrite the title or the description. Whatever is left out stays as it is. */
+  external_exports.object({
+    type: external_exports.literal("ticket.edit"),
+    ticketId: TicketId,
+    title: external_exports.string().trim().min(1).max(200).optional(),
+    body: external_exports.string().max(TICKET_BODY_MAX).optional()
+  }),
+  external_exports.object({ type: external_exports.literal("ticket.setDue"), ticketId: TicketId, dueAt: Timestamp.nullable() }),
+  /** Plan it into a sprint, or back to the backlog with null. */
+  external_exports.object({ type: external_exports.literal("ticket.setSprint"), ticketId: TicketId, sprintId: external_exports.string().min(1).nullable() }),
+  external_exports.object({ type: external_exports.literal("subticket.add"), ticketId: TicketId, title: external_exports.string().trim().min(1).max(200) }),
+  external_exports.object({
+    type: external_exports.literal("subticket.update"),
+    ticketId: TicketId,
+    subticketId: external_exports.string().min(1),
+    title: external_exports.string().trim().min(1).max(200).optional(),
+    state: SubticketState.optional()
+  }),
+  external_exports.object({ type: external_exports.literal("subticket.join"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  external_exports.object({ type: external_exports.literal("subticket.leave"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  external_exports.object({ type: external_exports.literal("subticket.remove"), ticketId: TicketId, subticketId: external_exports.string().min(1) }),
+  external_exports.object({
+    type: external_exports.literal("comment.add"),
+    ticketId: TicketId,
+    body: external_exports.string().trim().min(1).max(8e3),
+    asAgent: external_exports.boolean().default(false)
+  }),
+  /** Only the author can change or remove what they said. */
+  external_exports.object({ type: external_exports.literal("comment.edit"), commentId: external_exports.string().min(1), body: external_exports.string().trim().min(1).max(8e3) }),
+  external_exports.object({ type: external_exports.literal("comment.delete"), commentId: external_exports.string().min(1) }),
+  external_exports.object({
+    type: external_exports.literal("sprint.create"),
+    name: external_exports.string().trim().min(1).max(100),
+    goal: external_exports.string().max(2e3).default(""),
+    startsAt: Timestamp,
+    endsAt: Timestamp
+  }),
+  /** Change any of it. Starting a sprint is setting its state to active. */
+  external_exports.object({
+    type: external_exports.literal("sprint.update"),
+    sprintId: external_exports.string().min(1),
+    name: external_exports.string().trim().min(1).max(100).optional(),
+    goal: external_exports.string().max(2e3).optional(),
+    startsAt: Timestamp.optional(),
+    endsAt: Timestamp.optional(),
+    state: SprintState.optional()
+  }),
+  external_exports.object({ type: external_exports.literal("sprint.delete"), sprintId: external_exports.string().min(1) }),
   /**
    * Ask for a split from the board. Planning needs a repo and a model, neither
    * of which the browser has -- so this hands the brief to a participant's
@@ -15538,7 +15779,9 @@ var ServerMessage = external_exports.discriminatedUnion("kind", [
     /** Seats whose Claude Code is open, by autopilot mode; see SessionSnapshot.autopilots. */
     autopilots: external_exports.record(external_exports.string(), AutopilotMode).optional(),
     doing: external_exports.record(external_exports.string(), Doing).optional(),
-    limited: external_exports.array(external_exports.string()).optional()
+    limited: external_exports.array(external_exports.string()).optional(),
+    terminals: external_exports.array(TerminalInfo).optional(),
+    terminalHosts: external_exports.array(external_exports.string()).optional()
   })
 ]);
 
@@ -15595,7 +15838,7 @@ async function runCommand(config2, command, timeoutMs = 3e3) {
 
 // packages/plugin/src/busy.ts
 import { createHash as createHash2 } from "node:crypto";
-import { mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync3, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join3 } from "node:path";
 var MAX_TURN_MS = 2 * 60 * 60 * 1e3;
@@ -15626,7 +15869,7 @@ function isAutopilotRunning(repoPath) {
 }
 
 // packages/plugin/src/inbox.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync3, renameSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync4, renameSync, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join4 } from "node:path";
 function stateDir() {
@@ -15641,7 +15884,7 @@ function readCursors() {
   const path = inboxFile();
   if (!existsSync3(path)) return {};
   try {
-    return JSON.parse(readFileSync3(path, "utf8"));
+    return JSON.parse(readFileSync4(path, "utf8"));
   } catch {
     return {};
   }
@@ -15736,7 +15979,7 @@ function describeDirectives(messages, names) {
 }
 
 // packages/plugin/src/preferences.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname3, join as join5 } from "node:path";
 var Preferences = external_exports.object({
   /**
@@ -15787,6 +16030,12 @@ var Preferences = external_exports.object({
    * a lot of it that nobody reads.
    */
   terse: external_exports.boolean().default(true),
+  /**
+   * Whether people in a ticket may open a Claude Code in a real terminal on
+   * this machine, from the board, and type into it. That is running commands
+   * here: anyone with the invite who joins the ticket can. Off unless chosen.
+   */
+  terminal: external_exports.enum(["off", "members"]).default("off"),
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });
@@ -15794,7 +16043,7 @@ var PREFERENCES_PATH = join5(STATE_DIR, "preferences.json");
 function readPreferences() {
   if (!existsSync4(PREFERENCES_PATH)) return Preferences.parse({});
   try {
-    return Preferences.parse(JSON.parse(readFileSync4(PREFERENCES_PATH, "utf8")));
+    return Preferences.parse(JSON.parse(readFileSync5(PREFERENCES_PATH, "utf8")));
   } catch {
     return Preferences.parse({});
   }
@@ -15808,7 +16057,7 @@ var TERSE_STYLE = [
 ].join(" ");
 
 // packages/plugin/src/usage.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync6, readFileSync as readFileSync5, statSync as statSync3, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync6, readFileSync as readFileSync6, statSync as statSync3, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join6 } from "node:path";
 var EMPTY = {
@@ -15826,7 +16075,7 @@ function readOffsets() {
   const path = offsetsFile();
   if (!existsSync5(path)) return {};
   try {
-    return JSON.parse(readFileSync5(path, "utf8"));
+    return JSON.parse(readFileSync6(path, "utf8"));
   } catch {
     return {};
   }
@@ -15850,7 +16099,7 @@ function usageSince(transcriptPath) {
   let text;
   let consumed;
   try {
-    const bytes = readFileSync5(transcriptPath).subarray(from);
+    const bytes = readFileSync6(transcriptPath).subarray(from);
     const lastNewline = bytes.lastIndexOf(10);
     if (lastNewline === -1) return EMPTY;
     consumed = from + lastNewline + 1;
