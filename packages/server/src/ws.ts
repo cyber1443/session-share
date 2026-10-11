@@ -1,4 +1,5 @@
-import type { IncomingMessage, Server } from 'node:http'
+import type { IncomingMessage } from 'node:http'
+import type { Duplex } from 'node:stream'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { readWsTicket, type AuthConfig } from './auth.js'
 import type { Store } from './db.js'
@@ -36,13 +37,20 @@ export class Gateway {
   private heartbeat: NodeJS.Timeout | null = null
   private service!: SessionService
 
+  /**
+   * Upgrades are routed to this by path rather than this listening on the
+   * server: `ws` answers 400 to any path that is not its own, so two socket
+   * endpoints on one server would each refuse the other's connections.
+   */
   constructor(
-    server: Server,
-    path: string,
     private readonly auth: AuthConfig,
     private readonly store: Store,
   ) {
-    this.wss = new WebSocketServer({ server, path })
+    this.wss = new WebSocketServer({ noServer: true })
+  }
+
+  handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+    this.wss.handleUpgrade(request, socket, head, (ws) => this.wss.emit('connection', ws, request))
   }
 
   attach(service: SessionService): void {
@@ -313,6 +321,7 @@ export class Gateway {
       autopilots: this.service.autopilotsIn(sessionId),
       doing: this.service.doingIn(sessionId),
       limited: this.service.limitedIn(sessionId),
+      ...this.service.liveTerminals(sessionId),
     }
     for (const connection of this.connections) {
       if (connection.ctx.sessionId === sessionId) send(connection.socket, message)

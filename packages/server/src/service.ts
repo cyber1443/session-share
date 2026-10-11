@@ -16,10 +16,14 @@ import {
   type ParticipantId,
   type Session,
   type SessionId,
+  type Sprint,
+  type Subticket,
   type Task,
   type TaskId,
   type Ticket,
   type TicketId,
+  type TerminalInfo,
+  type TicketComment,
   type TicketState,
   type ValidationIssue,
   analyzeDag,
@@ -141,6 +145,8 @@ export class SessionService {
    * so it reaches them now rather than on the next heartbeat. Set by the gateway.
    */
   onLive: ((sessionId: SessionId) => void) | null = null
+  /** The terminals open in a session and whose machines take one. Set by the terminal relay. */
+  terminalsOf: ((sessionId: SessionId) => { terminals: TerminalInfo[]; hosts: string[] }) | null = null
 
   constructor(
     private readonly store: Store,
@@ -469,7 +475,37 @@ export class SessionService {
       autopilots: this.autopilotsIn(sessionId),
       doing: this.doingIn(sessionId),
       limited: this.limitedIn(sessionId),
+      ...this.liveTerminals(sessionId),
     }
+  }
+
+  /** Terminals for the board's live state; nothing when no relay is attached. */
+  liveTerminals(sessionId: SessionId): { terminals?: TerminalInfo[]; terminalHosts?: string[] } {
+    const live = this.terminalsOf?.(sessionId)
+    return live ? { terminals: live.terminals, terminalHosts: live.hosts } : {}
+  }
+
+  /**
+   * Appends an event from outside a command: the terminal relay saying who
+   * opened what on whose machine. Same log, same broadcast.
+   */
+  record(sessionId: SessionId, actorId: ParticipantId | null, body: EventBody): void {
+    this.atomically(() => {
+      this.emit(sessionId, actorId, body)
+    })
+  }
+
+  /** Whether two seats are one person -- the same login in two checkouts is. */
+  samePerson(state: SessionState, a: ParticipantId, b: ParticipantId): boolean {
+    if (a === b) return true
+    const one = state.participants.get(a)
+    const two = state.participants.get(b)
+    return Boolean(one && two && personOf(one) === personOf(two))
+  }
+
+  /** Whether the person in a seat is in a ticket, through any of their seats. */
+  isTicketMember(state: SessionState, ticket: Ticket, participantId: ParticipantId): boolean {
+    return ticket.members.some((member) => this.samePerson(state, member, participantId))
   }
 
   readEvents(sessionId: SessionId, fromSeq: number, limit?: number): EventEnvelope[] {
@@ -564,6 +600,33 @@ export class SessionService {
         return this.humanCheck(command, ctx)
       case 'ticket.runLocally':
         return this.runLocally(command, ctx)
+      case 'ticket.edit':
+        return this.editTicket(command, ctx)
+      case 'ticket.setDue':
+        return this.setDue(command, ctx)
+      case 'ticket.setSprint':
+        return this.setSprint(command, ctx)
+      case 'subticket.add':
+        return this.addSubticket(command, ctx)
+      case 'subticket.update':
+        return this.updateSubticket(command, ctx)
+      case 'subticket.join':
+      case 'subticket.leave':
+        return this.subticketMembership(command, ctx)
+      case 'subticket.remove':
+        return this.removeSubticket(command, ctx)
+      case 'comment.add':
+        return this.addComment(command, ctx)
+      case 'comment.edit':
+        return this.editComment(command, ctx)
+      case 'comment.delete':
+        return this.deleteComment(command, ctx)
+      case 'sprint.create':
+        return this.createSprint(command, ctx)
+      case 'sprint.update':
+        return this.updateSprint(command, ctx)
+      case 'sprint.delete':
+        return this.deleteSprint(command, ctx)
       case 'agent.doing': {
         const { sessionId, participantId } = this.requireParticipant(ctx)
         if (ctx.via === 'board') throw new ServiceError('forbidden', 'Only a checkout reports what its Claude is doing.')
@@ -741,6 +804,265 @@ export class SessionService {
   }
 
   /**
+   * What people have said on a ticket, for an agent about to act on it. The
+   * newest few, each cut short: the comments are context for the brief, and a
+   * long thread pasted whole would drown the brief it is about.
+   */
+  private commentDigest(state: SessionState, ticketId: TicketId): string {
+    const comments = [...state.comments.values()].filter((c) => c.ticketId === ticketId).slice(-10)
+    if (comments.length === 0) return ''
+    const lines = comments.map((c) => {
+      const who = state.participants.get(c.authorId)?.displayName ?? 'someone'
+      const body = c.body.length > 500 ? `${c.body.slice(0, 500)}…` : c.body
+      return `- ${who}${c.byAgent ? "'s Claude" : ''}: ${body.replace(/\n+/g, ' ')}`
+    })
+    return `\nWhat people have said on it (read all of it with ss_ticket):\n${lines.join('\n')}`
+  }
+
+  private requireSprint(state: SessionState, sprintId: string) {
+    const sprint = state.sprints.get(sprintId)
+    if (!sprint) throw new ServiceError('not_found', `No sprint "${sprintId}".`)
+    return sprint
+  }
+
+  private requireSubticket(ticket: Ticket, subticketId: string): Subticket {
+    const subticket = ticket.subtickets.find((s) => s.id === subticketId)
+    if (!subticket) throw new ServiceError('not_found', `"${ticket.title}" has no subticket "${subticketId}".`)
+    return subticket
+  }
+
+  /**
+   * Anyone in the room can reword a ticket, like anyone can delete one. Once
+   * it has been split the planner has already read it, so a change then is
+   * said in the room -- the people building it should hear the brief moved.
+   */
+  private editTicket(command: Extract<ClientCommand, { type: 'ticket.edit' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    const title = command.title ?? ticket.title
+    const body = command.body ?? ticket.body
+    if (title === ticket.title && body === ticket.body) return { ticket }
+
+    this.emit(sessionId, participantId, { type: 'ticket.edited', ticketId: ticket.id, title, body })
+    if (ticket.decompositionId && body !== ticket.body) {
+      const by = state.participants.get(participantId)?.displayName ?? 'Someone'
+      const others = ticket.members.filter((id) => id !== participantId)
+      this.systemMessage(
+        sessionId,
+        participantId,
+        others,
+        `${by} changed the description of "${title}" after it was split. Read it again before going on.`,
+      )
+    }
+    return { ticket: this.requireTicket(state, ticket.id) }
+  }
+
+  private setDue(command: Extract<ClientCommand, { type: 'ticket.setDue' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    if (ticket.dueAt !== command.dueAt) {
+      this.emit(sessionId, participantId, { type: 'ticket.due', ticketId: ticket.id, dueAt: command.dueAt })
+    }
+    return { ticket: this.requireTicket(state, ticket.id) }
+  }
+
+  private setSprint(command: Extract<ClientCommand, { type: 'ticket.setSprint' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    if (command.sprintId) {
+      const sprint = this.requireSprint(state, command.sprintId)
+      if (sprint.state === 'closed') {
+        throw new ServiceError('conflict', `"${sprint.name}" is closed. Plan it into an open sprint, or reopen that one.`)
+      }
+    }
+    if (ticket.sprintId !== command.sprintId) {
+      this.emit(sessionId, participantId, { type: 'ticket.sprint', ticketId: ticket.id, sprintId: command.sprintId })
+    }
+    return { ticket: this.requireTicket(state, ticket.id) }
+  }
+
+  /** Whoever adds a piece of a ticket is on it until they say otherwise. */
+  private addSubticket(command: Extract<ClientCommand, { type: 'subticket.add' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    if (ticket.subtickets.length >= 100) {
+      throw new ServiceError('bad_request', `"${ticket.title}" already has 100 subtickets. Split it into another ticket.`)
+    }
+    const subticket: Subticket = {
+      id: randomUUID(),
+      title: command.title,
+      state: 'todo',
+      members: [participantId],
+      createdBy: participantId,
+      createdAt: Date.now(),
+    }
+    this.emit(sessionId, participantId, { type: 'subticket.added', ticketId: ticket.id, subticket })
+    return { subticket }
+  }
+
+  private updateSubticket(command: Extract<ClientCommand, { type: 'subticket.update' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    const subticket = this.requireSubticket(ticket, command.subticketId)
+    const title = command.title ?? subticket.title
+    const next = command.state ?? subticket.state
+    if (title !== subticket.title || next !== subticket.state) {
+      this.emit(sessionId, participantId, {
+        type: 'subticket.updated',
+        ticketId: ticket.id,
+        subticketId: subticket.id,
+        title,
+        state: next,
+      })
+    }
+    return { subticket: this.requireSubticket(this.requireTicket(state, ticket.id), subticket.id) }
+  }
+
+  /**
+   * Joining a piece of a ticket says who is looking after it. It does not join
+   * the ticket itself: that is the step that puts someone into its split, and
+   * offering to tick off one item is not agreeing to take on tasks.
+   */
+  private subticketMembership(
+    command: Extract<ClientCommand, { type: 'subticket.join' | 'subticket.leave' }>,
+    ctx: CommandContext,
+  ) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    const subticket = this.requireSubticket(ticket, command.subticketId)
+    const joining = command.type === 'subticket.join'
+    const has = subticket.members.includes(participantId)
+    if (joining !== has) {
+      this.emit(sessionId, participantId, {
+        type: 'subticket.members',
+        ticketId: ticket.id,
+        subticketId: subticket.id,
+        members: joining ? [...subticket.members, participantId] : subticket.members.filter((id) => id !== participantId),
+      })
+    }
+    return { subticket: this.requireSubticket(this.requireTicket(state, ticket.id), subticket.id) }
+  }
+
+  private removeSubticket(command: Extract<ClientCommand, { type: 'subticket.remove' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    const subticket = this.requireSubticket(ticket, command.subticketId)
+    this.emit(sessionId, participantId, { type: 'subticket.removed', ticketId: ticket.id, subticketId: subticket.id })
+    return { ok: true as const }
+  }
+
+  /**
+   * A comment stays with the card. Members other than the author are told in
+   * the room, as a message rather than an instruction -- reading a comment is
+   * a person's call, not something to hand their agent.
+   */
+  private addComment(command: Extract<ClientCommand, { type: 'comment.add' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.requireTicket(state, command.ticketId)
+    const comment: TicketComment = {
+      id: randomUUID(),
+      ticketId: ticket.id,
+      authorId: participantId,
+      byAgent: command.asAgent,
+      body: command.body,
+      createdAt: Date.now(),
+      editedAt: null,
+    }
+    this.emit(sessionId, participantId, { type: 'comment.added', comment })
+    return { comment }
+  }
+
+  private requireOwnComment(state: SessionState, commentId: string, participantId: ParticipantId): TicketComment {
+    const comment = state.comments.get(commentId)
+    if (!comment) throw new ServiceError('not_found', `No comment "${commentId}".`)
+    const author = state.participants.get(comment.authorId)
+    const me = state.participants.get(participantId)
+    // A person with two checkouts is still the one person who wrote it.
+    const same = comment.authorId === participantId || (author && me && personOf(author) === personOf(me))
+    if (!same) throw new ServiceError('forbidden', 'Only whoever wrote a comment can change or remove it.')
+    return comment
+  }
+
+  private editComment(command: Extract<ClientCommand, { type: 'comment.edit' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const comment = this.requireOwnComment(state, command.commentId, participantId)
+    if (comment.body !== command.body) {
+      this.emit(sessionId, participantId, { type: 'comment.edited', commentId: comment.id, body: command.body })
+    }
+    return { comment: state.comments.get(comment.id)! }
+  }
+
+  private deleteComment(command: Extract<ClientCommand, { type: 'comment.delete' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const comment = this.requireOwnComment(state, command.commentId, participantId)
+    this.emit(sessionId, participantId, { type: 'comment.deleted', commentId: comment.id })
+    return { ok: true as const }
+  }
+
+  // -- sprints ---------------------------------------------------------------
+
+  private checkSprintDates(startsAt: number, endsAt: number): void {
+    if (endsAt <= startsAt) throw new ServiceError('bad_request', 'A sprint has to end after it starts.')
+    if (endsAt - startsAt > 180 * 24 * 60 * 60 * 1000) {
+      throw new ServiceError('bad_request', 'A sprint longer than six months is a roadmap, not a sprint.')
+    }
+  }
+
+  private createSprint(command: Extract<ClientCommand, { type: 'sprint.create' }>, ctx: CommandContext) {
+    const { sessionId, participantId } = this.requireParticipant(ctx)
+    this.checkSprintDates(command.startsAt, command.endsAt)
+    const sprint: Sprint = {
+      id: randomUUID(),
+      name: command.name,
+      goal: command.goal,
+      startsAt: command.startsAt,
+      endsAt: command.endsAt,
+      state: 'planned',
+      createdBy: participantId,
+      createdAt: Date.now(),
+    }
+    this.emit(sessionId, participantId, { type: 'sprint.created', sprint })
+    return { sprint }
+  }
+
+  /**
+   * One sprint runs at a time. Starting another closes nothing by itself --
+   * that would quietly strand whatever was unfinished -- so it is refused, and
+   * the person decides what happens to the one still running.
+   */
+  private updateSprint(command: Extract<ClientCommand, { type: 'sprint.update' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const sprint = this.requireSprint(state, command.sprintId)
+    const next: Sprint = {
+      ...sprint,
+      name: command.name ?? sprint.name,
+      goal: command.goal ?? sprint.goal,
+      startsAt: command.startsAt ?? sprint.startsAt,
+      endsAt: command.endsAt ?? sprint.endsAt,
+      state: command.state ?? sprint.state,
+    }
+    this.checkSprintDates(next.startsAt, next.endsAt)
+    if (next.state === 'active' && sprint.state !== 'active') {
+      const running = [...state.sprints.values()].find((s) => s.state === 'active' && s.id !== sprint.id)
+      if (running) {
+        throw new ServiceError('conflict', `"${running.name}" is still active. Close it first.`)
+      }
+    }
+    if (JSON.stringify(next) !== JSON.stringify(sprint)) {
+      this.emit(sessionId, participantId, { type: 'sprint.updated', sprint: next })
+    }
+    return { sprint: next }
+  }
+
+  private deleteSprint(command: Extract<ClientCommand, { type: 'sprint.delete' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const sprint = this.requireSprint(state, command.sprintId)
+    const moved = [...state.tickets.values()].filter((t) => t.sprintId === sprint.id).length
+    this.emit(sessionId, participantId, { type: 'sprint.deleted', sprintId: sprint.id })
+    return { ticketsMoved: moved }
+  }
+
+  /**
    * Anyone can open a ticket. The author is in it from the start, and everyone
    * else is told it exists -- as a message, not a directive, because joining is
    * a person's decision and hijacking their agent to make it is not an offer.
@@ -770,6 +1092,10 @@ export class SessionService {
       attachments: command.attachments.map((a) => ({ ...a, kind: 'brief' as const })),
       needsHuman: command.needsHuman,
       humanCheck: null,
+      subtickets: [],
+      sprintId: command.sprintId ? this.requireSprint(state, command.sprintId).id : null,
+      dueAt: null,
+      startedAt: null,
       createdAt: Date.now(),
     }
     this.requireFiles(sessionId, ticket.attachments)
@@ -1335,6 +1661,10 @@ export class SessionService {
         ticket.attachments.some((a) => a.kind === 'brief')
           ? `\nThe brief comes with ${ticket.attachments.filter((a) => a.kind === 'brief').length} picture(s). Look at them first: ss_ticket_files (ticketId: ${ticket.id}) saves them where you can Read them.`
           : '',
+        ticket.subtickets.length > 0
+          ? `\nIt is broken into these pieces, which the split should cover:\n${ticket.subtickets.map((s) => `- ${s.title}${s.state === 'done' ? ' (already done)' : ''}`).join('\n')}`
+          : '',
+        this.commentDigest(state, ticket.id),
         '',
         'Read the repository, then call ss_propose with:',
         `  ticketId: ${ticket.id}`,

@@ -48,6 +48,7 @@ import { ServiceError, SessionService, type AuthenticatedUser } from './service.
 import { GitHubReader } from './github.js'
 import { History } from './history.js'
 import { Gateway } from './ws.js'
+import { Terminals } from './terminals.js'
 
 const STATUS: Record<ErrorCode, number> = {
   bad_request: 400,
@@ -172,6 +173,7 @@ export interface App {
   fastify: FastifyInstance
   service: SessionService
   gateway: Gateway
+  terminals: Terminals
   store: Store
   auth: AuthConfig
   webRoot: string | null
@@ -196,13 +198,20 @@ export function createApp(options: AppOptions = {}): App {
   const auth = { ...loadAuthConfig(), ...options.auth }
   const store = new Store(options.dbPath ?? '.data/session-share.db')
   const fastify = Fastify({ logger: options.logger ?? false })
-  const gateway = new Gateway(fastify.server, '/ws', auth, store)
+  const gateway = new Gateway(auth, store)
   const service = new SessionService(
     store,
     (sessionId, envelope) => gateway.broadcast(sessionId, envelope),
     (sessionId, from, frame) => gateway.relayFrame(sessionId, from, frame),
   )
   gateway.attach(service)
+  const terminals = new Terminals(auth, store, service)
+  fastify.server.on('upgrade', (request, socket, head) => {
+    const path = (request.url ?? '').split('?')[0]
+    if (path === '/ws') gateway.handleUpgrade(request, socket, head)
+    else if (path === '/term') terminals.handleUpgrade(request, socket, head)
+    else socket.destroy()
+  })
   const history = new History(store)
   const github = options.github ?? new GitHubReader()
 
@@ -1003,6 +1012,7 @@ export function createApp(options: AppOptions = {}): App {
     fastify,
     service,
     gateway,
+    terminals,
     store,
     auth,
     webRoot: webRoot && existsSync(webRoot) ? webRoot : null,
@@ -1010,6 +1020,7 @@ export function createApp(options: AppOptions = {}): App {
       return fastify.listen({ port, host })
     },
     async close() {
+      await terminals.close()
       await gateway.close()
       await fastify.close()
       store.close()
