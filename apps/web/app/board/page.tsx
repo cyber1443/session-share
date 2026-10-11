@@ -14,6 +14,8 @@ import { TicketPanel } from '@/components/ticket'
 import { HistoryView } from '@/components/history'
 import { UsageView } from '@/components/usage'
 import { GitHubView } from '@/components/github'
+import { TimelineView } from '@/components/timeline'
+import type { SprintFilter } from '@/components/kanban'
 import { useLiveSession } from '@/lib/live'
 import { tokens } from '@/lib/tokens'
 
@@ -28,7 +30,7 @@ const DOT = [
   'bg-indigo-400',
 ]
 
-const VIEWS = ['board', 'history', 'usage', 'github'] as const
+const VIEWS = ['board', 'timeline', 'history', 'usage', 'github'] as const
 type View = (typeof VIEWS)[number]
 
 
@@ -40,6 +42,7 @@ function Board({ slug }: { slug: string }) {
   const [pairing, setPairing] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [view, setView] = useState<View>('board')
+  const [sprintFilter, setSprintFilter] = useState<SprintFilter>('all')
 
   if (error && !snapshot) {
     return (
@@ -209,6 +212,18 @@ function Board({ slug }: { slug: string }) {
               </button>
             ))}
           </nav>
+          {view === 'timeline' ? (
+            <div className="min-h-0 flex-1">
+              <TimelineView
+                snapshot={snapshot}
+                send={send}
+                onOpenTicket={(ticketId) => {
+                  setOpenTicket(ticketId)
+                  setView('board')
+                }}
+              />
+            </div>
+          ) : null}
           {view === 'history' ? (
             <div className="min-h-0 flex-1">
               <HistoryView slug={slug} snapshot={snapshot} />
@@ -230,8 +245,10 @@ function Board({ slug }: { slug: string }) {
               slug={slug}
               meId={mine?.id ?? null}
               selected={openTicket}
-              onCreate={(title, body, attachments, needsHuman) =>
-                act(() => send({ type: 'ticket.create', title, body, attachments, needsHuman }))
+              sprintFilter={sprintFilter}
+              onSprintFilter={setSprintFilter}
+              onCreate={(title, body, attachments, needsHuman, sprintId) =>
+                act(() => send({ type: 'ticket.create', title, body, attachments, needsHuman, sprintId }))
               }
               onJoin={(ticketId) =>
                 act(() => send({ type: 'ticket.join', ticketId: ticketId as never }))
@@ -259,6 +276,7 @@ function Board({ slug }: { slug: string }) {
             slug={slug}
             meId={mine?.id ?? null}
             activity={activity}
+            send={send}
             onClose={() => setOpenTicket(null)}
             onJoin={() => act(() => send({ type: 'ticket.join', ticketId: ticket.id }))}
             onLeave={() => act(() => send({ type: 'ticket.leave', ticketId: ticket.id }))}

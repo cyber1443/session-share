@@ -6,8 +6,15 @@ import { tokens } from '@/lib/tokens'
 import { ago, isBusy } from '@/lib/now'
 import { api } from '@/lib/api'
 import { usePoll } from '@/lib/poll'
+import type { Send } from '@/lib/live'
 import { PullCard } from './pull'
 import { Pictures } from './pictures'
+import { Description, PlanFields } from './description'
+import { Subtickets } from './subtickets'
+import { Comments } from './comments'
+import { TerminalTab } from './terminal'
+
+type Tab = 'overview' | 'subtickets' | 'comments' | 'terminal'
 
 const DOT = [
   'bg-emerald-400',
@@ -56,9 +63,12 @@ export function TicketPanel({
   onNeedsHuman,
   onRunLocally,
   onHumanCheck,
+  send,
 }: {
   ticket: Ticket
   snapshot: SessionSnapshot
+  /** The board's socket, for everything people keep up by hand on a ticket. */
+  send: Send
   /** The session, for reading and merging its pull request. */
   slug: string
   meId: string | null
@@ -82,6 +92,10 @@ export function TicketPanel({
    * there is no undo on this side of it.
    */
   const [confirming, setConfirming] = useState(false)
+  const [tab, setTab] = useState<Tab>('overview')
+  const commentCount = (snapshot.comments ?? []).filter((c) => c.ticketId === ticket.id).length
+  const subtickets = ticket.subtickets ?? []
+  const liveTerminal = snapshot.terminals?.some((t) => t.ticketId === ticket.id && t.status !== 'exited') ?? false
   const tasks = snapshot.tasks.filter((task) => task.ticketId === ticket.id)
   const landed = tasks.filter((task) => task.state === 'merged').length
   // Every ticket has its own split; the session-wide field is only the newest one.
@@ -125,7 +139,9 @@ export function TicketPanel({
     .sort((a, b) => b.outputTokens - a.outputTokens)
 
   return (
-    <aside className="flex w-96 shrink-0 flex-col gap-5 overflow-y-auto border-l border-edge p-4 text-xs">
+    <aside
+      className={`flex shrink-0 flex-col gap-5 overflow-y-auto border-l border-edge p-4 text-xs ${tab === 'terminal' ? 'w-[min(56rem,70vw)]' : 'w-96'}`}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <h2 className="text-sm leading-snug text-neutral-200">{ticket.title}</h2>
@@ -139,7 +155,33 @@ export function TicketPanel({
         </button>
       </div>
 
-      {ticket.body ? <p className="whitespace-pre-line leading-relaxed text-neutral-400">{ticket.body}</p> : null}
+      <nav className="-mt-2 flex gap-1 border-b border-edge pb-1.5 text-[11px]">
+        {(
+          [
+            ['overview', 'overview'],
+            ['subtickets', `subtickets${subtickets.length ? ` ${subtickets.filter((s) => s.state === 'done').length}/${subtickets.length}` : ''}`],
+            ['comments', `comments${commentCount ? ` ${commentCount}` : ''}`],
+            ['terminal', `terminal${liveTerminal ? ' ●' : ''}`],
+          ] as Array<[Tab, string]>
+        ).map(([name, label]) => (
+          <button
+            key={name}
+            className={`rounded px-2 py-0.5 ${tab === name ? 'bg-neutral-800 text-neutral-200' : 'text-mute hover:text-neutral-300'}`}
+            onClick={() => setTab(name)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {tab === 'subtickets' ? <Subtickets ticket={ticket} snapshot={snapshot} meId={meId} send={send} /> : null}
+      {tab === 'comments' ? <Comments ticket={ticket} snapshot={snapshot} meId={meId} send={send} /> : null}
+      {tab === 'terminal' ? <TerminalTab key={ticket.id} ticket={ticket} snapshot={snapshot} slug={slug} meId={meId} /> : null}
+
+      {tab === 'overview' ? (
+      <>
+      <Description key={ticket.id} ticket={ticket} send={send} />
+      <PlanFields ticket={ticket} snapshot={snapshot} send={send} />
       <Pictures slug={slug} attachments={ticket.attachments.filter((a) => a.kind === 'brief')} />
       {!ticket.mergedAt && !ticket.prNumber ? (
         <label
@@ -588,6 +630,8 @@ export function TicketPanel({
           </button>
         )}
       </div>
+      </>
+      ) : null}
     </aside>
   )
 }

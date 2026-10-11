@@ -39,6 +39,9 @@ const COLUMNS: Array<{ states: TicketState[]; label: string; hint: string }> = [
   { states: ['done'], label: 'done', hint: 'merged' },
 ]
 
+/** Which tickets the board shows: all of them, the backlog, or one sprint by id. */
+export type SprintFilter = 'all' | 'backlog' | (string & {})
+
 export function Kanban({
   snapshot,
   slug,
@@ -47,15 +50,39 @@ export function Kanban({
   onJoin,
   onOpen,
   selected,
+  sprintFilter,
+  onSprintFilter,
 }: {
   snapshot: SessionSnapshot
   slug: string
   meId: string | null
-  onCreate: (title: string, body: string, attachments: Attachment[], needsHuman: boolean) => Promise<void>
+  onCreate: (
+    title: string,
+    body: string,
+    attachments: Attachment[],
+    needsHuman: boolean,
+    sprintId: string | null,
+  ) => Promise<void>
   onJoin: (ticketId: string) => Promise<void>
   onOpen: (ticketId: string) => void
   selected: string | null
+  sprintFilter: SprintFilter
+  onSprintFilter: (filter: SprintFilter) => void
 }) {
+  const sprints = [...(snapshot.sprints ?? [])].sort((a, b) => a.startsAt - b.startsAt)
+  // A sprint deleted while the board was filtered to it would leave an empty board with no way back.
+  if (sprintFilter !== 'all' && sprintFilter !== 'backlog' && !sprints.some((s) => s.id === sprintFilter)) {
+    sprintFilter = 'all'
+  }
+  const shownSprint = sprints.find((s) => s.id === sprintFilter) ?? null
+  const inView = (ticket: Ticket) =>
+    sprintFilter === 'all'
+      ? true
+      : sprintFilter === 'backlog'
+        ? !ticket.sprintId || !sprints.some((s) => s.id === ticket.sprintId)
+        : ticket.sprintId === sprintFilter
+  const comments = new Map<string, number>()
+  for (const comment of snapshot.comments ?? []) comments.set(comment.ticketId, (comments.get(comment.ticketId) ?? 0) + 1)
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -88,7 +115,8 @@ export function Kanban({
     try {
       // A first line is a title; anything after it is the brief.
       const [first, ...rest] = title.split('\n')
-      await onCreate(first!.trim(), rest.join('\n').trim(), pictures, needsHuman)
+      // Written while looking at a sprint, it belongs to that sprint.
+      await onCreate(first!.trim(), rest.join('\n').trim(), pictures, needsHuman, shownSprint?.id ?? null)
       setDraft('')
       setPictures([])
       setNeedsHuman(false)
@@ -110,10 +138,36 @@ export function Kanban({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {sprints.length > 0 ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-1 px-3 pt-2 text-[10px]">
+          {(['all', 'backlog'] as const).map((filter) => (
+            <button
+              key={filter}
+              className={`rounded px-2 py-0.5 uppercase tracking-wider ${sprintFilter === filter ? 'bg-neutral-800 text-neutral-200' : 'text-mute hover:text-neutral-300'}`}
+              onClick={() => onSprintFilter(filter)}
+            >
+              {filter}
+            </button>
+          ))}
+          {sprints
+            .filter((s) => s.state !== 'closed' || s.id === sprintFilter)
+            .map((sprint) => (
+              <button
+                key={sprint.id}
+                className={`rounded px-2 py-0.5 ${sprintFilter === sprint.id ? 'bg-neutral-800 text-neutral-200' : 'text-mute hover:text-neutral-300'}`}
+                onClick={() => onSprintFilter(sprint.id)}
+                title={`${new Date(sprint.startsAt).toLocaleDateString()} – ${new Date(sprint.endsAt).toLocaleDateString()}`}
+              >
+                {sprint.name}
+                {sprint.state === 'active' ? <span className="text-accent"> ·active</span> : null}
+              </button>
+            ))}
+        </div>
+      ) : null}
       {error ? <p className="px-4 pt-2 text-xs text-red-400">{error}</p> : null}
       <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3">
         {COLUMNS.map((column) => {
-          const tickets = snapshot.tickets.filter((ticket) => column.states.includes(ticket.state))
+          const tickets = snapshot.tickets.filter((ticket) => inView(ticket) && column.states.includes(ticket.state))
           return (
             <section key={column.label} className="flex w-72 shrink-0 flex-col">
               <header className="flex items-baseline justify-between px-1 pb-2">
@@ -198,6 +252,8 @@ export function Kanban({
                     doing={snapshot.doing}
                     meId={meId}
                     selected={selected === ticket.id}
+                    comments={comments.get(ticket.id) ?? 0}
+                    sprintName={sprintFilter === 'all' ? (sprints.find((s) => s.id === ticket.sprintId)?.name ?? null) : null}
                     onOpen={() => onOpen(ticket.id)}
                     onJoin={() => void act(() => onJoin(ticket.id))}
                   />
@@ -222,6 +278,8 @@ function Card({
   doing,
   meId,
   selected,
+  comments,
+  sprintName,
   onOpen,
   onJoin,
 }: {
@@ -231,9 +289,14 @@ function Card({
   doing: SessionSnapshot['doing']
   meId: string | null
   selected: boolean
+  comments: number
+  sprintName: string | null
   onOpen: () => void
   onJoin: () => void
 }) {
+  const subtickets = ticket.subtickets ?? []
+  const subDone = subtickets.filter((s) => s.state === 'done').length
+  const overdue = ticket.dueAt !== null && !ticket.mergedAt && ticket.dueAt < Date.now()
   const mine = Boolean(meId && ticket.members.includes(meId as never))
   const members = ticket.members
     .map((id) => participants.find((p) => p.id === id))
@@ -302,6 +365,23 @@ function Card({
           </span>
         </p>
       ))}
+
+      {subtickets.length > 0 || comments > 0 || ticket.dueAt || sprintName ? (
+        <p className="flex flex-wrap gap-x-2 text-[10px] text-mute">
+          {subtickets.length > 0 ? (
+            <span className={subDone === subtickets.length ? 'text-accent' : ''}>
+              [{subDone}/{subtickets.length}] subtickets
+            </span>
+          ) : null}
+          {comments > 0 ? <span>{comments} comment{comments === 1 ? '' : 's'}</span> : null}
+          {ticket.dueAt ? (
+            <span className={overdue ? 'text-red-400' : ''}>
+              due {new Date(ticket.dueAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+            </span>
+          ) : null}
+          {sprintName ? <span className="text-neutral-500">{sprintName}</span> : null}
+        </p>
+      ) : null}
 
       {tasks.length > 0 ? (
         <div className="flex items-center gap-2 text-[10px] text-mute">

@@ -247,6 +247,38 @@ function describe(envelope: EventEnvelope): string {
       return `ticket merged as #${body.prNumber} -- done`
     case 'ticket.deleted':
       return 'deleted a ticket'
+    case 'ticket.edited':
+      return `edited "${body.title}"`
+    case 'ticket.due':
+      return body.dueAt ? `set a ticket due ${new Date(body.dueAt).toLocaleDateString()}` : 'cleared a due date'
+    case 'ticket.sprint':
+      return body.sprintId ? 'planned a ticket into a sprint' : 'moved a ticket to the backlog'
+    case 'subticket.added':
+      return `added subticket "${body.subticket.title}"`
+    case 'subticket.updated':
+      return `subticket "${body.title}" → ${body.state}`
+    case 'subticket.members':
+      return `subticket now has ${body.members.length} member(s)`
+    case 'subticket.removed':
+      return 'removed a subticket'
+    case 'comment.added':
+      return `commented: ${body.comment.body.slice(0, 80)}`
+    case 'comment.edited':
+      return 'edited a comment'
+    case 'comment.deleted':
+      return 'deleted a comment'
+    case 'sprint.created':
+      return `created sprint "${body.sprint.name}"`
+    case 'sprint.updated':
+      return `sprint "${body.sprint.name}" is ${body.sprint.state}`
+    case 'sprint.deleted':
+      return 'deleted a sprint'
+    case 'terminal.opened':
+      return 'opened a terminal on a ticket'
+    case 'terminal.helm':
+      return body.driver ? 'took the helm of a terminal' : 'handed a terminal to Claude'
+    case 'terminal.closed':
+      return `a terminal ended${body.exitCode !== null ? ` (exit ${body.exitCode})` : ''}`
     case 'plan.requested':
       return `asked for a split: ${body.goal.slice(0, 80)}`
     case 'decomposition.assigned':

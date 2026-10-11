@@ -39,6 +39,11 @@ interface Pending {
  * saw rather than refetching, which is what makes a dropped wifi connection a
  * non-event rather than a page reload.
  */
+/** The terminal relay, beside the main socket. */
+export function termUrl(): string {
+  return wsUrl().replace(/\/ws$/, '/term')
+}
+
 export function useLiveSession(sessionRef: string) {
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null)
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
@@ -57,6 +62,8 @@ export function useLiveSession(sessionRef: string) {
   /** What each seat's Claude is doing now; same delivery as autopilots. */
   const doingRef = useRef<SessionSnapshot['doing']>(undefined)
   const limitedRef = useRef<SessionSnapshot['limited']>(undefined)
+  const terminalsRef = useRef<SessionSnapshot['terminals']>(undefined)
+  const terminalHostsRef = useRef<SessionSnapshot['terminalHosts']>(undefined)
   const socketRef = useRef<WebSocket | null>(null)
   const pendingRef = useRef(new Map<string, Pending>())
   const reqCounter = useRef(0)
@@ -64,7 +71,14 @@ export function useLiveSession(sessionRef: string) {
 
   const publish = useCallback(() => {
     if (!stateRef.current.session) return
-    setSnapshot({ ...stateRef.current.snapshot(), autopilots: autopilotsRef.current, doing: doingRef.current, limited: limitedRef.current })
+    setSnapshot({
+      ...stateRef.current.snapshot(),
+      autopilots: autopilotsRef.current,
+      doing: doingRef.current,
+      limited: limitedRef.current,
+      terminals: terminalsRef.current,
+      terminalHosts: terminalHostsRef.current,
+    })
   }, [])
 
   const send = useCallback(<T extends ClientCommand['type']>(
@@ -156,6 +170,8 @@ export function useLiveSession(sessionRef: string) {
                 autopilotsRef.current = result.snapshot.autopilots
                 doingRef.current = result.snapshot.doing
                 limitedRef.current = result.snapshot.limited
+                terminalsRef.current = result.snapshot.terminals
+                terminalHostsRef.current = result.snapshot.terminalHosts
               }
               setStatus('live')
               setError(null)
@@ -203,6 +219,8 @@ export function useLiveSession(sessionRef: string) {
               if (message.autopilots) autopilotsRef.current = message.autopilots
               if (message.doing) doingRef.current = message.doing
               if (message.limited) limitedRef.current = message.limited
+              if (message.terminals) terminalsRef.current = message.terminals
+              if (message.terminalHosts) terminalHostsRef.current = message.terminalHosts
               publish()
               break
             }
@@ -256,3 +274,6 @@ export function useLiveSession(sessionRef: string) {
 
   return { snapshot, status, error, activity, events, send, sendFrame, readyTaskIds }
 }
+
+/** What a component needs to send commands on the board's own socket. */
+export type Send = ReturnType<typeof useLiveSession>['send']
