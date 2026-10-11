@@ -439,3 +439,24 @@ describe('SessionState: a snapshot round trip', () => {
     assert.equal(hydrated.latestDecompositionId, 'dA')
   })
 })
+
+describe('tickets from an older build', () => {
+  // TICKET is shaped like an 0.14 ticket: no pictures, no human check, no subtickets.
+  const fields = (ticket) => [ticket.attachments, ticket.needsHuman, ticket.humanCheck, ticket.mergedAt, ticket.subtickets]
+
+  it('fills in the newer fields when folding the log', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: SESSION }))
+    state.apply(envelope(1, { type: 'ticket.created', ticket: TICKET }))
+    assert.deepEqual(fields(state.snapshot().tickets[0]), [[], false, null, null, []])
+  })
+
+  it('fills in the newer fields when hydrating a snapshot', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: SESSION }))
+    const snapshot = state.snapshot()
+    const client = new SessionState()
+    client.hydrate({ ...snapshot, tickets: [TICKET] })
+    assert.deepEqual(fields(client.snapshot().tickets[0]), [[], false, null, null, []])
+  })
+})

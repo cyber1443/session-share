@@ -32,6 +32,30 @@ const ACTIVE_STATES = new Set(['claimed', 'running', 'testing', 'failed'])
 export const CLAIM_CAP = 1
 
 /**
+ * A ticket with every field a newer build added filled in. The log and
+ * snapshots are kept as written, so a ticket from an older build lacks them,
+ * and code reading `ticket.attachments.length` must not have to know that.
+ */
+function completeTicket(ticket: Ticket): Ticket {
+  return {
+    ...ticket,
+    body: ticket.body ?? '',
+    members: ticket.members ?? [],
+    verification: ticket.verification ?? null,
+    decompositionId: ticket.decompositionId ?? null,
+    prNumber: ticket.prNumber ?? null,
+    mergedAt: ticket.mergedAt ?? null,
+    attachments: ticket.attachments ?? [],
+    needsHuman: ticket.needsHuman ?? false,
+    humanCheck: ticket.humanCheck ?? null,
+    subtickets: ticket.subtickets ?? [],
+    sprintId: ticket.sprintId ?? null,
+    dueAt: ticket.dueAt ?? null,
+    startedAt: ticket.startedAt ?? null,
+  }
+}
+
+/**
  * In-memory fold of one session's event log. Every mutation goes through the
  * log first and lands here second, so a reconnecting client replaying from
  * `fromSeq` converges on exactly this state.
@@ -126,13 +150,7 @@ export class SessionState {
 
       case 'ticket.created':
         // The log is stored as written, so a ticket from before a field existed lacks it.
-        this.tickets.set(body.ticket.id, {
-          ...body.ticket,
-          subtickets: body.ticket.subtickets ?? [],
-          sprintId: body.ticket.sprintId ?? null,
-          dueAt: body.ticket.dueAt ?? null,
-          startedAt: body.ticket.startedAt ?? null,
-        })
+        this.tickets.set(body.ticket.id, completeTicket(body.ticket))
         break
       case 'ticket.members': {
         const ticket = this.tickets.get(body.ticketId)
@@ -705,13 +723,7 @@ export class SessionState {
     // all -- and hydrating is the one place a client cannot afford to throw.
     for (const ticket of snapshot.tickets ?? []) {
       // A snapshot from an older server has none of the newer fields.
-      this.tickets.set(ticket.id, {
-        ...ticket,
-        subtickets: ticket.subtickets ?? [],
-        sprintId: ticket.sprintId ?? null,
-        dueAt: ticket.dueAt ?? null,
-        startedAt: ticket.startedAt ?? null,
-      })
+      this.tickets.set(ticket.id, completeTicket(ticket))
     }
     this.decompositions.clear()
     this.validations.clear()
