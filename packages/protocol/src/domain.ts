@@ -8,6 +8,7 @@ import {
   TicketId,
   Timestamp,
 } from './ids.js'
+import { TerminalInfo } from './terminal.js'
 
 // ---------------------------------------------------------------------------
 // Session
@@ -180,12 +181,33 @@ export const HumanCheck = z.object({
 })
 export type HumanCheck = z.infer<typeof HumanCheck>
 
+/** Longest description a ticket may carry. */
+export const TICKET_BODY_MAX = 20_000
+
+/**
+ * A piece of a ticket small enough to tick off, with its own people. Not a
+ * ticket of its own: it has no split, no leases and no pull request -- it is
+ * how the people in a ticket say who is looking after which part of it.
+ */
+export const SubticketState = z.enum(['todo', 'doing', 'done'])
+export type SubticketState = z.infer<typeof SubticketState>
+
+export const Subticket = z.object({
+  id: z.string().min(1).max(64),
+  title: z.string().min(1).max(200),
+  state: SubticketState.default('todo'),
+  members: z.array(ParticipantId).default([]),
+  createdBy: ParticipantId,
+  createdAt: Timestamp,
+})
+export type Subticket = z.infer<typeof Subticket>
+
 export const Ticket = z.object({
   id: TicketId,
   sessionId: SessionId,
   title: z.string().min(1).max(200),
   /** The brief the planner works from. Optional: a title is often enough. */
-  body: z.string().max(4000).default(''),
+  body: z.string().max(TICKET_BODY_MAX).default(''),
   authorId: ParticipantId,
   /**
    * Who is working it. Joining is the whole consent step -- there is no
@@ -214,9 +236,56 @@ export const Ticket = z.object({
    */
   needsHuman: z.boolean().default(false),
   humanCheck: HumanCheck.nullable().default(null),
+  subtickets: z.array(Subticket).default([]),
+  /** The sprint it is planned into; null is the backlog. */
+  sprintId: z.string().nullable().default(null),
+  /** When someone wants it finished by, for the timeline. */
+  dueAt: Timestamp.nullable().default(null),
+  /**
+   * When it first left the plan column. Set by the fold from the log, so the
+   * timeline can draw how long work actually took rather than how long the
+   * card has existed.
+   */
+  startedAt: Timestamp.nullable().default(null),
   createdAt: Timestamp,
 })
 export type Ticket = z.infer<typeof Ticket>
+
+/**
+ * Something said about a ticket that should stay with it. Chat is the room's
+ * running conversation and scrolls away; a comment is attached to the card and
+ * is what the next person to open it -- or the agent splitting it -- reads.
+ */
+export const TicketComment = z.object({
+  id: z.string().min(1).max(64),
+  ticketId: TicketId,
+  authorId: ParticipantId,
+  /** Written by someone's Claude rather than typed by them. */
+  byAgent: z.boolean().default(false),
+  body: z.string().min(1).max(8000),
+  createdAt: Timestamp,
+  editedAt: Timestamp.nullable().default(null),
+})
+export type TicketComment = z.infer<typeof TicketComment>
+
+// ---------------------------------------------------------------------------
+// Sprints: a stretch of time tickets are planned into
+// ---------------------------------------------------------------------------
+
+export const SprintState = z.enum(['planned', 'active', 'closed'])
+export type SprintState = z.infer<typeof SprintState>
+
+export const Sprint = z.object({
+  id: z.string().min(1).max(64),
+  name: z.string().min(1).max(100),
+  goal: z.string().max(2000).default(''),
+  startsAt: Timestamp,
+  endsAt: Timestamp,
+  state: SprintState.default('planned'),
+  createdBy: ParticipantId,
+  createdAt: Timestamp,
+})
+export type Sprint = z.infer<typeof Sprint>
 
 // ---------------------------------------------------------------------------
 // Decomposition: the contract-first split
@@ -533,6 +602,8 @@ export const SessionSnapshot = z.object({
   handoffs: z.array(HandoffRequest),
   chat: z.array(ChatMessage),
   usage: z.array(Usage).default([]),
+  comments: z.array(TicketComment).default([]),
+  sprints: z.array(Sprint).default([]),
   mergeQueue: z.array(MergeQueueEntry),
   /**
    * Seats whose Claude Code is open right now, by what its autopilot will do.
@@ -544,6 +615,10 @@ export const SessionSnapshot = z.object({
   doing: z.record(z.string(), Doing).optional(),
   /** Seats whose account has hit its usage limit; their work goes to others. */
   limited: z.array(z.string()).optional(),
+  /** Terminals open on members' machines. Memory only, like `doing`. */
+  terminals: z.array(TerminalInfo).optional(),
+  /** Seats whose machine will run a terminal for the board right now. */
+  terminalHosts: z.array(z.string()).optional(),
   seq: z.number().int().nonnegative(),
 })
 export type SessionSnapshot = z.infer<typeof SessionSnapshot>

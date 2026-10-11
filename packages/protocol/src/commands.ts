@@ -11,13 +11,19 @@ import {
   ParticipantActivity,
   RepoRef,
   SessionSnapshot,
+  Sprint,
+  SprintState,
+  Subticket,
+  SubticketState,
+  TICKET_BODY_MAX,
   Task,
   TaskSpec,
   TaskState,
   TestResult,
+  TicketComment,
   ValidationReport,
 } from './domain.js'
-import { DecompositionId, MessageId, ParticipantId, SessionId, Seq, TaskId, TicketId } from './ids.js'
+import { DecompositionId, MessageId, ParticipantId, SessionId, Seq, TaskId, TicketId, Timestamp } from './ids.js'
 
 /**
  * Client -> server. Every command is request/response (an `ack` carrying the
@@ -64,7 +70,9 @@ export const ClientCommand = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('ticket.create'),
     title: z.string().min(1).max(200),
-    body: z.string().max(4000).default(''),
+    body: z.string().max(TICKET_BODY_MAX).default(''),
+    /** Straight into a sprint rather than the backlog. */
+    sprintId: z.string().min(1).nullable().default(null),
     /** Files already uploaded to the session, to go with the brief. */
     attachments: z.array(Attachment).max(20).default([]),
     needsHuman: z.boolean().default(false),
@@ -118,6 +126,57 @@ export const ClientCommand = z.discriminatedUnion('type', [
   }),
   /** Records the pull request that finished a ticket. */
   z.object({ type: z.literal('ticket.shipped'), ticketId: TicketId, prNumber: z.number().int().nullable().default(null) }),
+  /** Rewrite the title or the description. Whatever is left out stays as it is. */
+  z.object({
+    type: z.literal('ticket.edit'),
+    ticketId: TicketId,
+    title: z.string().trim().min(1).max(200).optional(),
+    body: z.string().max(TICKET_BODY_MAX).optional(),
+  }),
+  z.object({ type: z.literal('ticket.setDue'), ticketId: TicketId, dueAt: Timestamp.nullable() }),
+  /** Plan it into a sprint, or back to the backlog with null. */
+  z.object({ type: z.literal('ticket.setSprint'), ticketId: TicketId, sprintId: z.string().min(1).nullable() }),
+
+  z.object({ type: z.literal('subticket.add'), ticketId: TicketId, title: z.string().trim().min(1).max(200) }),
+  z.object({
+    type: z.literal('subticket.update'),
+    ticketId: TicketId,
+    subticketId: z.string().min(1),
+    title: z.string().trim().min(1).max(200).optional(),
+    state: SubticketState.optional(),
+  }),
+  z.object({ type: z.literal('subticket.join'), ticketId: TicketId, subticketId: z.string().min(1) }),
+  z.object({ type: z.literal('subticket.leave'), ticketId: TicketId, subticketId: z.string().min(1) }),
+  z.object({ type: z.literal('subticket.remove'), ticketId: TicketId, subticketId: z.string().min(1) }),
+
+  z.object({
+    type: z.literal('comment.add'),
+    ticketId: TicketId,
+    body: z.string().trim().min(1).max(8000),
+    asAgent: z.boolean().default(false),
+  }),
+  /** Only the author can change or remove what they said. */
+  z.object({ type: z.literal('comment.edit'), commentId: z.string().min(1), body: z.string().trim().min(1).max(8000) }),
+  z.object({ type: z.literal('comment.delete'), commentId: z.string().min(1) }),
+
+  z.object({
+    type: z.literal('sprint.create'),
+    name: z.string().trim().min(1).max(100),
+    goal: z.string().max(2000).default(''),
+    startsAt: Timestamp,
+    endsAt: Timestamp,
+  }),
+  /** Change any of it. Starting a sprint is setting its state to active. */
+  z.object({
+    type: z.literal('sprint.update'),
+    sprintId: z.string().min(1),
+    name: z.string().trim().min(1).max(100).optional(),
+    goal: z.string().max(2000).optional(),
+    startsAt: Timestamp.optional(),
+    endsAt: Timestamp.optional(),
+    state: SprintState.optional(),
+  }),
+  z.object({ type: z.literal('sprint.delete'), sprintId: z.string().min(1) }),
 
   /**
    * Ask for a split from the board. Planning needs a repo and a model, neither
@@ -327,6 +386,20 @@ export interface CommandResultMap {
   'ticket.needsHuman': { ticket: Ticket }
   'ticket.humanCheck': { ticket: Ticket }
   'ticket.runLocally': { asked: ParticipantId | null }
+  'ticket.edit': { ticket: Ticket }
+  'ticket.setDue': { ticket: Ticket }
+  'ticket.setSprint': { ticket: Ticket }
+  'subticket.add': { subticket: Subticket }
+  'subticket.update': { subticket: Subticket }
+  'subticket.join': { subticket: Subticket }
+  'subticket.leave': { subticket: Subticket }
+  'subticket.remove': { ok: true }
+  'comment.add': { comment: TicketComment }
+  'comment.edit': { comment: TicketComment }
+  'comment.delete': { ok: true }
+  'sprint.create': { sprint: Sprint }
+  'sprint.update': { sprint: Sprint }
+  'sprint.delete': { ticketsMoved: number }
   'plan.request': { plannerId: ParticipantId; goal: string }
   'decomposition.propose': ProposeResult
   'task.assign': { assignments: Assignment[] }

@@ -4,6 +4,7 @@ import { EventEnvelope } from './events.js'
 import { AutopilotMode, Doing } from './domain.js'
 import { ParticipantId, Seq } from './ids.js'
 import { ActivityFrame } from './transport.js'
+import { TerminalInfo } from './terminal.js'
 
 export const PROTOCOL_VERSION = 1
 
@@ -80,6 +81,8 @@ export const ServerMessage = z.discriminatedUnion('kind', [
     autopilots: z.record(z.string(), AutopilotMode).optional(),
     doing: z.record(z.string(), Doing).optional(),
     limited: z.array(z.string()).optional(),
+    terminals: z.array(TerminalInfo).optional(),
+    terminalHosts: z.array(z.string()).optional(),
   }),
 ])
 export type ServerMessage = z.infer<typeof ServerMessage>

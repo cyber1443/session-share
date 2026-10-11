@@ -1,7 +1,10 @@
 import type {
   ChatMessage,
   Decomposition,
+  Sprint,
+  Subticket,
   Ticket,
+  TicketComment,
   TicketState,
   Usage,
   HandoffRequest,
@@ -59,6 +62,9 @@ export class SessionState {
   readonly chat: ChatMessage[] = []
   /** Keyed by `participant|ticket`, so both totals fall out of one map. */
   readonly usage = new Map<string, Usage>()
+  /** Insertion-ordered, which is the order a ticket shows them. */
+  readonly comments = new Map<string, TicketComment>()
+  readonly sprints = new Map<string, Sprint>()
   mergeQueue: MergeQueueEntry[] = []
 
   apply(envelope: EventEnvelope): void {
@@ -119,7 +125,14 @@ export class SessionState {
       }
 
       case 'ticket.created':
-        this.tickets.set(body.ticket.id, body.ticket)
+        // The log is stored as written, so a ticket from before a field existed lacks it.
+        this.tickets.set(body.ticket.id, {
+          ...body.ticket,
+          subtickets: body.ticket.subtickets ?? [],
+          sprintId: body.ticket.sprintId ?? null,
+          dueAt: body.ticket.dueAt ?? null,
+          startedAt: body.ticket.startedAt ?? null,
+        })
         break
       case 'ticket.members': {
         const ticket = this.tickets.get(body.ticketId)
@@ -128,7 +141,11 @@ export class SessionState {
       }
       case 'ticket.state': {
         const ticket = this.tickets.get(body.ticketId)
-        if (ticket) this.tickets.set(body.ticketId, { ...ticket, state: body.state })
+        if (ticket) {
+          // The first time it leaves plan is when work started, whatever happens after.
+          const startedAt = ticket.startedAt ?? (body.state === 'plan' ? null : envelope.ts)
+          this.tickets.set(body.ticketId, { ...ticket, state: body.state, startedAt })
+        }
         break
       }
       case 'ticket.verified': {
@@ -172,6 +189,71 @@ export class SessionState {
         if (ticket) this.tickets.set(body.ticketId, { ...ticket, prNumber: body.prNumber })
         break
       }
+      case 'ticket.edited': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) this.tickets.set(body.ticketId, { ...ticket, title: body.title, body: body.body })
+        break
+      }
+      case 'ticket.due': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) this.tickets.set(body.ticketId, { ...ticket, dueAt: body.dueAt })
+        break
+      }
+      case 'ticket.sprint': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) this.tickets.set(body.ticketId, { ...ticket, sprintId: body.sprintId })
+        break
+      }
+
+      case 'subticket.added': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket && !ticket.subtickets.some((s) => s.id === body.subticket.id)) {
+          this.tickets.set(body.ticketId, { ...ticket, subtickets: [...ticket.subtickets, body.subticket] })
+        }
+        break
+      }
+      case 'subticket.updated':
+        this.updateSubticket(body.ticketId, body.subticketId, (s) => ({ ...s, title: body.title, state: body.state }))
+        break
+      case 'subticket.members':
+        this.updateSubticket(body.ticketId, body.subticketId, (s) => ({ ...s, members: body.members }))
+        break
+      case 'subticket.removed': {
+        const ticket = this.tickets.get(body.ticketId)
+        if (ticket) {
+          this.tickets.set(body.ticketId, {
+            ...ticket,
+            subtickets: ticket.subtickets.filter((s) => s.id !== body.subticketId),
+          })
+        }
+        break
+      }
+
+      case 'comment.added':
+        this.comments.set(body.comment.id, body.comment)
+        break
+      case 'comment.edited': {
+        const comment = this.comments.get(body.commentId)
+        if (comment) this.comments.set(comment.id, { ...comment, body: body.body, editedAt: envelope.ts })
+        break
+      }
+      case 'comment.deleted':
+        this.comments.delete(body.commentId)
+        break
+
+      case 'sprint.created':
+      case 'sprint.updated':
+        this.sprints.set(body.sprint.id, body.sprint)
+        break
+      case 'sprint.deleted': {
+        // Like a deleted ticket's tasks, the cascade is in the fold so a replay agrees.
+        this.sprints.delete(body.sprintId)
+        for (const ticket of this.tickets.values()) {
+          if (ticket.sprintId === body.sprintId) this.tickets.set(ticket.id, { ...ticket, sprintId: null })
+        }
+        break
+      }
+
       case 'ticket.deleted': {
         /**
          * The cascade lives here rather than only in the server, so a client
@@ -180,6 +262,9 @@ export class SessionState {
          * lease goes on denying edits for work that no longer exists.
          */
         this.tickets.delete(body.ticketId)
+        for (const comment of [...this.comments.values()]) {
+          if (comment.ticketId === body.ticketId) this.comments.delete(comment.id)
+        }
         for (const task of [...this.tasks.values()]) {
           if (task.ticketId !== body.ticketId) continue
           this.tasks.delete(task.id)
@@ -367,6 +452,15 @@ export class SessionState {
     const key = id ?? this.latestDecompositionId
     const split = key ? this.decompositions.get(key) : undefined
     if (split) this.decompositions.set(split.id, change(split))
+  }
+
+  private updateSubticket(ticketId: TicketId, subticketId: string, change: (s: Subticket) => Subticket): void {
+    const ticket = this.tickets.get(ticketId)
+    if (!ticket) return
+    this.tickets.set(ticketId, {
+      ...ticket,
+      subtickets: ticket.subtickets.map((s) => (s.id === subticketId ? change(s) : s)),
+    })
   }
 
   /**
@@ -609,7 +703,16 @@ export class SessionState {
     this.tickets.clear()
     // Snapshots cross version boundaries -- an older server has no tickets at
     // all -- and hydrating is the one place a client cannot afford to throw.
-    for (const ticket of snapshot.tickets ?? []) this.tickets.set(ticket.id, ticket)
+    for (const ticket of snapshot.tickets ?? []) {
+      // A snapshot from an older server has none of the newer fields.
+      this.tickets.set(ticket.id, {
+        ...ticket,
+        subtickets: ticket.subtickets ?? [],
+        sprintId: ticket.sprintId ?? null,
+        dueAt: ticket.dueAt ?? null,
+        startedAt: ticket.startedAt ?? null,
+      })
+    }
     this.decompositions.clear()
     this.validations.clear()
     /**
@@ -657,6 +760,10 @@ export class SessionState {
     for (const entry of snapshot.usage ?? []) {
       this.usage.set(`${entry.participantId}|${entry.ticketId ?? ''}`, entry)
     }
+    this.comments.clear()
+    for (const comment of snapshot.comments ?? []) this.comments.set(comment.id, comment)
+    this.sprints.clear()
+    for (const sprint of snapshot.sprints ?? []) this.sprints.set(sprint.id, sprint)
     this.mergeQueue = snapshot.mergeQueue
     this.seq = snapshot.seq
   }
@@ -686,6 +793,8 @@ export class SessionState {
       handoffs: [...this.handoffs.values()],
       chat: this.chat,
       usage: [...this.usage.values()],
+      comments: [...this.comments.values()],
+      sprints: [...this.sprints.values()],
       mergeQueue: this.mergeQueue,
       seq: this.seq,
     }

@@ -15,9 +15,14 @@ import {
   ParticipantActivity,
   Session,
   SessionPhase,
+  Sprint,
+  Subticket,
+  SubticketState,
+  TICKET_BODY_MAX,
   Task,
   TaskState,
   TestResult,
+  TicketComment,
   ValidationReport,
 } from './domain.js'
 import {
@@ -102,6 +107,48 @@ export const EventBody = z.discriminatedUnion('type', [
     prNumber: z.number().int(),
     commitSha: z.string().nullable(),
   }),
+  /** Its title and description as they now read, whole rather than as a patch. */
+  z.object({
+    type: z.literal('ticket.edited'),
+    ticketId: TicketId,
+    title: z.string().min(1).max(200),
+    body: z.string().max(TICKET_BODY_MAX),
+  }),
+  z.object({ type: z.literal('ticket.due'), ticketId: TicketId, dueAt: Timestamp.nullable() }),
+  z.object({ type: z.literal('ticket.sprint'), ticketId: TicketId, sprintId: z.string().nullable() }),
+
+  // -- subtickets -----------------------------------------------------------
+  z.object({ type: z.literal('subticket.added'), ticketId: TicketId, subticket: Subticket }),
+  z.object({
+    type: z.literal('subticket.updated'),
+    ticketId: TicketId,
+    subticketId: z.string().min(1),
+    title: z.string().min(1).max(200),
+    state: SubticketState,
+  }),
+  z.object({
+    type: z.literal('subticket.members'),
+    ticketId: TicketId,
+    subticketId: z.string().min(1),
+    members: z.array(ParticipantId),
+  }),
+  z.object({ type: z.literal('subticket.removed'), ticketId: TicketId, subticketId: z.string().min(1) }),
+
+  // -- comments -------------------------------------------------------------
+  z.object({ type: z.literal('comment.added'), comment: TicketComment }),
+  z.object({
+    type: z.literal('comment.edited'),
+    commentId: z.string().min(1),
+    body: z.string().min(1).max(8000),
+  }),
+  z.object({ type: z.literal('comment.deleted'), commentId: z.string().min(1) }),
+
+  // -- sprints --------------------------------------------------------------
+  z.object({ type: z.literal('sprint.created'), sprint: Sprint }),
+  /** The sprint as it now stands, whole. */
+  z.object({ type: z.literal('sprint.updated'), sprint: Sprint }),
+  /** Its tickets go back to the backlog; nothing else about them changes. */
+  z.object({ type: z.literal('sprint.deleted'), sprintId: z.string().min(1) }),
 
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
@@ -198,6 +245,32 @@ export const EventBody = z.discriminatedUnion('type', [
 
   // -- chat -----------------------------------------------------------------
   z.object({ type: z.literal('chat.message'), message: ChatMessage }),
+
+  // -- terminals ------------------------------------------------------------
+  /**
+   * Who opened a terminal on whose machine, and who held the helm when. The
+   * bytes are never logged; these are, because a terminal can run anything on
+   * the machine it is on.
+   */
+  z.object({
+    type: z.literal('terminal.opened'),
+    terminalId: z.string().min(1),
+    ticketId: TicketId,
+    hostId: ParticipantId,
+  }),
+  /** Null is Claude driving; a seat is that person at the keys. */
+  z.object({
+    type: z.literal('terminal.helm'),
+    terminalId: z.string().min(1),
+    ticketId: TicketId,
+    driver: ParticipantId.nullable(),
+  }),
+  z.object({
+    type: z.literal('terminal.closed'),
+    terminalId: z.string().min(1),
+    ticketId: TicketId,
+    exitCode: z.number().int().nullable(),
+  }),
 
   // -- merge queue ----------------------------------------------------------
   z.object({
