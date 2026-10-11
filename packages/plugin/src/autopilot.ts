@@ -6,7 +6,7 @@ import type { ChatMessage } from '@session-share/protocol'
 import { runCommand } from './client.js'
 import { readConfig, type SessionConfig } from './config.js'
 import { acknowledge, describeDirectives, readInbox } from './inbox.js'
-import { isBusy, markAutopilot } from './busy.js'
+import { isBusy, isTerminalOpen, markAutopilot } from './busy.js'
 import { readPreferences, TERSE_STYLE, type Preferences } from './preferences.js'
 
 /**
@@ -116,7 +116,16 @@ const PLANNING_TOOLS = [
   'Read',
   'Grep',
   'Glob',
-  ...mcpTools('ss_propose', 'ss_tickets', 'ss_ticket_files', 'ss_get_contract', 'ss_chat_post', 'ss_chat_read', 'ss_status'),
+  ...mcpTools(
+    'ss_propose',
+    'ss_tickets',
+    'ss_ticket',
+    'ss_ticket_files',
+    'ss_get_contract',
+    'ss_chat_post',
+    'ss_chat_read',
+    'ss_status',
+  ),
 ]
 
 /**
@@ -124,7 +133,7 @@ const PLANNING_TOOLS = [
  * by whoever set autopilot to `full`, and still inside the lease gate, which
  * applies to a headless run exactly as to an interactive one.
  */
-const BUILDING_TOOLS = [
+export const BUILDING_TOOLS = [
   'Read',
   'Grep',
   'Glob',
@@ -157,6 +166,9 @@ const BUILDING_TOOLS = [
     'ss_ship',
     'ss_attach',
     'ss_ticket_files',
+    'ss_ticket',
+    'ss_ticket_comment',
+    'ss_subticket',
     'ss_worktree',
   ),
 ]
@@ -346,6 +358,10 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
    */
   if (isBusy(config.repoPath)) {
     return { ran: false, ok: false, reason: 'the interactive session is mid-turn' }
+  }
+  // A board terminal is the agent in this checkout while it is open; it takes the work itself.
+  if (isTerminalOpen(config.repoPath)) {
+    return { ran: false, ok: false, reason: 'a board terminal is running here and takes it' }
   }
 
   /**

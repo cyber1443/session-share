@@ -57,6 +57,12 @@ export const Preferences = z.object({
    * a lot of it that nobody reads.
    */
   terse: z.boolean().default(true),
+  /**
+   * Whether people in a ticket may open a Claude Code in a real terminal on
+   * this machine, from the board, and type into it. That is running commands
+   * here: anyone with the invite who joins the ticket can. Off unless chosen.
+   */
+  terminal: z.enum(['off', 'members']).default('off'),
   /** Set once the setup questions have been answered. */
   configured: z.boolean().default(false),
 })
@@ -106,6 +112,7 @@ export function describePreferences(preferences: Preferences): string {
     `room:     ${preferences.acceptDirectives ? 'directives from the room run in this session' : 'read-only; nothing from the room reaches your agent'}`,
     `tunnel:   ${preferences.tunnel ? 'hosting opens a public tunnel, so teammates on any network can join' : 'hosting is reachable as set above; pass tunnel: true to /ss:host for other networks'}`,
     `replies:  ${preferences.terse ? 'terse, to save tokens (code and commits stay normal)' : 'normal length'}`,
+    `terminal: ${preferences.terminal === 'members' ? 'people in a ticket can open and drive a Claude Code on this machine from the board -- that is running commands here' : 'off -- nobody can open a terminal on this machine from the board'}`,
     `memory:   ${preferences.mirror ? 'the session log is saved to the repo\'s session-share/log branch, so it survives this machine' : 'the session lives only on the hosting machine'}`,
     `autopilot: ${
       preferences.autopilot === 'off'

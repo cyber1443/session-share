@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -66,6 +66,40 @@ export function isAutopilotRunning(repoPath: string): boolean {
 export function isBusy(repoPath: string): boolean {
   try {
     return Date.now() - statSync(marker(repoPath)).mtimeMs < MAX_TURN_MS
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A third: a Claude Code is running in a board terminal in this checkout.
+ * While one is, it is the agent here -- work queued for the seat is handed to
+ * it -- and the headless autopilot must not start a second one beside it.
+ * Holds the terminal host's pid, so a host that died does not hold the
+ * checkout forever.
+ */
+const terminalMarker = (repoPath: string) => `${marker(repoPath)}.terminal`
+
+export function markTerminal(repoPath: string, open: boolean): void {
+  try {
+    const path = terminalMarker(repoPath)
+    if (!open) {
+      rmSync(path, { force: true })
+      return
+    }
+    mkdirSync(join(path, '..'), { recursive: true })
+    writeFileSync(path, `${process.pid}\n`)
+  } catch {
+    // Best effort.
+  }
+}
+
+export function isTerminalOpen(repoPath: string): boolean {
+  try {
+    const pid = Number(readFileSync(terminalMarker(repoPath), 'utf8').trim())
+    if (!pid) return false
+    process.kill(pid, 0)
+    return true
   } catch {
     return false
   }

@@ -19,6 +19,7 @@ import { readConfig, writeConfig, type SessionConfig } from './config.js'
 import { HOST_HEADER, ensureDaemon, hostKey, probe, publicUrlOverride, stopDaemon } from './daemon.js'
 import { describeDirectives, markCaughtUp, peekDirectives, pendingDirectives } from './inbox.js'
 import { startAutopilot } from './autopilot.js'
+import { ensureTerminalHost, stopTerminalHost } from './terminal-launch.js'
 import { LOG_BRANCH } from './mirror.js'
 import { ensureTunnel, stopTunnel } from './tunnel.js'
 import { catchUpFromMirror, mirrorOnce, restoreFromMirror, startMirror, type Restored } from './mirror-sync.js'
@@ -367,6 +368,7 @@ export function createServer(): McpServer {
       }
       writeConfig(root, cfg)
       await markCaughtUp(cfg) // the room starts here; do not replay an old session at the agent
+      ensureTerminalHost(root)
 
       // The host's own browser is on this machine; the tunnel is for everyone else.
       const board = boardUrl(publicUrl ? loopback : daemon.url, packed, joined.githubLogin)
@@ -459,6 +461,7 @@ export function createServer(): McpServer {
       }
       const path = writeConfig(root, cfg)
       await markCaughtUp(cfg)
+      ensureTerminalHost(root)
 
       const board = packed
         ? boardUrl(
@@ -568,6 +571,8 @@ export function createServer(): McpServer {
       const attached = readConfig(await repoRoot(REPO_ROOT))
       const saved = attached ? await mirrorOnce(attached).catch(() => null) : null
       stopTunnel()
+      // Its terminals talk to this server; with the server gone they have nothing to do.
+      if (attached) stopTerminalHost(attached.repoPath)
       const note = saved?.pushed
         ? ` The session is saved on the ${LOG_BRANCH} branch; /ss:host on any machine picks it up from there.`
         : ''
@@ -719,7 +724,7 @@ export function createServer(): McpServer {
         'Open a ticket for a piece of work. It waits in the plan column; everyone else is told it exists and can join it, and it is split when someone runs ss_ticket_start.',
       inputSchema: {
         title: z.string().min(1).max(200),
-        body: z.string().max(4000).nullish().describe('The brief the planner works from'),
+        body: z.string().max(20_000).nullish().describe('The description the planner works from'),
         pictures: z
           .array(z.string())
           .max(20)
@@ -741,6 +746,7 @@ export function createServer(): McpServer {
           type: 'ticket.create',
           title,
           body: body ?? '',
+          sprintId: null,
           attachments,
           needsHuman: needsHuman ?? false,
         },
@@ -787,6 +793,88 @@ export function createServer(): McpServer {
       if (!ticket) return text(`No ticket "${ticketId}".`)
       if (ticket.attachments.length === 0) return text(`"${ticket.title}" has no pictures.`)
       return text({ ticket: ticket.title, pictures: await downloadPictures(cfg, ticket.attachments) })
+    },
+  )
+
+  server.registerTool(
+    'ss_ticket',
+    {
+      description:
+        'Everything written on one ticket: its description, its subtickets and who is on each, its sprint and due date, and every comment. Read this before splitting or working a ticket.',
+      inputSchema: { ticketId: z.string() },
+    },
+    async ({ ticketId }) => {
+      const cfg = config()
+      const state = await snapshot(cfg)
+      const ticket = state.tickets.find((t) => t.id === ticketId)
+      if (!ticket) return text(`No ticket "${ticketId}".`)
+      const names = new Map(state.participants.map((p) => [p.id, p.displayName]))
+      const sprint = (state.sprints ?? []).find((s) => s.id === ticket.sprintId)
+      return text({
+        id: ticket.id,
+        title: ticket.title,
+        column: ticket.state,
+        description: ticket.body || '(none)',
+        members: ticket.members.map((id) => names.get(id) ?? id),
+        sprint: sprint ? `${sprint.name} (${sprint.state})` : 'backlog',
+        due: ticket.dueAt ? new Date(ticket.dueAt).toISOString().slice(0, 10) : null,
+        subtickets: (ticket.subtickets ?? []).map((sub) => ({
+          id: sub.id,
+          title: sub.title,
+          state: sub.state,
+          members: sub.members.map((id) => names.get(id) ?? id),
+        })),
+        comments: (state.comments ?? [])
+          .filter((c) => c.ticketId === ticket.id)
+          .map((c) => ({
+            by: `${names.get(c.authorId) ?? 'someone'}${c.byAgent ? "'s Claude" : ''}`,
+            at: new Date(c.createdAt).toISOString(),
+            body: c.body,
+          })),
+      })
+    },
+  )
+
+  server.registerTool(
+    'ss_ticket_comment',
+    {
+      description:
+        'Leave a comment on a ticket: a finding, a decision, a question for the people on it. It stays on the card for the next person or agent who opens it, unlike chat, which scrolls away.',
+      inputSchema: { ticketId: z.string(), body: z.string().min(1).max(8000) },
+    },
+    async ({ ticketId, body }) => {
+      await runCommand(config(), { type: 'comment.add', ticketId: ticketId as never, body, asAgent: true })
+      return text('Commented. It shows on the ticket.')
+    },
+  )
+
+  server.registerTool(
+    'ss_subticket',
+    {
+      description:
+        'Add a subticket to a ticket (give a title and no subticketId), or move one along (give its subticketId and a state). Subtickets are the pieces people tick off; they have no split or leases of their own.',
+      inputSchema: {
+        ticketId: z.string(),
+        subticketId: z.string().nullish(),
+        title: z.string().min(1).max(200).nullish(),
+        state: z.enum(['todo', 'doing', 'done']).nullish(),
+      },
+    },
+    async ({ ticketId, subticketId, title, state }) => {
+      const cfg = config()
+      if (!subticketId) {
+        if (!title) return text('Give a title to add a subticket, or a subticketId to change one.')
+        const { subticket } = await runCommand(cfg, { type: 'subticket.add', ticketId: ticketId as never, title })
+        return text(`Added "${subticket.title}" (${subticket.id}).`)
+      }
+      const { subticket } = await runCommand(cfg, {
+        type: 'subticket.update',
+        ticketId: ticketId as never,
+        subticketId,
+        ...(title ? { title } : {}),
+        ...(state ? { state } : {}),
+      })
+      return text(`"${subticket.title}" is ${subticket.state}.`)
     },
   )
 
@@ -1291,6 +1379,14 @@ if (isEntrypoint) {
    */
   startAutopilot()
   startMirror()
+  // Board terminals, when this machine's owner turned them on. Detached: it outlives this process.
+  if (process.env.SESSION_SHARE_AUTOPILOT !== 'off') {
+    try {
+      ensureTerminalHost(REPO_ROOT)
+    } catch {
+      // A terminal host that cannot start is reported by ss_doctor, never fatal here.
+    }
+  }
   process.stderr.write('[session-share] mcp server ready\n')
 }
 

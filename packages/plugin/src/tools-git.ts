@@ -25,6 +25,15 @@ import {
   writeFiles,
 } from './git.js'
 import { describePreferences, readPreferences, writePreferences, PREFERENCES_FILE } from './preferences.js'
+import {
+  buildOf,
+  ensureTerminalHost,
+  isAlive,
+  readLock,
+  stopTerminalHost,
+  terminalHostEntry,
+  terminalLogFile,
+} from './terminal-launch.js'
 
 /** Files session-share puts in a repo itself, which are never someone's work. */
 const OWN_ARTIFACTS = ['.session-share/', '.claude/', '.mcp.json', '.gitignore']
@@ -47,7 +56,7 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
     'ss_settings',
     {
       description:
-        'Read or change how session-share touches this machine: whether queued work runs itself while you are idle (autopilot) and what it may spend, when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, whether the room can drive this agent, whether the session log is saved to the repository (mirror), whether hosting opens a public tunnel, and whether agents reply tersely to save tokens.',
+        'Read or change how session-share touches this machine: whether queued work runs itself while you are idle (autopilot) and what it may spend, when work is committed, whether branches are pushed, whether pull requests are opened, whether hosting is reachable on the local network, whether the board opens by itself, whether the room can drive this agent, whether the session log is saved to the repository (mirror), whether hosting opens a public tunnel, whether agents reply tersely to save tokens, and whether people in a ticket may open and drive a Claude Code terminal on this machine from the board.',
       inputSchema: {
         commitPolicy: z.enum(['explicit', 'auto-on-green']).nullish(),
         push: z.boolean().nullish(),
@@ -60,6 +69,12 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
         mirror: z.boolean().nullish(),
         tunnel: z.boolean().nullish(),
         terse: z.boolean().nullish(),
+        terminal: z
+          .enum(['off', 'members'])
+          .nullish()
+          .describe(
+            'members: people in a ticket can open a Claude Code in a real terminal on this machine from the board and type into it -- which is running commands here. Off by default.',
+          ),
       },
     },
     async (input) => {
@@ -68,10 +83,17 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
         if (value !== null && value !== undefined) update[key] = value
       }
 
+      const before = readPreferences().terminal
       const preferences =
         Object.keys(update).length > 0
           ? writePreferences({ ...update, configured: true })
           : readPreferences()
+      // The terminal host follows the setting at once, either way.
+      if (preferences.terminal !== before) {
+        const root = await ctx.repoRoot()
+        if (preferences.terminal === 'off') stopTerminalHost(root)
+        else ensureTerminalHost(root)
+      }
 
       return ctx.text(
         `${describePreferences(preferences)}\n\nStored in ${PREFERENCES_FILE}.${
@@ -178,6 +200,18 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
                   : reason === 'token_invalid' || status === 401
                     ? 'session    attached, but the server does not accept this checkout\'s token — it was minted by a different server or a different secret. Join again with a fresh invite'
                     : `session    attached, but the server did not answer: ${message}`,
+        )
+      }
+
+      if (preferences.terminal === 'off') {
+        lines.push('terminal   off -- nobody can open a terminal on this machine from the board')
+      } else {
+        const lock = readLock(root)
+        const entry = terminalHostEntry()
+        lines.push(
+          lock && isAlive(lock.pid)
+            ? `terminal   host running (pid ${lock.pid})${entry && lock.build !== buildOf(entry) ? ' but from an older plugin -- restart Claude Code here to replace it' : ''}`
+            : `terminal   on, but no host is running here -- restart Claude Code in this checkout, and see ${terminalLogFile()}`,
         )
       }
 
