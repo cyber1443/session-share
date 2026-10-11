@@ -178,12 +178,28 @@ git plumbing, so nobody's working tree or checked-out branch is touched. It hold
 everything the board shows, the room included, so on a public repository that
 is public; turn it off with `mirror: false` in `/ss:setup`.
 
-**The board** has four views: the kanban and room; **history**, the whole
+**The board** has five views: the kanban and room; **timeline**, the sprints
+and every ticket laid out in time -- a bar from when work started to when it
+merged (or today), a diamond on the date it is due; **history**, the whole
 project as a timeline with a weekly opened-versus-landed chart; **usage**, what
 each person's own Claude account spent over the project's life, by login, with
 shares weighted by API price ratios and a CSV export for settling up; and
 **github**, open pull requests and recent Actions runs, read by the server with
 its own `gh` sign-in (or `GITHUB_TOKEN`) so no browser holds a token.
+
+A ticket's panel has four tabs. **Overview** is everything above plus an
+editable **description** (up to 20,000 characters; editing one that has already
+been split tells the people building it), its **sprint** and its **due date**.
+**Subtickets** are the pieces people tick off -- `todo`, `doing`, `done` -- each
+with its own members; joining a subticket says "this part is mine" and does not
+put you into the ticket's split. **Comments** stay on the card, unlike chat;
+the agent splitting a ticket is handed its subtickets and latest comments, and
+agents can read and write both with `ss_ticket`, `ss_ticket_comment` and
+`ss_subticket`. **Terminal** is below.
+
+**Sprints** are made and moved along on the timeline: one runs at a time, a
+ticket written while the board is filtered to a sprint lands in it, and
+deleting a sprint sends its tickets back to the backlog.
 
 Tickets can carry **pictures** -- paste, drop or pick mockups and screenshots
 when writing one; the agent that splits it is told to look at them first.
@@ -271,7 +287,7 @@ pnpm install
 pnpm e2e         # the whole product, through the real MCP tools, hook and HTTP
 pnpm peer-demo   # host + guest + a real daemon, no accounts anywhere
 pnpm demo        # the same flow through the hosted (OAuth) path
-pnpm test        # 173 tests
+pnpm test        # 347 tests
 ```
 
 `pnpm e2e` is the one that matters. It hosts, joins, plans from the board, moves
@@ -333,6 +349,26 @@ triggering another, and file leases still apply, so an instruction to edit
 someone else's files is refused exactly as if you had typed it yourself. Turn the
 whole thing off per machine with `/ss:setup`.
 
+### Terminals on the board
+
+A ticket's **terminal** tab opens Claude Code in a real terminal on the machine
+of someone in the ticket -- in their checkout -- and streams it to the board.
+Anyone in the ticket can **take the helm** and type, or **let Claude drive**:
+then nobody types, and work queued for that seat is handed to it (`/ss:go`) as
+it goes idle, the way autopilot would. Anyone in the session can watch; a board
+that opens it late is shown the last screen. One terminal runs per checkout,
+because two Claudes in one working tree overwrite each other, and the headless
+autopilot stands aside while one is open.
+
+Each machine opts in for itself with `terminal: members` in `/ss:setup`. The
+plugin then starts a small **terminal host** beside the checkout, detached like
+the coordination server so closing a window does not end a terminal someone is
+driving. There is no native module: the pseudo-terminal comes from Python's
+standard library, so the machine needs `python3`. The terminal Claude gets the
+same tools and permission mode as an autopilot run, so it does not stall on a
+prompt nobody is there to answer; whoever has the helm answers anything beyond
+them.
+
 ### With your own Claude Code
 
 ```bash
@@ -377,7 +413,7 @@ and once the split is approved and the contract has landed, on every machine:
 |---|---|
 | `/ss:host` | start hosting for this repository, get one string to send |
 | `/ss:join` | attach this checkout to a session |
-| `/ss:setup` | choose what may be committed, pushed and opened on your behalf |
+| `/ss:setup` | choose what may be committed, pushed and opened on your behalf, and whether the board may open terminals here |
 | `/ss:doctor` | check this machine is ready before blaming the session |
 | `/ss:land` | create the session branch and commit the approved contract |
 | `/ss:done` | finish a task: test, commit, push, PR, merge back |
@@ -432,6 +468,16 @@ is open. Behind a tunnel or on Tailscale, pass `publicUrl` to `/ss:host` (or set
 `SESSION_SHARE_PUBLIC_URL`) so the invite carries an address guests can dial. Use `expose: "loopback"` plus a tunnel on an
 untrusted network.
 
+**Board terminals run commands on someone's machine.** With `terminal:
+members` on, anyone who holds the invite and joins a ticket can open a Claude
+Code on that machine and type into it -- with edits and Bash allowed -- and in
+peer mode nothing verifies who they are. It is off by default and per machine.
+Input is taken only from whoever holds the helm, the helm only goes to people in
+the ticket or the machine's owner, the owner sees every terminal and can stop
+it, and who opened each terminal and who held the helm when is written to the
+session log (the bytes are not). Do not turn it on for a session whose invite
+you would not hand someone your laptop with.
+
 **The lease gate fails open.** If the coordination server is unreachable, edits
 proceed unchecked. A missed check costs a merge conflict; a false block wedges a
 developer, and that is the worse failure.
@@ -458,4 +504,5 @@ only, and never gains write access to a repository.
 - Presence is in memory. A task can be taken back from someone who has gone quiet for ten minutes -- *take it back* on the card, or `ss_release` with `abandoned: true` -- but a server restart starts that clock again for everyone.
 - **Bash writes are not gated.** The lease gate sees Edit, Write, MultiEdit and NotebookEdit. An agent that writes with `sed -i`, `>` or `mv` goes around it. Telling a shell write from a read reliably is not possible from a command string, and a gate that guesses wrong blocks people, so this is left to the agent's instructions and to `/ss:done`, which commits only the task's own paths.
 - Room directives reach an idle agent through autopilot, which lives in the plugin's MCP server: if that person's Claude Code is closed, nothing runs until they open it. The board says which case it is.
+- A board terminal is a live stream, not a recording: a server restart ends every terminal, and only the last 256 kB of a screen is kept for a board that opens it late.
 - Usage is self-reported by each person's plugin from their own transcripts. A checkout with the hooks turned off reports nothing; it is a fair guide for splitting money, not an audit.
