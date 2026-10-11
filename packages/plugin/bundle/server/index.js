@@ -64752,6 +64752,24 @@ function autoAssign(input) {
 // packages/protocol/dist/projection.js
 var ACTIVE_STATES = /* @__PURE__ */ new Set(["claimed", "running", "testing", "failed"]);
 var CLAIM_CAP = 1;
+function completeTicket(ticket) {
+  return {
+    ...ticket,
+    body: ticket.body ?? "",
+    members: ticket.members ?? [],
+    verification: ticket.verification ?? null,
+    decompositionId: ticket.decompositionId ?? null,
+    prNumber: ticket.prNumber ?? null,
+    mergedAt: ticket.mergedAt ?? null,
+    attachments: ticket.attachments ?? [],
+    needsHuman: ticket.needsHuman ?? false,
+    humanCheck: ticket.humanCheck ?? null,
+    subtickets: ticket.subtickets ?? [],
+    sprintId: ticket.sprintId ?? null,
+    dueAt: ticket.dueAt ?? null,
+    startedAt: ticket.startedAt ?? null
+  };
+}
 var SessionState = class {
   session = null;
   seq = -1;
@@ -64834,13 +64852,7 @@ var SessionState = class {
         break;
       }
       case "ticket.created":
-        this.tickets.set(body.ticket.id, {
-          ...body.ticket,
-          subtickets: body.ticket.subtickets ?? [],
-          sprintId: body.ticket.sprintId ?? null,
-          dueAt: body.ticket.dueAt ?? null,
-          startedAt: body.ticket.startedAt ?? null
-        });
+        this.tickets.set(body.ticket.id, completeTicket(body.ticket));
         break;
       case "ticket.members": {
         const ticket = this.tickets.get(body.ticketId);
@@ -65342,13 +65354,7 @@ var SessionState = class {
     }
     this.tickets.clear();
     for (const ticket of snapshot.tickets ?? []) {
-      this.tickets.set(ticket.id, {
-        ...ticket,
-        subtickets: ticket.subtickets ?? [],
-        sprintId: ticket.sprintId ?? null,
-        dueAt: ticket.dueAt ?? null,
-        startedAt: ticket.startedAt ?? null
-      });
+      this.tickets.set(ticket.id, completeTicket(ticket));
     }
     this.decompositions.clear();
     this.validations.clear();
