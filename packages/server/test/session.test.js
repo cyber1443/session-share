@@ -1683,3 +1683,43 @@ describe('what it cost and who is still here', () => {
     await alice.send({ type: 'session.sync', fromSeq: 0 })
   })
 })
+
+describe('daily summaries', () => {
+  it('writes up yesterday from the server clock, even when no Claude was open at midnight', async () => {
+    const { alice, aliceId } = await twoDevSession('daily-summary')
+    await alice.send({ type: 'ticket.create', title: 'Add due dates', body: '' })
+    await settle()
+    const sessionId = app.store.findSessionIdByRef('daily-summary')
+    const day = new Date().toISOString().slice(0, 10)
+    const asks = () =>
+      app.service
+        .state(sessionId)
+        .snapshot()
+        .chat.filter((message) => message.directive && message.body.includes(`daily summary of this session for ${day}`))
+
+    const realNow = Date.now
+    const tomorrow = realNow() + 24 * 60 * 60 * 1000
+    Date.now = () => tomorrow
+    try {
+      // A day later nobody has been seen: the counts are kept, nobody is asked.
+      app.service.sweepSummaries()
+      await settle()
+      let summary = app.service.state(sessionId).summaries.get(day)
+      assert.ok(summary, 'yesterday has a summary')
+      assert.deepEqual(summary.digest.opened, ['Add due dates'])
+      assert.equal(summary.writerId, null)
+      assert.equal(asks().length, 0)
+
+      // A Claude turns up: the next sweep asks it, once.
+      app.service.lastSeen.set(aliceId, tomorrow)
+      app.service.sweepSummaries()
+      app.service.sweepSummaries()
+      await settle()
+      summary = app.service.state(sessionId).summaries.get(day)
+      assert.equal(summary.writerId, aliceId)
+      assert.equal(asks().length, 1, 'asked once, not on every sweep')
+    } finally {
+      Date.now = realNow
+    }
+  })
+})

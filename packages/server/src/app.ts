@@ -208,6 +208,9 @@ export function createApp(options: AppOptions = {}): App {
   )
   gateway.attach(service)
   service.hostMachineId = options.hostMachineId ?? null
+  // Yesterday is written up without waiting for anyone to touch the board.
+  const summaries = setInterval(() => service.sweepSummaries(), 10 * 60 * 1000)
+  summaries.unref()
   const terminals = new Terminals(auth, store, service)
   fastify.server.on('upgrade', (request, socket, head) => {
     const path = (request.url ?? '').split('?')[0]
@@ -1023,6 +1026,7 @@ export function createApp(options: AppOptions = {}): App {
       return fastify.listen({ port, host })
     },
     async close() {
+      clearInterval(summaries)
       await terminals.close()
       await gateway.close()
       await fastify.close()

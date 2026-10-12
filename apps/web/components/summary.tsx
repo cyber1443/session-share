@@ -75,8 +75,9 @@ function SummaryCard({ summary, snapshot }: { summary: DailySummary; snapshot: S
 
 /**
  * One card per day: what the server counted, and the host's Claude's read of
- * where the project stands. Yesterday is written up on its own once someone's
- * Claude is open; "summarize today" asks for one now.
+ * where the project stands. Yesterday is written up on its own every day --
+ * the counts at once, the write-up when a Claude is open; "summarize today"
+ * asks for one now.
  */
 export function SummaryView({ snapshot, send }: { snapshot: SessionSnapshot; send: Send }) {
   const [asking, setAsking] = useState(false)
@@ -102,8 +103,9 @@ export function SummaryView({ snapshot, send }: { snapshot: SessionSnapshot; sen
           summarize today
         </button>
         <p className="text-mute">
-          Written by the host&apos;s Claude, on the host&apos;s account. Yesterday is summarized on its own after
-          00:00 UTC if anything happened.
+          Written by the host&apos;s Claude, on the host&apos;s account. Every day after 00:00 UTC
+          yesterday is summarized on its own if anything happened; with no Claude open, the counts are kept and
+          the write-up follows when one opens.
         </p>
       </div>
       {error ? <p className="mt-2 text-red-400">{error}</p> : null}

@@ -3415,25 +3415,48 @@ export class SessionService {
   }
 
   /**
-   * Once a day, on the first beat that finds a writer, yesterday is written
-   * up -- if anything happened in it. A quiet day gets no summary.
+   * Once a day yesterday is written up, if anything happened in it. The digest
+   * is recorded on the first beat whatever is open; the write-up is asked of the
+   * first Claude that turns up, so a day nobody's terminal was open for still
+   * gets one. A quiet day gets no summary.
    */
   private dailySummary(sessionId: SessionId): void {
     const today = usageDay(Date.now())
     if (this.summarized.get(sessionId) === today) return
     const state = this.state(sessionId)
     const yesterday = usageDay(Date.now() - 24 * 60 * 60 * 1000)
-    if (state.summaries.has(yesterday)) {
+    const existing = state.summaries.get(yesterday)
+    // Written, or a Claude has already been asked for it.
+    if (existing?.narrative || existing?.writerId) {
       this.summarized.set(sessionId, today)
       return
     }
-    if (!this.summaryWriter(state)) return
-    const digest = this.digestFor(sessionId, yesterday)
-    const quiet =
-      digest.opened.length + digest.shipped.length + digest.tasksMerged + digest.verifiedPassed +
-        digest.verifiedFailed + digest.messages + digest.spend.length === 0
-    if (quiet) this.summarized.set(sessionId, today)
-    else this.requestSummary(sessionId, null, yesterday)
+    if (!existing) {
+      const digest = this.digestFor(sessionId, yesterday)
+      const quiet =
+        digest.opened.length + digest.shipped.length + digest.tasksMerged + digest.verifiedPassed +
+          digest.verifiedFailed + digest.messages + digest.spend.length === 0
+      if (quiet) {
+        this.summarized.set(sessionId, today)
+        return
+      }
+    } else if (!this.summaryWriter(state)) {
+      return
+    }
+    const summary = this.requestSummary(sessionId, null, yesterday)
+    // Only the digest so far: keep looking for a Claude to write it up.
+    if (!summary.writerId) this.summarized.delete(sessionId)
+  }
+
+  /** Every session's daily summary, from the server's own clock rather than a checkout's beat. */
+  sweepSummaries(): void {
+    for (const sessionId of this.store.listSessionIds()) {
+      try {
+        this.dailySummary(sessionId)
+      } catch {
+        // One broken session must not stop the others being written up.
+      }
+    }
   }
 
   private postSummary(command: Extract<ClientCommand, { type: 'summary.post' }>, ctx: CommandContext) {
