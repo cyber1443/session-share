@@ -55,6 +55,18 @@ describe('SessionState.apply', () => {
     assert.equal(state.seq, 2)
   })
 
+  it('hands out a new chat array once a message arrives', () => {
+    const state = new SessionState()
+    state.apply(envelope(0, { type: 'session.created', session: SESSION }))
+    const before = state.snapshot().chat
+    state.apply(chat(1, 'hello'))
+    const after = state.snapshot().chat
+
+    assert.notEqual(after, before, 'a board memoized on the array would never show the message')
+    assert.equal(before.length, 0)
+    assert.equal(after.length, 1)
+  })
+
   it('applies a fresh event normally', () => {
     const state = new SessionState()
     state.apply(envelope(0, { type: 'session.created', session: SESSION }))
