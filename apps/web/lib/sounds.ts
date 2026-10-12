@@ -20,13 +20,26 @@ const GAP_MS = 400
 let context: AudioContext | null = null
 
 /**
+ * Browsers only let audio start from a click or a key press. A sound is played
+ * from a socket event, which is neither, so the context is made and resumed on
+ * the first interaction with the page and is ready by the time one arrives.
+ */
+function unlock(): void {
+  try {
+    context ??= new AudioContext()
+    if (context.state === 'suspended') void context.resume()
+  } catch {
+    // No audio on this machine.
+  }
+}
+
+/**
  * Synthesized rather than shipped as files: the plugin bundle stays small and
  * there is nothing to fetch with a seat's token first.
  */
 function play(sound: Sound): void {
   if (typeof window === 'undefined') return
   context ??= new AudioContext()
-  // Browsers start it suspended until the page has been clicked.
   if (context.state === 'suspended') void context.resume()
   const { wave, gain, notes } = NOTES[sound]
   const start = context.currentTime + 0.01
@@ -92,6 +105,15 @@ export function useSounds() {
       setOn(window.localStorage.getItem(STORAGE_KEY) !== 'off')
     } catch {
       // Storage blocked: sounds stay on for this visit.
+    }
+    const events = ['pointerdown', 'keydown'] as const
+    const once = () => {
+      unlock()
+      if (context?.state === 'running') for (const name of events) window.removeEventListener(name, once)
+    }
+    for (const name of events) window.addEventListener(name, once)
+    return () => {
+      for (const name of events) window.removeEventListener(name, once)
     }
   }, [])
 
