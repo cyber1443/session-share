@@ -14834,7 +14834,13 @@ var Ticket = external_exports.object({
    * card has existed.
    */
   startedAt: Timestamp.nullable().default(null),
+  /** The ticket whose verification turned this one up, when it came from one. */
+  followUpOf: TicketId.nullable().default(null),
   createdAt: Timestamp
+});
+var FollowUp = external_exports.object({
+  title: external_exports.string().trim().min(1).max(200),
+  body: external_exports.string().max(4e3).default("")
 });
 var TicketComment = external_exports.object({
   id: external_exports.string().min(1).max(64),
@@ -15053,6 +15059,45 @@ var Usage = external_exports.object({
   /** Assistant turns counted, so an average is available. */
   turns: external_exports.number().int().nonnegative().default(0)
 });
+var Profile = external_exports.object({
+  login: external_exports.string().min(1),
+  /**
+   * Weighted units (see USAGE_WEIGHT) this person's Claude may spend on the
+   * session per UTC day. Past it their seats count as out of usage: their
+   * unstarted work is handed on, and nothing more is handed to them until the
+   * day turns over. Null is no limit.
+   */
+  dailyLimit: external_exports.number().int().positive().nullable().default(null),
+  updatedAt: Timestamp
+});
+var DailySpend = external_exports.object({
+  login: external_exports.string().min(1),
+  day: external_exports.string(),
+  units: external_exports.number().nonnegative()
+});
+var Digest = external_exports.object({
+  day: external_exports.string(),
+  opened: external_exports.array(external_exports.string()).default([]),
+  shipped: external_exports.array(external_exports.string()).default([]),
+  tasksMerged: external_exports.number().int().nonnegative().default(0),
+  verifiedPassed: external_exports.number().int().nonnegative().default(0),
+  verifiedFailed: external_exports.number().int().nonnegative().default(0),
+  followUps: external_exports.array(external_exports.string()).default([]),
+  messages: external_exports.number().int().nonnegative().default(0),
+  spend: external_exports.array(external_exports.object({ login: external_exports.string(), units: external_exports.number().nonnegative() })).default([]),
+  /** Tickets by board column at the time the digest was taken. */
+  columns: external_exports.record(external_exports.string(), external_exports.number().int().nonnegative()).default({})
+});
+var DailySummary = external_exports.object({
+  day: external_exports.string(),
+  digest: Digest,
+  /** Whose Claude was asked to write it; null when nobody could be. */
+  writerId: ParticipantId.nullable().default(null),
+  /** Markdown from the writer's Claude; null until it is posted. */
+  narrative: external_exports.string().nullable().default(null),
+  requestedAt: Timestamp,
+  postedAt: Timestamp.nullable().default(null)
+});
 var MergeQueueEntry = external_exports.object({
   taskId: TaskId,
   position: external_exports.number().int().nonnegative(),
@@ -15091,6 +15136,11 @@ var SessionSnapshot = external_exports.object({
   handoffs: external_exports.array(HandoffRequest),
   chat: external_exports.array(ChatMessage),
   usage: external_exports.array(Usage).default([]),
+  profiles: external_exports.array(Profile).default([]),
+  /** Today's spend by login, for daily limits; a stale day reads as zero. */
+  spentToday: external_exports.array(DailySpend).default([]),
+  /** The most recent daily summaries, oldest first. */
+  summaries: external_exports.array(DailySummary).default([]),
   comments: external_exports.array(TicketComment).default([]),
   sprints: external_exports.array(Sprint).default([]),
   mergeQueue: external_exports.array(MergeQueueEntry),
@@ -15207,6 +15257,13 @@ var EventBody = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("sprint.updated"), sprint: Sprint }),
   /** Its tickets go back to the backlog; nothing else about them changes. */
   external_exports.object({ type: external_exports.literal("sprint.deleted"), sprintId: external_exports.string().min(1) }),
+  // -- profiles -------------------------------------------------------------
+  /** A person's profile as it now stands, whole. */
+  external_exports.object({ type: external_exports.literal("profile.updated"), profile: Profile }),
+  // -- summaries ------------------------------------------------------------
+  /** A day's digest was taken and, when someone could, a write-up asked for. */
+  external_exports.object({ type: external_exports.literal("summary.requested"), summary: DailySummary }),
+  external_exports.object({ type: external_exports.literal("summary.posted"), day: external_exports.string(), narrative: external_exports.string() }),
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
   external_exports.object({
@@ -15451,7 +15508,13 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     how: external_exports.string().max(500),
     summary: external_exports.string().max(2e3),
     /** Failing: whose tasks to reopen. Empty reopens the lot. */
-    broke: external_exports.array(TaskId).default([])
+    broke: external_exports.array(TaskId).default([]),
+    /**
+     * What the run turned up that is not this ticket's to fix: unknowns,
+     * things that need checking, bugs elsewhere. Each becomes a ticket in the
+     * plan column, linked back here. Never started on its own.
+     */
+    followUps: external_exports.array(FollowUp).max(10).default([])
   }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
@@ -15503,6 +15566,23 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     state: SprintState.optional()
   }),
   external_exports.object({ type: external_exports.literal("sprint.delete"), sprintId: external_exports.string().min(1) }),
+  /**
+   * The caller's own profile. Only ever their own: the login comes from who is
+   * asking, so nobody can set a limit on someone else's account.
+   */
+  external_exports.object({
+    type: external_exports.literal("profile.update"),
+    /** Weighted units per UTC day; null removes the limit. */
+    dailyLimit: external_exports.number().int().min(1e3).max(1e11).nullable()
+  }),
+  /** Take a digest of a UTC day now and ask the host's Claude to write it up. Defaults to today. */
+  external_exports.object({ type: external_exports.literal("summary.request"), day: external_exports.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().default(null) }),
+  /** The write-up for a day, from the Claude that was asked for it. */
+  external_exports.object({
+    type: external_exports.literal("summary.post"),
+    day: external_exports.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    narrative: external_exports.string().trim().min(1).max(8e3)
+  }),
   /**
    * Ask for a split from the board. Planning needs a repo and a model, neither
    * of which the browser has -- so this hands the brief to a participant's
@@ -16050,10 +16130,11 @@ function readPreferences() {
 }
 var TERSE_STYLE = [
   "session-share asks for terse replies in this repository, to save tokens:",
-  "no preamble, no restating the task, no recap of what you just did unless asked;",
-  "short sentences, fragments are fine, drop filler words.",
-  "Code, commit messages, PR text and anything written to files stay normal and complete.",
-  "Security warnings and questions that need a decision stay clear and complete."
+  "drop articles, filler, pleasantries and hedging; fragments are fine; short words over long ones;",
+  'pattern "[thing] [action] [reason]. [next step]."; no preamble, no restating the task, no recap unless asked.',
+  "Technical terms, code, error text, commit messages, PR text and anything written to files stay exact, normal and complete.",
+  "Code comments only where the why is not obvious from the code: no comments narrating what a line does, no changelog comments, no commented-out code.",
+  "Security warnings, irreversible actions and questions that need a decision stay clear and complete."
 ].join(" ");
 
 // packages/plugin/src/usage.ts
@@ -16126,6 +16207,60 @@ function usageSince(transcriptPath) {
   }
   writeOffset(transcriptPath, consumed);
   return delta;
+}
+
+// packages/plugin/src/conventions.ts
+var COMMIT_TYPES = ["feat", "fix", "refactor", "perf", "test", "docs", "build", "ci", "chore", "style", "revert"];
+var SUBJECT_MAX = 72;
+var CONVENTIONAL = new RegExp(`^(${COMMIT_TYPES.join("|")})(\\([a-z0-9._/-]+\\))?!?: \\S.*$`);
+function subjectProblem(subject) {
+  if (!CONVENTIONAL.test(subject)) {
+    return `"${subject}" is not a Conventional Commit. Use "<type>(<scope>): <subject>", type one of ${COMMIT_TYPES.join(", ")}.`;
+  }
+  if (subject.length > SUBJECT_MAX) return `"${subject}" is longer than ${SUBJECT_MAX} characters.`;
+  if (subject.endsWith(".")) return `"${subject}" ends with a period.`;
+  return null;
+}
+var GIT_CONVENTIONS = [
+  "session-share git rules for this repository:",
+  "Branches are made by the session tools only: the contract lives on ss/<session>/contract and each task on ss/<session>/<task-id>. Do not create, rename or switch to other branches, and never commit on the contract or base branch directly.",
+  "Commits are atomic: one logical change each, staged by explicit path (no `git add -A`, `git add .` or `git commit -a`). Unrelated changes go in separate commits.",
+  `Messages are Conventional Commits: "<type>(<scope>): <subject>", type one of ${COMMIT_TYPES.join(", ")}; imperative, lowercase, no period, at most ${SUBJECT_MAX} characters. Use the task id as the scope.`,
+  "Finish with ss_done; pass `commits` to land several atomic commits instead of one."
+].join(" ");
+function messageOf(command) {
+  const match = /(?:^|\s)(?:-m|--message)(?:=|\s+)("((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+))/.exec(command);
+  if (!match) return null;
+  return (match[2] ?? match[3] ?? match[4] ?? "").replace(/\\"/g, '"');
+}
+function gitCommandProblem(command) {
+  for (const part of command.split(/&&|\|\||;|\n/)) {
+    const words = part.trim().split(/\s+/);
+    const at = words.indexOf("git");
+    if (at === -1) continue;
+    let i = at + 1;
+    while (i < words.length && words[i].startsWith("-")) i += words[i] === "-c" || words[i] === "-C" ? 2 : 1;
+    const [verb, ...rest] = words.slice(i);
+    const args = rest.join(" ");
+    if (verb === "add" && /(^|\s)(-A|--all|\.|:\/)(\s|$)/.test(args)) {
+      return "Stage files by explicit path so each commit holds one logical change; `git add -A` and `git add .` sweep in everything.";
+    }
+    if (verb === "commit") {
+      if (/(^|\s)(-a|--all|-am|-[a-z]*a[a-z]*m)(\s|$)/.test(args)) {
+        return "Stage by path and commit without -a, so each commit holds one logical change.";
+      }
+      const message = messageOf(part);
+      if (message !== null) {
+        const problem = subjectProblem(message.split("\n")[0].trim());
+        if (problem) return problem;
+      }
+    }
+    const created = verb === "checkout" && /(^|\s)-[bB](\s|$)/.test(args) && rest[rest.findIndex((w) => /^-[bB]$/.test(w)) + 1] || verb === "switch" && /(^|\s)(-c|-C|--create)(\s|$)/.test(args) && rest[rest.findIndex((w) => /^(-c|-C|--create)$/.test(w)) + 1] || verb === "branch" && rest.length > 0 && !rest[0].startsWith("-") && rest[0];
+    if (created && !created.startsWith("ss/")) {
+      return `Branches belong to the session tools (ss/<session>/<task-id>); "${created}" would be off the session's branching. Use ss_claim or ss_worktree instead.`;
+    }
+  }
+  return null;
 }
 
 // packages/plugin/src/hook.ts
@@ -16230,12 +16365,13 @@ async function collectRoom(input) {
 }
 async function reportUsage(input) {
   const config2 = readConfig(input.cwd ?? process.cwd());
-  if (!config2) return;
+  if (!config2) return false;
   const delta = usageSince(input.transcript_path);
-  if (delta.inputTokens + delta.outputTokens === 0) return;
   try {
-    await runCommand(config2, { type: "usage.report", ...delta }, ROOM_TIMEOUT_MS);
+    const result = await runCommand(config2, { type: "usage.report", ...delta }, ROOM_TIMEOUT_MS);
+    return result.overLimit === true;
   } catch {
+    return false;
   }
 }
 async function route(input) {
@@ -16245,6 +16381,12 @@ async function route(input) {
       if (input.tool_name === "Bash") {
         const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
         const said = typeof input.tool_input?.description === "string" ? input.tool_input.description : "";
+        const problem = readConfig(input.cwd ?? process.cwd()) ? gitCommandProblem(command) : null;
+        if (problem) {
+          return {
+            hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: problem }
+          };
+        }
         await reportDoing(input, `running ${said ? `${said}: ` : ""}${command}`);
         return null;
       }
@@ -16255,9 +16397,9 @@ async function route(input) {
      * continue with the directive as its instruction.
      */
     case "Stop": {
-      await reportUsage(input);
+      const overLimit = await reportUsage(input);
       const config2 = readConfig(input.cwd ?? process.cwd());
-      const reason = input.stop_hook_active ? null : await collectRoom(input);
+      const reason = input.stop_hook_active || overLimit ? null : await collectRoom(input);
       if (config2 && !reason && process.env.SESSION_SHARE_AUTOPILOT !== "child") markIdle(config2.repoPath);
       await reportDoing(input, reason ? "picking up an instruction from the room" : "idle -- waiting for the next prompt");
       return reason ? { decision: "block", reason } : null;
@@ -16274,8 +16416,9 @@ async function route(input) {
         await reportDoing(input, `on: ${first}`);
       }
       const room = await collectRoom(input);
-      const style = event === "SessionStart" && readConfig(input.cwd ?? process.cwd()) && readPreferences().terse ? TERSE_STYLE : null;
-      const additionalContext = [style, room].filter(Boolean).join("\n\n");
+      const starting = event === "SessionStart" && readConfig(input.cwd ?? process.cwd());
+      const style = starting && readPreferences().terse ? TERSE_STYLE : null;
+      const additionalContext = [style, starting ? GIT_CONVENTIONS : null, room].filter(Boolean).join("\n\n");
       return additionalContext ? { hookSpecificOutput: { hookEventName: event, additionalContext } } : null;
     }
     default:

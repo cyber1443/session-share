@@ -63357,7 +63357,13 @@ var Ticket = external_exports.object({
    * card has existed.
    */
   startedAt: Timestamp.nullable().default(null),
+  /** The ticket whose verification turned this one up, when it came from one. */
+  followUpOf: TicketId.nullable().default(null),
   createdAt: Timestamp
+});
+var FollowUp = external_exports.object({
+  title: external_exports.string().trim().min(1).max(200),
+  body: external_exports.string().max(4e3).default("")
 });
 var TicketComment = external_exports.object({
   id: external_exports.string().min(1).max(64),
@@ -63576,6 +63582,52 @@ var Usage = external_exports.object({
   /** Assistant turns counted, so an average is available. */
   turns: external_exports.number().int().nonnegative().default(0)
 });
+var USAGE_WEIGHT = { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.1 };
+function weightedUnits(u) {
+  return u.inputTokens * USAGE_WEIGHT.input + u.outputTokens * USAGE_WEIGHT.output + u.cacheCreationTokens * USAGE_WEIGHT.cacheWrite + u.cacheReadTokens * USAGE_WEIGHT.cacheRead;
+}
+function usageDay(ts) {
+  return new Date(ts).toISOString().slice(0, 10);
+}
+var Profile = external_exports.object({
+  login: external_exports.string().min(1),
+  /**
+   * Weighted units (see USAGE_WEIGHT) this person's Claude may spend on the
+   * session per UTC day. Past it their seats count as out of usage: their
+   * unstarted work is handed on, and nothing more is handed to them until the
+   * day turns over. Null is no limit.
+   */
+  dailyLimit: external_exports.number().int().positive().nullable().default(null),
+  updatedAt: Timestamp
+});
+var DailySpend = external_exports.object({
+  login: external_exports.string().min(1),
+  day: external_exports.string(),
+  units: external_exports.number().nonnegative()
+});
+var Digest = external_exports.object({
+  day: external_exports.string(),
+  opened: external_exports.array(external_exports.string()).default([]),
+  shipped: external_exports.array(external_exports.string()).default([]),
+  tasksMerged: external_exports.number().int().nonnegative().default(0),
+  verifiedPassed: external_exports.number().int().nonnegative().default(0),
+  verifiedFailed: external_exports.number().int().nonnegative().default(0),
+  followUps: external_exports.array(external_exports.string()).default([]),
+  messages: external_exports.number().int().nonnegative().default(0),
+  spend: external_exports.array(external_exports.object({ login: external_exports.string(), units: external_exports.number().nonnegative() })).default([]),
+  /** Tickets by board column at the time the digest was taken. */
+  columns: external_exports.record(external_exports.string(), external_exports.number().int().nonnegative()).default({})
+});
+var DailySummary = external_exports.object({
+  day: external_exports.string(),
+  digest: Digest,
+  /** Whose Claude was asked to write it; null when nobody could be. */
+  writerId: ParticipantId.nullable().default(null),
+  /** Markdown from the writer's Claude; null until it is posted. */
+  narrative: external_exports.string().nullable().default(null),
+  requestedAt: Timestamp,
+  postedAt: Timestamp.nullable().default(null)
+});
 var MergeQueueEntry = external_exports.object({
   taskId: TaskId,
   position: external_exports.number().int().nonnegative(),
@@ -63614,6 +63666,11 @@ var SessionSnapshot = external_exports.object({
   handoffs: external_exports.array(HandoffRequest),
   chat: external_exports.array(ChatMessage),
   usage: external_exports.array(Usage).default([]),
+  profiles: external_exports.array(Profile).default([]),
+  /** Today's spend by login, for daily limits; a stale day reads as zero. */
+  spentToday: external_exports.array(DailySpend).default([]),
+  /** The most recent daily summaries, oldest first. */
+  summaries: external_exports.array(DailySummary).default([]),
   comments: external_exports.array(TicketComment).default([]),
   sprints: external_exports.array(Sprint).default([]),
   mergeQueue: external_exports.array(MergeQueueEntry),
@@ -63730,6 +63787,13 @@ var EventBody = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("sprint.updated"), sprint: Sprint }),
   /** Its tickets go back to the backlog; nothing else about them changes. */
   external_exports.object({ type: external_exports.literal("sprint.deleted"), sprintId: external_exports.string().min(1) }),
+  // -- profiles -------------------------------------------------------------
+  /** A person's profile as it now stands, whole. */
+  external_exports.object({ type: external_exports.literal("profile.updated"), profile: Profile }),
+  // -- summaries ------------------------------------------------------------
+  /** A day's digest was taken and, when someone could, a write-up asked for. */
+  external_exports.object({ type: external_exports.literal("summary.requested"), summary: DailySummary }),
+  external_exports.object({ type: external_exports.literal("summary.posted"), day: external_exports.string(), narrative: external_exports.string() }),
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
   external_exports.object({
@@ -63974,7 +64038,13 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     how: external_exports.string().max(500),
     summary: external_exports.string().max(2e3),
     /** Failing: whose tasks to reopen. Empty reopens the lot. */
-    broke: external_exports.array(TaskId).default([])
+    broke: external_exports.array(TaskId).default([]),
+    /**
+     * What the run turned up that is not this ticket's to fix: unknowns,
+     * things that need checking, bugs elsewhere. Each becomes a ticket in the
+     * plan column, linked back here. Never started on its own.
+     */
+    followUps: external_exports.array(FollowUp).max(10).default([])
   }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
@@ -64026,6 +64096,23 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     state: SprintState.optional()
   }),
   external_exports.object({ type: external_exports.literal("sprint.delete"), sprintId: external_exports.string().min(1) }),
+  /**
+   * The caller's own profile. Only ever their own: the login comes from who is
+   * asking, so nobody can set a limit on someone else's account.
+   */
+  external_exports.object({
+    type: external_exports.literal("profile.update"),
+    /** Weighted units per UTC day; null removes the limit. */
+    dailyLimit: external_exports.number().int().min(1e3).max(1e11).nullable()
+  }),
+  /** Take a digest of a UTC day now and ask the host's Claude to write it up. Defaults to today. */
+  external_exports.object({ type: external_exports.literal("summary.request"), day: external_exports.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().default(null) }),
+  /** The write-up for a day, from the Claude that was asked for it. */
+  external_exports.object({
+    type: external_exports.literal("summary.post"),
+    day: external_exports.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    narrative: external_exports.string().trim().min(1).max(8e3)
+  }),
   /**
    * Ask for a split from the board. Planning needs a repo and a model, neither
    * of which the browser has -- so this hands the brief to a participant's
@@ -64752,6 +64839,7 @@ function autoAssign(input) {
 // packages/protocol/dist/projection.js
 var ACTIVE_STATES = /* @__PURE__ */ new Set(["claimed", "running", "testing", "failed"]);
 var CLAIM_CAP = 1;
+var SNAPSHOT_SUMMARIES = 30;
 function completeTicket(ticket) {
   return {
     ...ticket,
@@ -64767,7 +64855,8 @@ function completeTicket(ticket) {
     subtickets: ticket.subtickets ?? [],
     sprintId: ticket.sprintId ?? null,
     dueAt: ticket.dueAt ?? null,
-    startedAt: ticket.startedAt ?? null
+    startedAt: ticket.startedAt ?? null,
+    followUpOf: ticket.followUpOf ?? null
   };
 }
 var SessionState = class {
@@ -64796,6 +64885,12 @@ var SessionState = class {
   chat = [];
   /** Keyed by `participant|ticket`, so both totals fall out of one map. */
   usage = /* @__PURE__ */ new Map();
+  /** Keyed by lowercase login: one profile per person, whatever seats they hold. */
+  profiles = /* @__PURE__ */ new Map();
+  /** What each login spent on the latest day it spent anything, in weighted units. */
+  spentToday = /* @__PURE__ */ new Map();
+  /** Keyed by UTC day, in the order they were taken. */
+  summaries = /* @__PURE__ */ new Map();
   /** Insertion-ordered, which is the order a ticket shows them. */
   comments = /* @__PURE__ */ new Map();
   sprints = /* @__PURE__ */ new Map();
@@ -65134,6 +65229,26 @@ var SessionState = class {
           cacheCreationTokens: at.cacheCreationTokens + body.cacheCreationTokens,
           turns: at.turns + body.turns
         });
+        const login = this.participants.get(body.participantId)?.githubLogin.toLowerCase();
+        if (login) {
+          const day = usageDay(envelope.ts);
+          const was = this.spentToday.get(login);
+          const before = was?.day === day ? was.units : 0;
+          this.spentToday.set(login, { login, day, units: before + weightedUnits(body) });
+        }
+        break;
+      }
+      case "profile.updated":
+        this.profiles.set(body.profile.login, body.profile);
+        break;
+      case "summary.requested":
+        this.summaries.delete(body.summary.day);
+        this.summaries.set(body.summary.day, body.summary);
+        break;
+      case "summary.posted": {
+        const summary = this.summaries.get(body.day);
+        if (summary)
+          this.summaries.set(body.day, { ...summary, narrative: body.narrative, postedAt: envelope.ts });
         break;
       }
       case "merge.queue":
@@ -65333,6 +65448,16 @@ var SessionState = class {
       return "plan";
     return tasks.every((task) => task.state === "merged") ? "integrate" : "build";
   }
+  /** Weighted units a login has spent on the session so far today (UTC). */
+  spentOn(login, now = Date.now()) {
+    const spend = this.spentToday.get(login.toLowerCase());
+    return spend && spend.day === usageDay(now) ? spend.units : 0;
+  }
+  /** Whether a login has reached the daily limit it set for itself. */
+  overDailyLimit(login, now = Date.now()) {
+    const limit = this.profiles.get(login.toLowerCase())?.dailyLimit ?? null;
+    return limit !== null && this.spentOn(login, now) >= limit;
+  }
   /** Tasks whose blocked/ready state no longer matches their dependencies. */
   staleStateTasks() {
     return [...this.tasks.values()].filter((task) => {
@@ -65395,6 +65520,15 @@ var SessionState = class {
     this.comments.clear();
     for (const comment of snapshot.comments ?? [])
       this.comments.set(comment.id, comment);
+    this.profiles.clear();
+    for (const profile of snapshot.profiles ?? [])
+      this.profiles.set(profile.login, profile);
+    this.spentToday.clear();
+    for (const spend of snapshot.spentToday ?? [])
+      this.spentToday.set(spend.login, spend);
+    this.summaries.clear();
+    for (const summary of snapshot.summaries ?? [])
+      this.summaries.set(summary.day, summary);
     this.sprints.clear();
     for (const sprint of snapshot.sprints ?? [])
       this.sprints.set(sprint.id, sprint);
@@ -65427,6 +65561,9 @@ var SessionState = class {
       handoffs: [...this.handoffs.values()],
       chat: this.chat,
       usage: [...this.usage.values()],
+      profiles: [...this.profiles.values()],
+      spentToday: [...this.spentToday.values()],
+      summaries: [...this.summaries.values()].slice(-SNAPSHOT_SUMMARIES),
       comments: [...this.comments.values()],
       sprints: [...this.sprints.values()],
       mergeQueue: this.mergeQueue,
@@ -66011,6 +66148,13 @@ var SessionService = class {
   /** What each seat's Claude is doing now. Memory only; see Doing. */
   doing = /* @__PURE__ */ new Map();
   /**
+   * The machine the server runs on. Its owner hosts the session, and the host's
+   * Claude is the one that writes the daily summaries -- the host pays for them.
+   */
+  hostMachineId = null;
+  /** The last day each session was checked for a missing summary, so the log is scanned once a day. */
+  summarized = /* @__PURE__ */ new Map();
+  /**
    * Told when something boards show live (but that is not an event) changed,
    * so it reaches them now rather than on the next heartbeat. Set by the gateway.
    */
@@ -66117,7 +66261,8 @@ var SessionService = class {
           passed: false,
           how: `checked by hand by ${by}`,
           summary: command.note || "It does not work when tried by hand.",
-          broke: []
+          broke: [],
+          followUps: []
         },
         ctx
       );
@@ -66222,18 +66367,25 @@ var SessionService = class {
   }
   /**
    * Whether a seat can do its own work now: its Claude Code is open (it polled
-   * lately) and its account is not out of usage.
+   * lately), its account is not out of usage, and its person is not past the
+   * daily limit they set.
    */
-  isAvailable(participantId, now = Date.now()) {
+  isAvailable(state, participantId, now = Date.now()) {
     const beat = this.autopilots.get(participantId);
-    return Boolean(beat && now - beat.at < AUTOPILOT_FRESH_MS && !beat.limited);
+    return Boolean(beat && now - beat.at < AUTOPILOT_FRESH_MS && !beat.limited) && !this.overLimit(state, participantId, now);
   }
-  /** Seats in a session whose account has hit its usage limit. */
+  /** Whether a seat's person has spent their own daily limit on this session. */
+  overLimit(state, participantId, now = Date.now()) {
+    const login = state.participants.get(participantId)?.githubLogin;
+    return login ? state.overDailyLimit(login, now) : false;
+  }
+  /** Seats in a session whose account has hit its usage limit, or whose person their daily one. */
   limitedIn(sessionId) {
     const now = Date.now();
-    return [...this.state(sessionId).participants.values()].filter((p) => {
+    const state = this.state(sessionId);
+    return [...state.participants.values()].filter((p) => {
       const beat = this.autopilots.get(p.id);
-      return Boolean(beat?.limited && now - beat.at < AUTOPILOT_FRESH_MS);
+      return Boolean(beat?.limited && now - beat.at < AUTOPILOT_FRESH_MS) || this.overLimit(state, p.id, now);
     }).map((p) => p.id);
   }
   /** Seats in a session whose Claude Code has polled lately, by autopilot mode. */
@@ -66424,6 +66576,14 @@ var SessionService = class {
         return this.updateSprint(command, ctx);
       case "sprint.delete":
         return this.deleteSprint(command, ctx);
+      case "profile.update":
+        return this.updateProfile(command, ctx);
+      case "summary.request": {
+        const { sessionId, participantId } = this.requireParticipant(ctx);
+        return { summary: this.requestSummary(sessionId, participantId, command.day ?? usageDay(Date.now())) };
+      }
+      case "summary.post":
+        return this.postSummary(command, ctx);
       case "agent.doing": {
         const { sessionId, participantId } = this.requireParticipant(ctx);
         if (ctx.via === "board") throw new ServiceError("forbidden", "Only a checkout reports what its Claude is doing.");
@@ -66788,11 +66948,23 @@ ${lines.join("\n")}`;
    */
   createTicket(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const ticket = this.openTicket(sessionId, participantId, state, {
+      title: command.title,
+      body: command.body,
+      attachments: command.attachments.map((a) => ({ ...a, kind: "brief" })),
+      needsHuman: command.needsHuman,
+      sprintId: command.sprintId ? this.requireSprint(state, command.sprintId).id : null,
+      followUpOf: null
+    });
+    return { ticket, plannerId: null };
+  }
+  /** Puts a new card in the plan column and tells everyone else it is there. */
+  openTicket(sessionId, participantId, state, fields) {
     const ticket = {
       id: randomUUID2(),
       sessionId,
-      title: command.title,
-      body: command.body,
+      title: fields.title,
+      body: fields.body,
       authorId: participantId,
       members: [participantId],
       state: "plan",
@@ -66800,13 +66972,14 @@ ${lines.join("\n")}`;
       decompositionId: null,
       prNumber: null,
       mergedAt: null,
-      attachments: command.attachments.map((a) => ({ ...a, kind: "brief" })),
-      needsHuman: command.needsHuman,
+      attachments: fields.attachments,
+      needsHuman: fields.needsHuman,
       humanCheck: null,
       subtickets: [],
-      sprintId: command.sprintId ? this.requireSprint(state, command.sprintId).id : null,
+      sprintId: fields.sprintId,
       dueAt: null,
       startedAt: null,
+      followUpOf: fields.followUpOf,
       createdAt: Date.now()
     };
     this.requireFiles(sessionId, ticket.attachments);
@@ -66820,10 +66993,10 @@ ${lines.join("\n")}`;
         sessionId,
         participantId,
         others.map((p) => p.id),
-        `${author?.displayName ?? "Someone"} opened "${ticket.title}". Join it on the board if you want in; it is split for whoever is in it when someone presses start.`
+        fields.followUpOf ? `Verifying "${state.tickets.get(fields.followUpOf)?.title ?? "a ticket"}" turned up "${ticket.title}", now on the board as a follow-up. Join it if you want in.` : `${author?.displayName ?? "Someone"} opened "${ticket.title}". Join it on the board if you want in; it is split for whoever is in it when someone presses start.`
       );
     }
-    return { ticket: state.tickets.get(ticket.id), plannerId: null };
+    return state.tickets.get(ticket.id);
   }
   /**
    * Opting in. This is the consent step: no approval follows, so joining has to
@@ -66982,14 +67155,14 @@ ${lines.join("\n")}`;
   verifier(state, ticket) {
     const checkout = (id) => Boolean(state.participants.get(id)?.repoPath);
     const members = [ticket.authorId, ...ticket.members.filter((id) => id !== ticket.authorId)].filter(checkout);
-    return members.find((id) => this.isAvailable(id)) ?? members[0] ?? null;
+    return members.find((id) => this.isAvailable(state, id)) ?? members[0] ?? null;
   }
   /**
    * A seat that just ran out of usage cannot do what it was handed. Its
    * unstarted tasks go to a teammate who can, and a ticket waiting on it to be
    * run end to end is handed to someone else to run.
    */
-  reroute(sessionId, participantId) {
+  reroute(sessionId, participantId, why = "account is out of usage") {
     const state = this.state(sessionId);
     const who = state.participants.get(participantId)?.displayName ?? "Someone";
     for (const task of [...state.tasks.values()]) {
@@ -66998,7 +67171,7 @@ ${lines.join("\n")}`;
       const others = (ticket?.members ?? [...state.participants.keys()]).filter(
         (id) => {
           const p = state.participants.get(id);
-          return id !== participantId && Boolean(p?.repoPath) && (this.isAvailable(id) || this.isWorking(p));
+          return id !== participantId && Boolean(p?.repoPath) && (this.isAvailable(state, id) || this.isWorking(p));
         }
       );
       const to = others.sort((a, b) => state.activeTaskCount(a) - state.activeTaskCount(b))[0];
@@ -67008,7 +67181,7 @@ ${lines.join("\n")}`;
         sessionId,
         null,
         [to],
-        `${who}'s account is out of usage, so ${task.id} -- ${task.title} -- is yours now. Claim it with ss_claim, do it, and finish with ss_done.`
+        `${who}'s ${why}, so ${task.id} -- ${task.title} -- is yours now. Claim it with ss_claim, do it, and finish with ss_done.`
       );
     }
     for (const ticket of [...state.tickets.values()]) {
@@ -67055,7 +67228,10 @@ ${lines.join("\n")}`;
         "Then report with ss_ticket_verified: passed true or false, `how` you exercised it, and",
         "what you saw. Passing sends it to review. Failing reopens work, so it needs `broke`:",
         "the ids of the tasks the failure is on. Leave `broke` out only if you truly cannot tell",
-        "-- every task reopens then, and everyone re-does work that was probably fine."
+        "-- every task reopens then, and everyone re-does work that was probably fine.",
+        "Pass or fail, anything you found that is not this ticket's to fix -- an open question,",
+        "something that needs checking, a bug elsewhere -- goes in `followUps` as { title, body }.",
+        "Each becomes a ticket on the board for the team to pick up."
       ].join("\n")
     );
   }
@@ -67143,7 +67319,26 @@ ${lines.join("\n")}`;
         );
       }
     }
-    return { ticket: this.requireTicket(state, command.ticketId) };
+    const open = new Set(
+      [...state.tickets.values()].filter((t) => state.ticketStateFor(t.id) !== "done").map((t) => t.title.trim().toLowerCase())
+    );
+    const followUps = [];
+    for (const found of command.followUps) {
+      const key = found.title.trim().toLowerCase();
+      if (open.has(key)) continue;
+      open.add(key);
+      followUps.push(
+        this.openTicket(sessionId, participantId, state, {
+          title: found.title,
+          body: [found.body.trim(), `Found while verifying "${ticket.title}" (${command.how}).`].filter(Boolean).join("\n\n"),
+          attachments: [],
+          needsHuman: false,
+          sprintId: ticket.sprintId,
+          followUpOf: ticket.id
+        })
+      );
+    }
+    return { ticket: this.requireTicket(state, command.ticketId), followUps };
   }
   shipTicket(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
@@ -67795,12 +67990,19 @@ Issue: ${command.issueRef}` : "",
         reason: `You already hold ${CLAIM_CAP} active task(s). Finish or release before claiming another.`
       };
     }
-    const task = command.taskId ? state.tasks.get(command.taskId) ?? null : state.pickTaskFor(participantId, (id) => this.isAvailable(id));
+    if (!command.taskId && this.overLimit(state, participantId)) {
+      return {
+        task: null,
+        lease: null,
+        reason: "You are past the daily token limit you set on your profile, so nothing new is picked for you until 00:00 UTC."
+      };
+    }
+    const task = command.taskId ? state.tasks.get(command.taskId) ?? null : state.pickTaskFor(participantId, (id) => this.isAvailable(state, id));
     if (!task) {
       return {
         task: null,
         lease: null,
-        reason: command.taskId ? `No task "${command.taskId}" in this session.` : state.readyTasks().some((t) => t.assigneeId && t.assigneeId !== participantId && this.isAvailable(t.assigneeId)) ? "Nothing of yours is ready. The rest belongs to teammates whose Claude Code is open, so they will take it -- leave it to them." : state.readyTasks().length > 0 ? "Nothing is claimable right now -- the ready tasks are waiting for their contract to land." : "Nothing is ready right now -- every remaining task is waiting on a dependency."
+        reason: command.taskId ? `No task "${command.taskId}" in this session.` : state.readyTasks().some((t) => t.assigneeId && t.assigneeId !== participantId && this.isAvailable(state, t.assigneeId)) ? "Nothing of yours is ready. The rest belongs to teammates whose Claude Code is open, so they will take it -- leave it to them." : state.readyTasks().length > 0 ? "Nothing is claimable right now -- the ready tasks are waiting for their contract to land." : "Nothing is ready right now -- every remaining task is waiting on a dependency."
       };
     }
     if (!state.contractLanded(task)) {
@@ -68206,7 +68408,8 @@ Issue: ${command.issueRef}` : "",
    */
   recordUsage(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
-    if (command.inputTokens + command.outputTokens === 0) return { ok: true };
+    const wasOver = this.overLimit(state, participantId);
+    if (command.inputTokens + command.outputTokens === 0) return { ok: true, overLimit: wasOver };
     const held = [...state.tasks.values()].find(
       (task) => task.ownerId === participantId && task.state !== "merged"
     );
@@ -68220,7 +68423,32 @@ Issue: ${command.issueRef}` : "",
       cacheCreationTokens: command.cacheCreationTokens,
       turns: command.turns
     });
-    return { ok: true };
+    const overLimit = this.overLimit(state, participantId);
+    if (overLimit && !wasOver) this.limitReached(sessionId, state, participantId);
+    return { ok: true, overLimit };
+  }
+  /**
+   * Someone just went past the daily limit they set. Every seat of theirs is
+   * out of the running for today: what was waiting on them goes to someone who
+   * can take it, and the board hears about it now rather than on the next beat.
+   */
+  limitReached(sessionId, state, participantId) {
+    const login = state.participants.get(participantId)?.githubLogin.toLowerCase();
+    for (const seat of [...state.participants.values()]) {
+      if (seat.githubLogin.toLowerCase() === login) this.reroute(sessionId, seat.id, "daily token limit is spent");
+    }
+    this.onLive?.(sessionId);
+  }
+  updateProfile(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    const login = state.participants.get(participantId)?.githubLogin.toLowerCase();
+    if (!login) throw new ServiceError("unauthorized", "Join a session first.");
+    const wasOver = state.overDailyLimit(login);
+    const profile = { login, dailyLimit: command.dailyLimit, updatedAt: Date.now() };
+    this.emit(sessionId, participantId, { type: "profile.updated", profile });
+    if (state.overDailyLimit(login) && !wasOver) this.limitReached(sessionId, state, participantId);
+    else if (wasOver !== state.overDailyLimit(login)) this.onLive?.(sessionId);
+    return { profile };
   }
   reportActivity(command, ctx) {
     const { sessionId, participantId } = this.requireParticipant(ctx);
@@ -68232,7 +68460,7 @@ Issue: ${command.issueRef}` : "",
     return { ok: true };
   }
   heartbeat(command, ctx) {
-    const { participantId } = this.requireParticipant(ctx);
+    const { participantId, state } = this.requireParticipant(ctx);
     if (ctx.via === "board") {
       throw new ServiceError("forbidden", "Only a checkout can report its autopilot.");
     }
@@ -68242,7 +68470,148 @@ Issue: ${command.issueRef}` : "",
     if (!before || before.mode !== command.autopilot || before.limited !== command.limited || Date.now() - before.at > 6e4) {
       this.onLive?.(this.requireSession(ctx));
     }
-    return { ok: true };
+    this.dailySummary(this.requireSession(ctx));
+    return { ok: true, overLimit: this.overLimit(state, participantId) };
+  }
+  // -- daily summaries -----------------------------------------------------
+  /**
+   * Whose Claude writes a summary: the host's own checkout, open and under its
+   * daily limit. With no host seat -- a server not started by a member -- the
+   * lead's. Nobody fit means a digest without a write-up.
+   */
+  summaryWriter(state) {
+    const seats = [...state.participants.values()].filter(
+      (p) => p.repoPath && this.isPresent(p) && !this.overLimit(state, p.id)
+    );
+    const host = this.hostMachineId ? seats.find((p) => p.machineId === this.hostMachineId) : void 0;
+    return (host ?? seats.find((p) => p.id === state.session?.leadId))?.id ?? null;
+  }
+  /** The facts of one UTC day, counted from the log. */
+  digestFor(sessionId, day) {
+    const state = this.state(sessionId);
+    const start = Date.parse(`${day}T00:00:00Z`);
+    const end = start + 24 * 60 * 60 * 1e3;
+    const digest = {
+      day,
+      opened: [],
+      shipped: [],
+      tasksMerged: 0,
+      verifiedPassed: 0,
+      verifiedFailed: 0,
+      followUps: [],
+      messages: 0,
+      spend: [],
+      columns: {}
+    };
+    const spend = /* @__PURE__ */ new Map();
+    const logins = /* @__PURE__ */ new Map();
+    for (let from = 0; ; ) {
+      const page = this.store.readEvents(sessionId, from, 5e3);
+      for (const { ts, body } of page) {
+        if (body.type === "participant.joined") logins.set(body.participant.id, body.participant.githubLogin.toLowerCase());
+        if (ts < start || ts >= end) continue;
+        if (body.type === "ticket.created") {
+          digest.opened.push(body.ticket.title);
+          if (body.ticket.followUpOf) digest.followUps.push(body.ticket.title);
+        } else if (body.type === "ticket.shipped") {
+          digest.shipped.push(state.tickets.get(body.ticketId)?.title ?? body.ticketId);
+        } else if (body.type === "task.state" && body.state === "merged") {
+          digest.tasksMerged += 1;
+        } else if (body.type === "ticket.verified") {
+          if (body.verification.passed) digest.verifiedPassed += 1;
+          else digest.verifiedFailed += 1;
+        } else if (body.type === "chat.message" && body.message.authorKind !== "system") {
+          digest.messages += 1;
+        } else if (body.type === "usage.recorded") {
+          const login = logins.get(body.participantId) ?? body.participantId;
+          spend.set(login, (spend.get(login) ?? 0) + weightedUnits(body));
+        }
+      }
+      if (page.length < 5e3) break;
+      from = page.at(-1).seq + 1;
+    }
+    digest.spend = [...spend.entries()].map(([login, units]) => ({ login, units: Math.round(units) })).sort((a, b) => b.units - a.units);
+    for (const ticket of state.tickets.values()) {
+      const column = state.ticketStateFor(ticket.id);
+      digest.columns[column] = (digest.columns[column] ?? 0) + 1;
+    }
+    return digest;
+  }
+  /**
+   * Takes a day's digest and asks the writer's Claude for the write-up. Asking
+   * again for the same day refreshes the digest and asks again.
+   */
+  requestSummary(sessionId, actorId, day) {
+    const state = this.state(sessionId);
+    const previous = state.summaries.get(day);
+    const writerId = this.summaryWriter(state);
+    const digest = this.digestFor(sessionId, day);
+    this.emit(sessionId, actorId, {
+      type: "summary.requested",
+      summary: {
+        day,
+        digest,
+        writerId,
+        narrative: previous?.narrative ?? null,
+        requestedAt: Date.now(),
+        postedAt: previous?.postedAt ?? null
+      }
+    });
+    if (writerId) {
+      const next = usageDay(Date.parse(`${day}T00:00:00Z`) + 24 * 60 * 60 * 1e3);
+      this.systemDirective(
+        sessionId,
+        actorId,
+        [writerId],
+        [
+          `Write the daily summary of this session for ${day} (UTC). It runs on the host's account, so keep it tight.`,
+          "",
+          "What the server counted:",
+          `- opened: ${digest.opened.join("; ") || "nothing"}`,
+          `- shipped: ${digest.shipped.join("; ") || "nothing"}`,
+          `- tasks merged: ${digest.tasksMerged}; runs passed ${digest.verifiedPassed}, failed ${digest.verifiedFailed}`,
+          `- follow-ups found while verifying: ${digest.followUps.join("; ") || "none"}`,
+          `- board now: ${Object.entries(digest.columns).map(([column, n]) => `${column} ${n}`).join(", ") || "empty"}`,
+          `- spend (weighted units): ${digest.spend.map((s) => `${s.login} ${s.units}`).join(", ") || "none recorded"}`,
+          "",
+          `1. ss_sync, then read what landed: git log --since=${day}T00:00Z --until=${next}T00:00Z on ${state.session?.contractBranch ?? "the contract branch"}.`,
+          "2. ss_tickets for the board and ss_chat_read for what people said.",
+          "3. Write markdown, at most about 300 words: **Where we stand** (one paragraph), **What moved**,",
+          "   **Risks and blockers**, **Next** (one line per person). Facts only; say what you do not know.",
+          `4. Post it with ss_summary, day "${day}". Change no code for this.`
+        ].join("\n")
+      );
+    }
+    this.summarized.set(sessionId, usageDay(Date.now()));
+    return state.summaries.get(day);
+  }
+  /**
+   * Once a day, on the first beat that finds a writer, yesterday is written
+   * up -- if anything happened in it. A quiet day gets no summary.
+   */
+  dailySummary(sessionId) {
+    const today = usageDay(Date.now());
+    if (this.summarized.get(sessionId) === today) return;
+    const state = this.state(sessionId);
+    const yesterday = usageDay(Date.now() - 24 * 60 * 60 * 1e3);
+    if (state.summaries.has(yesterday)) {
+      this.summarized.set(sessionId, today);
+      return;
+    }
+    if (!this.summaryWriter(state)) return;
+    const digest = this.digestFor(sessionId, yesterday);
+    const quiet = digest.opened.length + digest.shipped.length + digest.tasksMerged + digest.verifiedPassed + digest.verifiedFailed + digest.messages + digest.spend.length === 0;
+    if (quiet) this.summarized.set(sessionId, today);
+    else this.requestSummary(sessionId, null, yesterday);
+  }
+  postSummary(command, ctx) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx);
+    if (ctx.via === "board") throw new ServiceError("forbidden", "A summary is written by a checkout's Claude.");
+    if (!state.summaries.has(command.day)) {
+      throw new ServiceError("not_found", `No summary was asked for ${command.day}. Ask for one from the board first.`);
+    }
+    this.emit(sessionId, participantId, { type: "summary.posted", day: command.day, narrative: command.narrative });
+    return { summary: state.summaries.get(command.day) };
   }
   // -- connection lifecycle ------------------------------------------------
   markDisconnected(sessionId, participantId) {
@@ -69322,6 +69691,7 @@ function createApp(options = {}) {
     (sessionId, from, frame) => gateway.relayFrame(sessionId, from, frame)
   );
   gateway.attach(service);
+  service.hostMachineId = options.hostMachineId ?? null;
   const terminals = new Terminals(auth, store, service);
   fastify.server.on("upgrade", (request, socket, head) => {
     const path = (request.url ?? "").split("?")[0];
@@ -69975,7 +70345,8 @@ if (isEntrypoint) {
   const host = process.env.HOST ?? "127.0.0.1";
   const app = createApp({
     dbPath: process.env.SESSION_SHARE_DB ?? ".data/session-share.db",
-    logger: true
+    logger: true,
+    hostMachineId: process.env.SESSION_SHARE_MACHINE_ID ?? null
   });
   const shutdown = async () => {
     await app.close();

@@ -31257,7 +31257,13 @@ var Ticket = external_exports.object({
    * card has existed.
    */
   startedAt: Timestamp.nullable().default(null),
+  /** The ticket whose verification turned this one up, when it came from one. */
+  followUpOf: TicketId.nullable().default(null),
   createdAt: Timestamp
+});
+var FollowUp = external_exports.object({
+  title: external_exports.string().trim().min(1).max(200),
+  body: external_exports.string().max(4e3).default("")
 });
 var TicketComment = external_exports.object({
   id: external_exports.string().min(1).max(64),
@@ -31476,6 +31482,45 @@ var Usage = external_exports.object({
   /** Assistant turns counted, so an average is available. */
   turns: external_exports.number().int().nonnegative().default(0)
 });
+var Profile = external_exports.object({
+  login: external_exports.string().min(1),
+  /**
+   * Weighted units (see USAGE_WEIGHT) this person's Claude may spend on the
+   * session per UTC day. Past it their seats count as out of usage: their
+   * unstarted work is handed on, and nothing more is handed to them until the
+   * day turns over. Null is no limit.
+   */
+  dailyLimit: external_exports.number().int().positive().nullable().default(null),
+  updatedAt: Timestamp
+});
+var DailySpend = external_exports.object({
+  login: external_exports.string().min(1),
+  day: external_exports.string(),
+  units: external_exports.number().nonnegative()
+});
+var Digest = external_exports.object({
+  day: external_exports.string(),
+  opened: external_exports.array(external_exports.string()).default([]),
+  shipped: external_exports.array(external_exports.string()).default([]),
+  tasksMerged: external_exports.number().int().nonnegative().default(0),
+  verifiedPassed: external_exports.number().int().nonnegative().default(0),
+  verifiedFailed: external_exports.number().int().nonnegative().default(0),
+  followUps: external_exports.array(external_exports.string()).default([]),
+  messages: external_exports.number().int().nonnegative().default(0),
+  spend: external_exports.array(external_exports.object({ login: external_exports.string(), units: external_exports.number().nonnegative() })).default([]),
+  /** Tickets by board column at the time the digest was taken. */
+  columns: external_exports.record(external_exports.string(), external_exports.number().int().nonnegative()).default({})
+});
+var DailySummary = external_exports.object({
+  day: external_exports.string(),
+  digest: Digest,
+  /** Whose Claude was asked to write it; null when nobody could be. */
+  writerId: ParticipantId.nullable().default(null),
+  /** Markdown from the writer's Claude; null until it is posted. */
+  narrative: external_exports.string().nullable().default(null),
+  requestedAt: Timestamp,
+  postedAt: Timestamp.nullable().default(null)
+});
 var MergeQueueEntry = external_exports.object({
   taskId: TaskId,
   position: external_exports.number().int().nonnegative(),
@@ -31514,6 +31559,11 @@ var SessionSnapshot = external_exports.object({
   handoffs: external_exports.array(HandoffRequest),
   chat: external_exports.array(ChatMessage),
   usage: external_exports.array(Usage).default([]),
+  profiles: external_exports.array(Profile).default([]),
+  /** Today's spend by login, for daily limits; a stale day reads as zero. */
+  spentToday: external_exports.array(DailySpend).default([]),
+  /** The most recent daily summaries, oldest first. */
+  summaries: external_exports.array(DailySummary).default([]),
   comments: external_exports.array(TicketComment).default([]),
   sprints: external_exports.array(Sprint).default([]),
   mergeQueue: external_exports.array(MergeQueueEntry),
@@ -31630,6 +31680,13 @@ var EventBody = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("sprint.updated"), sprint: Sprint }),
   /** Its tickets go back to the backlog; nothing else about them changes. */
   external_exports.object({ type: external_exports.literal("sprint.deleted"), sprintId: external_exports.string().min(1) }),
+  // -- profiles -------------------------------------------------------------
+  /** A person's profile as it now stands, whole. */
+  external_exports.object({ type: external_exports.literal("profile.updated"), profile: Profile }),
+  // -- summaries ------------------------------------------------------------
+  /** A day's digest was taken and, when someone could, a write-up asked for. */
+  external_exports.object({ type: external_exports.literal("summary.requested"), summary: DailySummary }),
+  external_exports.object({ type: external_exports.literal("summary.posted"), day: external_exports.string(), narrative: external_exports.string() }),
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */
   external_exports.object({
@@ -31874,7 +31931,13 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     how: external_exports.string().max(500),
     summary: external_exports.string().max(2e3),
     /** Failing: whose tasks to reopen. Empty reopens the lot. */
-    broke: external_exports.array(TaskId).default([])
+    broke: external_exports.array(TaskId).default([]),
+    /**
+     * What the run turned up that is not this ticket's to fix: unknowns,
+     * things that need checking, bugs elsewhere. Each becomes a ticket in the
+     * plan column, linked back here. Never started on its own.
+     */
+    followUps: external_exports.array(FollowUp).max(10).default([])
   }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
@@ -31926,6 +31989,23 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
     state: SprintState.optional()
   }),
   external_exports.object({ type: external_exports.literal("sprint.delete"), sprintId: external_exports.string().min(1) }),
+  /**
+   * The caller's own profile. Only ever their own: the login comes from who is
+   * asking, so nobody can set a limit on someone else's account.
+   */
+  external_exports.object({
+    type: external_exports.literal("profile.update"),
+    /** Weighted units per UTC day; null removes the limit. */
+    dailyLimit: external_exports.number().int().min(1e3).max(1e11).nullable()
+  }),
+  /** Take a digest of a UTC day now and ask the host's Claude to write it up. Defaults to today. */
+  external_exports.object({ type: external_exports.literal("summary.request"), day: external_exports.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().default(null) }),
+  /** The write-up for a day, from the Claude that was asked for it. */
+  external_exports.object({
+    type: external_exports.literal("summary.post"),
+    day: external_exports.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    narrative: external_exports.string().trim().min(1).max(8e3)
+  }),
   /**
    * Ask for a split from the board. Planning needs a repo and a model, neither
    * of which the browser has -- so this hands the brief to a participant's
@@ -32539,6 +32619,7 @@ It is not this machine's server, so invites from it cannot be redeemed here. Sto
       SESSION_SHARE_MODE: "peer",
       SESSION_SHARE_SECRET: hostSecret(),
       SESSION_SHARE_DB: DB_FILE,
+      SESSION_SHARE_MACHINE_ID: machineId(),
       PORT: String(port),
       HOST: expose === "lan" ? "0.0.0.0" : "127.0.0.1"
     }
@@ -33053,10 +33134,11 @@ function writePreferences(update) {
 var PREFERENCES_FILE = PREFERENCES_PATH;
 var TERSE_STYLE = [
   "session-share asks for terse replies in this repository, to save tokens:",
-  "no preamble, no restating the task, no recap of what you just did unless asked;",
-  "short sentences, fragments are fine, drop filler words.",
-  "Code, commit messages, PR text and anything written to files stay normal and complete.",
-  "Security warnings and questions that need a decision stay clear and complete."
+  "drop articles, filler, pleasantries and hedging; fragments are fine; short words over long ones;",
+  'pattern "[thing] [action] [reason]. [next step]."; no preamble, no restating the task, no recap unless asked.',
+  "Technical terms, code, error text, commit messages, PR text and anything written to files stay exact, normal and complete.",
+  "Code comments only where the why is not obvious from the code: no comments narrating what a line does, no changelog comments, no commented-out code.",
+  "Security warnings, irreversible actions and questions that need a decision stay clear and complete."
 ].join(" ");
 function describePreferences(preferences) {
   return [
@@ -33073,6 +33155,36 @@ function describePreferences(preferences) {
     `autopilot: ${preferences.autopilot === "off" ? "off \u2014 queued work waits for you" : preferences.autopilot === "splits" ? `planning runs itself when you are idle (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)` : `everything runs itself when you are idle, including writing and pushing code (up to ${preferences.autopilotBudget.toLocaleString()} tokens/day)`}`
   ].join("\n");
 }
+
+// packages/plugin/src/conventions.ts
+var COMMIT_TYPES = ["feat", "fix", "refactor", "perf", "test", "docs", "build", "ci", "chore", "style", "revert"];
+var SUBJECT_MAX = 72;
+var CONVENTIONAL = new RegExp(`^(${COMMIT_TYPES.join("|")})(\\([a-z0-9._/-]+\\))?!?: \\S.*$`);
+function subjectProblem(subject) {
+  if (!CONVENTIONAL.test(subject)) {
+    return `"${subject}" is not a Conventional Commit. Use "<type>(<scope>): <subject>", type one of ${COMMIT_TYPES.join(", ")}.`;
+  }
+  if (subject.length > SUBJECT_MAX) return `"${subject}" is longer than ${SUBJECT_MAX} characters.`;
+  if (subject.endsWith(".")) return `"${subject}" ends with a period.`;
+  return null;
+}
+function taskSubject(taskId, summary) {
+  const line = summary.split("\n")[0].trim().replace(/\.$/, "");
+  if (CONVENTIONAL.test(line)) return line.slice(0, SUBJECT_MAX);
+  const subject = `feat(${taskId}): ${line.charAt(0).toLowerCase()}${line.slice(1)}`;
+  return subject.length > SUBJECT_MAX ? subject.slice(0, SUBJECT_MAX).trimEnd() : subject;
+}
+var taskTrailer = (taskId) => `Task: ${taskId}`;
+function taskMessage(taskId, subject, body) {
+  return [subject, body?.trim() ? body.trim() : null, taskTrailer(taskId)].filter(Boolean).join("\n\n");
+}
+var GIT_CONVENTIONS = [
+  "session-share git rules for this repository:",
+  "Branches are made by the session tools only: the contract lives on ss/<session>/contract and each task on ss/<session>/<task-id>. Do not create, rename or switch to other branches, and never commit on the contract or base branch directly.",
+  "Commits are atomic: one logical change each, staged by explicit path (no `git add -A`, `git add .` or `git commit -a`). Unrelated changes go in separate commits.",
+  `Messages are Conventional Commits: "<type>(<scope>): <subject>", type one of ${COMMIT_TYPES.join(", ")}; imperative, lowercase, no period, at most ${SUBJECT_MAX} characters. Use the task id as the scope.`,
+  "Finish with ss_done; pass `commits` to land several atomic commits instead of one."
+].join(" ");
 
 // packages/plugin/src/autopilot.ts
 var POLL_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_POLL_MS ?? 5e3);
@@ -33123,7 +33235,8 @@ var PLANNING_TOOLS = [
     "ss_get_contract",
     "ss_chat_post",
     "ss_chat_read",
-    "ss_status"
+    "ss_status",
+    "ss_summary"
   )
 ];
 var BUILDING_TOOLS = [
@@ -33162,10 +33275,11 @@ var BUILDING_TOOLS = [
     "ss_ticket",
     "ss_ticket_comment",
     "ss_subticket",
-    "ss_worktree"
+    "ss_worktree",
+    "ss_summary"
   )
 ];
-var isPlanning = (messages) => messages.every((message) => /ss_propose|Split the ticket/.test(message.body));
+var isPlanning = (messages) => messages.every((message) => /ss_propose|Split the ticket|ss_summary/.test(message.body));
 var running = false;
 var limitedUntil = 0;
 var firstSeen = /* @__PURE__ */ new Map();
@@ -33247,13 +33361,16 @@ async function tickOnce(options = {}) {
   if (!config3) return { ran: false, ok: false, reason: "this checkout is not in a session" };
   const preferences = readPreferences();
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  await runCommand(config3, {
+  const beat = await runCommand(config3, {
     type: "agent.heartbeat",
     autopilot: preferences.autopilot,
     limited: Date.now() < limitedUntil
   }).catch(() => void 0);
   if (Date.now() < limitedUntil) {
     return { ran: false, ok: false, reason: "this account is out of usage for now" };
+  }
+  if (beat?.overLimit) {
+    return { ran: false, ok: false, reason: "the daily token limit on your profile is spent" };
   }
   let inbox;
   try {
@@ -33294,7 +33411,7 @@ async function tickOnce(options = {}) {
   try {
     const result = await runHeadless(
       config3,
-      [describeDirectives(waiting, /* @__PURE__ */ new Map()), preferences.terse ? TERSE_STYLE : ""].filter(Boolean).join("\n\n"),
+      [describeDirectives(waiting, /* @__PURE__ */ new Map()), preferences.terse ? TERSE_STYLE : "", GIT_CONVENTIONS].filter(Boolean).join("\n\n"),
       planningOnly,
       options.command ?? "claude"
     );
@@ -34407,7 +34524,7 @@ Commit or stash them first \u2014 landing the contract switches branches.`
       for (const file2 of files) insideRepo(root, file2.path);
       await checkoutBranch(root, branch, state.session.repo.baseBranch);
       const written = await writeFiles(root, files);
-      const sha = await commit(root, written, `contract: ${state.session.title}
+      const sha = await commit(root, written, `chore(contract): ${state.session.title.toLowerCase()}`.slice(0, 72) + `
 
 ${summary}`);
       const pushed = preferences.push ? await push(root, branch) : false;
@@ -34468,11 +34585,17 @@ Tasks land on this branch as they finish.`,
       description: "Finish a task: commit everything under its owned paths, push, open a pull request, and merge it into the contract branch so whatever was waiting on it becomes claimable.",
       inputSchema: {
         taskId: external_exports.string(),
-        summary: external_exports.string().max(500).describe("One line for the commit message"),
+        summary: external_exports.string().max(500).describe('One line for the commit message, ideally "<type>(<task-id>): <subject>"; otherwise filed as feat(<task-id>)'),
+        commits: external_exports.array(
+          external_exports.object({
+            message: external_exports.string().min(1).max(2e3).describe('Conventional Commit: "<type>(<scope>): <subject>", optional body after a blank line'),
+            paths: external_exports.array(external_exports.string().min(1)).min(1).describe("Exactly the files in this commit")
+          })
+        ).optional().describe("Land the work as several atomic commits, in this order. Anything under the task left over goes in a final commit from summary."),
         force: external_exports.boolean().default(false).describe("Land it even though the acceptance command has not passed")
       }
     },
-    async ({ taskId, summary, force }) => {
+    async ({ taskId, summary, force, commits }) => {
       const config3 = ctx.config();
       const root = await ctx.repoRoot();
       const preferences = readPreferences();
@@ -34510,8 +34633,25 @@ Tasks land on this branch as they finish.`,
           ].join("\n")
         );
       }
+      for (const planned of commits ?? []) {
+        const problem = subjectProblem(planned.message.split("\n")[0].trim());
+        if (problem) return ctx.text(`${problem}
+
+Nothing was committed.`);
+        const outside = planned.paths.filter((path) => !pathMatchesAny(path, paths));
+        if (outside.length > 0) {
+          return ctx.text(`These paths are outside "${taskId}": ${outside.join(", ")}
+
+Nothing was committed.`);
+        }
+      }
       await checkoutBranch(root, branch, contract);
-      const sha = await commit(root, paths, `${taskId}: ${summary}`);
+      let sha = null;
+      for (const planned of commits ?? []) {
+        const [subject, ...body] = planned.message.split("\n");
+        sha = await commit(root, planned.paths, taskMessage(taskId, subject.trim(), body.join("\n"))) ?? sha;
+      }
+      sha = await commit(root, paths, taskMessage(taskId, taskSubject(taskId, summary))) ?? sha;
       const pushed = preferences.push ? await push(root, branch) : false;
       let prNumber = null;
       if (preferences.openPullRequests && pushed) {
@@ -35317,27 +35457,48 @@ function createServer() {
         summary: external_exports.string().max(2e3).describe("What you saw. On a failure, be specific enough that someone can fix it"),
         broke: external_exports.array(external_exports.string()).optional().describe(
           "Failing only: the ids of the tasks the failure is on. Those tasks reopen and become claimable again. Omit only if you genuinely cannot tell -- every task reopens then"
+        ),
+        followUps: external_exports.array(external_exports.object({ title: external_exports.string().min(1).max(200), body: external_exports.string().max(4e3).default("") })).max(10).optional().describe(
+          "Pass or fail: what the run turned up that is not this ticket's to fix -- open questions, things that need checking, bugs elsewhere. Each becomes a ticket on the board, linked back here"
         )
       }
     },
-    async ({ ticketId, passed, how, summary, broke }) => {
+    async ({ ticketId, passed, how, summary, broke, followUps }) => {
       const cfg = config2();
-      const { ticket } = await runCommand(cfg, {
+      const result = await runCommand(cfg, {
         type: "ticket.verified",
         ticketId,
         passed,
         how,
         summary,
-        broke: broke ?? []
+        broke: broke ?? [],
+        followUps: followUps ?? []
       });
+      const { ticket } = result;
       const reopened = ticket.verification?.broke ?? [];
+      const filed = result.followUps.length ? `
+Filed as follow-up tickets: ${result.followUps.map((t) => `"${t.title}"`).join(", ")}.` : "";
       return text(
-        passed ? `"${ticket.title}" verified. It is in review; open the PR with ss_ship.` : [
+        (passed ? `"${ticket.title}" verified. It is in review; open the PR with ss_ship.` : [
           `Recorded as broken, and the work is open again: ${reopened.join(", ") || "nothing to reopen"}.`,
           `Everyone who built "${ticket.title}" has been told what you saw and asked to fix it.`,
           "When the last fix lands you will be asked to run it again."
-        ].join("\n")
+        ].join("\n")) + filed
       );
+    }
+  );
+  server.registerTool(
+    "ss_summary",
+    {
+      description: "Post the daily summary you were asked for: where the project stands, what moved, risks and blockers, next steps. It shows on the board's summary tab.",
+      inputSchema: {
+        day: external_exports.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("The UTC day you were asked to summarize, YYYY-MM-DD"),
+        narrative: external_exports.string().min(1).max(8e3).describe("Markdown, at most about 300 words")
+      }
+    },
+    async ({ day, narrative }) => {
+      await runCommand(config2(), { type: "summary.post", day, narrative });
+      return text(`Summary for ${day} posted to the board.`);
     }
   );
   server.registerTool(
