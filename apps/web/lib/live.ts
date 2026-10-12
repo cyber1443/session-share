@@ -44,7 +44,9 @@ export function termUrl(): string {
   return wsUrl().replace(/\/ws$/, '/term')
 }
 
-export function useLiveSession(sessionRef: string) {
+export function useLiveSession(sessionRef: string, onLiveEvent?: (envelope: EventEnvelope) => void) {
+  const onLiveRef = useRef(onLiveEvent)
+  onLiveRef.current = onLiveEvent
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null)
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
   const [error, setError] = useState<string | null>(null)
@@ -200,6 +202,7 @@ export function useLiveSession(sessionRef: string) {
             case 'event': {
               applyEvent(message.event)
               publish()
+              onLiveRef.current?.(message.event)
               break
             }
             case 'sync': {

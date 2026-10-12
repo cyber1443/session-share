@@ -19,6 +19,7 @@ import { ProfilePanel } from '@/components/profile'
 import { SummaryView } from '@/components/summary'
 import type { SprintFilter } from '@/components/kanban'
 import { useLiveSession } from '@/lib/live'
+import { useSounds } from '@/lib/sounds'
 import { tokens } from '@/lib/tokens'
 
 const DOT = [
@@ -38,7 +39,8 @@ type View = (typeof VIEWS)[number]
 
 function Board({ slug }: { slug: string }) {
   const { me, mode } = useAuth()
-  const { snapshot, status, error, activity, events, send } = useLiveSession(slug)
+  const sounds = useSounds()
+  const { snapshot, status, error, activity, events, send } = useLiveSession(slug, sounds.onEvent)
   const [openTicket, setOpenTicket] = useState<string | null>(null)
   const [chatFilter, setChatFilter] = useState<string | null>(null)
   const [pairing, setPairing] = useState(false)
@@ -71,6 +73,7 @@ function Board({ slug }: { slug: string }) {
   const people = [...snapshot.participants].sort(
     (a, b) => a.githubLogin.localeCompare(b.githubLogin) || a.joinedAt - b.joinedAt,
   )
+  sounds.me.current = mine?.id ?? null
   const pendingHandoffs = snapshot.handoffs.filter(
     (h) => h.status === 'pending' && h.holderId === mine?.id,
   )
@@ -110,6 +113,13 @@ function Board({ slug }: { slug: string }) {
           >
             {status}
           </span>
+          <button
+            className={sounds.on ? 'text-neutral-300 hover:text-neutral-100' : 'text-mute hover:text-neutral-300'}
+            onClick={sounds.toggle}
+            title="Sounds for finished work, failures and messages"
+          >
+            sound {sounds.on ? 'on' : 'off'}
+          </button>
           {!mine?.repoPath ? (
             <button className="btn" onClick={() => setPairing(true)}>
               attach checkout
