@@ -96,10 +96,11 @@ export const PREFERENCES_FILE = PREFERENCES_PATH
  */
 export const TERSE_STYLE = [
   'session-share asks for terse replies in this repository, to save tokens:',
-  'no preamble, no restating the task, no recap of what you just did unless asked;',
-  'short sentences, fragments are fine, drop filler words.',
-  'Code, commit messages, PR text and anything written to files stay normal and complete.',
-  'Security warnings and questions that need a decision stay clear and complete.',
+  'drop articles, filler, pleasantries and hedging; fragments are fine; short words over long ones;',
+  'pattern "[thing] [action] [reason]. [next step]."; no preamble, no restating the task, no recap unless asked.',
+  'Technical terms, code, error text, commit messages, PR text and anything written to files stay exact, normal and complete.',
+  'Code comments only where the why is not obvious from the code: no comments narrating what a line does, no changelog comments, no commented-out code.',
+  'Security warnings, irreversible actions and questions that need a decision stay clear and complete.',
 ].join(' ')
 
 export function describePreferences(preferences: Preferences): string {
