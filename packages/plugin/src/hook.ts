@@ -203,18 +203,21 @@ export async function collectRoom(input: HookInput): Promise<string | null> {
   return describeDirectives(pending, await participantNames(config))
 }
 
-/** Sends the turn's token count, attributed by the server to whatever is held. */
-async function reportUsage(input: HookInput): Promise<void> {
+/**
+ * Sends the turn's token count, attributed by the server to whatever is held.
+ * Answers whether this person is now past the daily limit on their profile.
+ */
+async function reportUsage(input: HookInput): Promise<boolean> {
   const config = readConfig(input.cwd ?? process.cwd())
-  if (!config) return
+  if (!config) return false
 
   const delta = usageSince(input.transcript_path)
-  if (delta.inputTokens + delta.outputTokens === 0) return
-
   try {
-    await runCommand(config, { type: 'usage.report', ...delta }, ROOM_TIMEOUT_MS)
+    const result = await runCommand(config, { type: 'usage.report', ...delta }, ROOM_TIMEOUT_MS)
+    return result.overLimit === true
   } catch {
     // Accounting is never a reason to interfere with someone's session.
+    return false
   }
 }
 
@@ -241,9 +244,10 @@ export async function route(
      */
     case 'Stop': {
       // Whose account paid for the turn that just ended, and for what.
-      await reportUsage(input)
+      const overLimit = await reportUsage(input)
       const config = readConfig(input.cwd ?? process.cwd())
-      const reason = input.stop_hook_active ? null : await collectRoom(input) // we already spoke this turn
+      // Past the daily limit: the room's work waits for someone else rather than keeping this turn going.
+      const reason = input.stop_hook_active || overLimit ? null : await collectRoom(input) // we already spoke this turn
       // Handing over a directive keeps the turn going; otherwise the agent is idle now.
       if (config && !reason && process.env.SESSION_SHARE_AUTOPILOT !== 'child') markIdle(config.repoPath)
       await reportDoing(input, reason ? 'picking up an instruction from the room' : 'idle -- waiting for the next prompt')

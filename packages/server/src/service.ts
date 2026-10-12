@@ -405,20 +405,28 @@ export class SessionService {
 
   /**
    * Whether a seat can do its own work now: its Claude Code is open (it polled
-   * lately) and its account is not out of usage.
+   * lately), its account is not out of usage, and its person is not past the
+   * daily limit they set.
    */
-  isAvailable(participantId: ParticipantId, now = Date.now()): boolean {
+  isAvailable(state: SessionState, participantId: ParticipantId, now = Date.now()): boolean {
     const beat = this.autopilots.get(participantId)
-    return Boolean(beat && now - beat.at < AUTOPILOT_FRESH_MS && !beat.limited)
+    return Boolean(beat && now - beat.at < AUTOPILOT_FRESH_MS && !beat.limited) && !this.overLimit(state, participantId, now)
   }
 
-  /** Seats in a session whose account has hit its usage limit. */
+  /** Whether a seat's person has spent their own daily limit on this session. */
+  overLimit(state: SessionState, participantId: ParticipantId, now = Date.now()): boolean {
+    const login = state.participants.get(participantId)?.githubLogin
+    return login ? state.overDailyLimit(login, now) : false
+  }
+
+  /** Seats in a session whose account has hit its usage limit, or whose person their daily one. */
   limitedIn(sessionId: SessionId): string[] {
     const now = Date.now()
-    return [...this.state(sessionId).participants.values()]
+    const state = this.state(sessionId)
+    return [...state.participants.values()]
       .filter((p) => {
         const beat = this.autopilots.get(p.id)
-        return Boolean(beat?.limited && now - beat.at < AUTOPILOT_FRESH_MS)
+        return Boolean(beat?.limited && now - beat.at < AUTOPILOT_FRESH_MS) || this.overLimit(state, p.id, now)
       })
       .map((p) => p.id)
   }
@@ -627,6 +635,8 @@ export class SessionService {
         return this.updateSprint(command, ctx)
       case 'sprint.delete':
         return this.deleteSprint(command, ctx)
+      case 'profile.update':
+        return this.updateProfile(command, ctx)
       case 'agent.doing': {
         const { sessionId, participantId } = this.requireParticipant(ctx)
         if (ctx.via === 'board') throw new ServiceError('forbidden', 'Only a checkout reports what its Claude is doing.')
@@ -1345,7 +1355,7 @@ export class SessionService {
   private verifier(state: SessionState, ticket: Ticket): ParticipantId | null {
     const checkout = (id: ParticipantId) => Boolean(state.participants.get(id)?.repoPath)
     const members = [ticket.authorId, ...ticket.members.filter((id) => id !== ticket.authorId)].filter(checkout)
-    return members.find((id) => this.isAvailable(id)) ?? members[0] ?? null
+    return members.find((id) => this.isAvailable(state, id)) ?? members[0] ?? null
   }
 
   /**
@@ -1353,7 +1363,7 @@ export class SessionService {
    * unstarted tasks go to a teammate who can, and a ticket waiting on it to be
    * run end to end is handed to someone else to run.
    */
-  private reroute(sessionId: SessionId, participantId: ParticipantId): void {
+  private reroute(sessionId: SessionId, participantId: ParticipantId, why = 'account is out of usage'): void {
     const state = this.state(sessionId)
     const who = state.participants.get(participantId)?.displayName ?? 'Someone'
     for (const task of [...state.tasks.values()]) {
@@ -1363,7 +1373,7 @@ export class SessionService {
         (id) => {
           const p = state.participants.get(id)
           // Open with usage left, or at least at work in their checkout lately.
-          return id !== participantId && Boolean(p?.repoPath) && (this.isAvailable(id) || this.isWorking(p!))
+          return id !== participantId && Boolean(p?.repoPath) && (this.isAvailable(state, id) || this.isWorking(p!))
         },
       )
       const to = others.sort((a, b) => state.activeTaskCount(a) - state.activeTaskCount(b))[0]
@@ -1373,7 +1383,7 @@ export class SessionService {
         sessionId,
         null,
         [to],
-        `${who}'s account is out of usage, so ${task.id} -- ${task.title} -- is yours now. Claim it with ss_claim, do it, and finish with ss_done.`,
+        `${who}'s ${why}, so ${task.id} -- ${task.title} -- is yours now. Claim it with ss_claim, do it, and finish with ss_done.`,
       )
     }
     for (const ticket of [...state.tickets.values()]) {
@@ -2569,9 +2579,18 @@ export class SessionService {
       }
     }
 
+    // Past their own daily limit: nothing new is picked for them, though they can still name a task.
+    if (!command.taskId && this.overLimit(state, participantId)) {
+      return {
+        task: null,
+        lease: null,
+        reason: 'You are past the daily token limit you set on your profile, so nothing new is picked for you until 00:00 UTC.',
+      }
+    }
+
     const task = command.taskId
       ? (state.tasks.get(command.taskId) ?? null)
-      : state.pickTaskFor(participantId, (id) => this.isAvailable(id))
+      : state.pickTaskFor(participantId, (id) => this.isAvailable(state, id))
 
     if (!task) {
       return {
@@ -2579,7 +2598,7 @@ export class SessionService {
         lease: null,
         reason: command.taskId
           ? `No task "${command.taskId}" in this session.`
-          : state.readyTasks().some((t) => t.assigneeId && t.assigneeId !== participantId && this.isAvailable(t.assigneeId))
+          : state.readyTasks().some((t) => t.assigneeId && t.assigneeId !== participantId && this.isAvailable(state, t.assigneeId))
             ? 'Nothing of yours is ready. The rest belongs to teammates whose Claude Code is open, so they will take it -- leave it to them.'
             : state.readyTasks().length > 0
             ? 'Nothing is claimable right now -- the ready tasks are waiting for their contract to land.'
@@ -3128,7 +3147,8 @@ export class SessionService {
     ctx: CommandContext,
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
-    if (command.inputTokens + command.outputTokens === 0) return { ok: true as const }
+    const wasOver = this.overLimit(state, participantId)
+    if (command.inputTokens + command.outputTokens === 0) return { ok: true as const, overLimit: wasOver }
 
     const held = [...state.tasks.values()].find(
       (task) => task.ownerId === participantId && task.state !== 'merged',
@@ -3143,7 +3163,34 @@ export class SessionService {
       cacheCreationTokens: command.cacheCreationTokens,
       turns: command.turns,
     })
-    return { ok: true as const }
+    const overLimit = this.overLimit(state, participantId)
+    if (overLimit && !wasOver) this.limitReached(sessionId, state, participantId)
+    return { ok: true as const, overLimit }
+  }
+
+  /**
+   * Someone just went past the daily limit they set. Every seat of theirs is
+   * out of the running for today: what was waiting on them goes to someone who
+   * can take it, and the board hears about it now rather than on the next beat.
+   */
+  private limitReached(sessionId: SessionId, state: SessionState, participantId: ParticipantId): void {
+    const login = state.participants.get(participantId)?.githubLogin.toLowerCase()
+    for (const seat of [...state.participants.values()]) {
+      if (seat.githubLogin.toLowerCase() === login) this.reroute(sessionId, seat.id, 'daily token limit is spent')
+    }
+    this.onLive?.(sessionId)
+  }
+
+  private updateProfile(command: Extract<ClientCommand, { type: 'profile.update' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const login = state.participants.get(participantId)?.githubLogin.toLowerCase()
+    if (!login) throw new ServiceError('unauthorized', 'Join a session first.')
+    const wasOver = state.overDailyLimit(login)
+    const profile = { login, dailyLimit: command.dailyLimit, updatedAt: Date.now() }
+    this.emit(sessionId, participantId, { type: 'profile.updated', profile })
+    if (state.overDailyLimit(login) && !wasOver) this.limitReached(sessionId, state, participantId)
+    else if (wasOver !== state.overDailyLimit(login)) this.onLive?.(sessionId)
+    return { profile }
   }
 
   private reportActivity(
@@ -3163,7 +3210,7 @@ export class SessionService {
     command: Extract<ClientCommand, { type: 'agent.heartbeat' }>,
     ctx: CommandContext,
   ) {
-    const { participantId } = this.requireParticipant(ctx)
+    const { participantId, state } = this.requireParticipant(ctx)
     // A board has no Claude Code behind it; only a checkout's own token counts.
     if (ctx.via === 'board') {
       throw new ServiceError('forbidden', 'Only a checkout can report its autopilot.')
@@ -3176,7 +3223,7 @@ export class SessionService {
     if (!before || before.mode !== command.autopilot || before.limited !== command.limited || Date.now() - before.at > 60_000) {
       this.onLive?.(this.requireSession(ctx))
     }
-    return { ok: true as const }
+    return { ok: true as const, overLimit: this.overLimit(state, participantId) }
   }
 
   // -- connection lifecycle ------------------------------------------------

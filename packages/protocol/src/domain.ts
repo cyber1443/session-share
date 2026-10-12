@@ -554,6 +554,59 @@ export const Usage = z.object({
 })
 export type Usage = z.infer<typeof Usage>
 
+/**
+ * How much each kind of token counts towards a "unit". A subscription has no
+ * per-token price, so these are the API's price ratios relative to an input
+ * token: output costs five times as much, writing the cache a quarter more,
+ * reading it a tenth. Raw counts would let cache reads -- cheap, and by far the
+ * largest number -- decide who has spent the most.
+ */
+export const USAGE_WEIGHT = { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.1 } as const
+
+export function weightedUnits(u: {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+}): number {
+  return (
+    u.inputTokens * USAGE_WEIGHT.input +
+    u.outputTokens * USAGE_WEIGHT.output +
+    u.cacheCreationTokens * USAGE_WEIGHT.cacheWrite +
+    u.cacheReadTokens * USAGE_WEIGHT.cacheRead
+  )
+}
+
+/** The UTC day a timestamp falls on. Daily limits reset at 00:00 UTC. */
+export function usageDay(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 10)
+}
+
+/**
+ * A person's own settings in a session, by login: a person with a board and
+ * two checkouts is one person, and one limit covers all their seats.
+ */
+export const Profile = z.object({
+  login: z.string().min(1),
+  /**
+   * Weighted units (see USAGE_WEIGHT) this person's Claude may spend on the
+   * session per UTC day. Past it their seats count as out of usage: their
+   * unstarted work is handed on, and nothing more is handed to them until the
+   * day turns over. Null is no limit.
+   */
+  dailyLimit: z.number().int().positive().nullable().default(null),
+  updatedAt: Timestamp,
+})
+export type Profile = z.infer<typeof Profile>
+
+/** What one person has spent on the session so far on `day`, in weighted units. */
+export const DailySpend = z.object({
+  login: z.string().min(1),
+  day: z.string(),
+  units: z.number().nonnegative(),
+})
+export type DailySpend = z.infer<typeof DailySpend>
+
 // ---------------------------------------------------------------------------
 // Merge queue
 // ---------------------------------------------------------------------------
@@ -602,6 +655,9 @@ export const SessionSnapshot = z.object({
   handoffs: z.array(HandoffRequest),
   chat: z.array(ChatMessage),
   usage: z.array(Usage).default([]),
+  profiles: z.array(Profile).default([]),
+  /** Today's spend by login, for daily limits; a stale day reads as zero. */
+  spentToday: z.array(DailySpend).default([]),
   comments: z.array(TicketComment).default([]),
   sprints: z.array(Sprint).default([]),
   mergeQueue: z.array(MergeQueueEntry),

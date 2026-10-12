@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { chooseSeat, type Participant, type Task } from '@session-share/protocol'
+import { chooseSeat, usageDay, type Participant, type Task } from '@session-share/protocol'
 import { AuthProvider, SignIn, useAuth } from '@/components/auth'
 import { PeerGate } from '@/components/peer-gate'
 import { api, peerToken } from '@/lib/api'
@@ -15,6 +15,7 @@ import { HistoryView } from '@/components/history'
 import { UsageView } from '@/components/usage'
 import { GitHubView } from '@/components/github'
 import { TimelineView } from '@/components/timeline'
+import { ProfilePanel } from '@/components/profile'
 import type { SprintFilter } from '@/components/kanban'
 import { useLiveSession } from '@/lib/live'
 import { tokens } from '@/lib/tokens'
@@ -43,6 +44,8 @@ function Board({ slug }: { slug: string }) {
   const [actionError, setActionError] = useState<string | null>(null)
   const [view, setView] = useState<View>('board')
   const [sprintFilter, setSprintFilter] = useState<SprintFilter>('all')
+  /** Whose profile is open, by login. */
+  const [profile, setProfile] = useState<string | null>(null)
 
   if (error && !snapshot) {
     return (
@@ -111,6 +114,20 @@ function Board({ slug }: { slug: string }) {
               attach checkout
             </button>
           ) : null}
+          {mine ? (
+            <button
+              className="flex items-center gap-2 text-neutral-300 hover:text-neutral-100"
+              onClick={() => setProfile(mine.githubLogin)}
+              title="your profile"
+            >
+              {mine.avatarUrl ? (
+                <img src={mine.avatarUrl} alt="" className="h-5 w-5 rounded-full border border-edge" />
+              ) : (
+                <span className={`h-2 w-2 rounded-full ${DOT[mine.colorIndex % DOT.length]}`} />
+              )}
+              {mine.displayName}
+            </button>
+          ) : null}
         </div>
       </header>
 
@@ -126,7 +143,10 @@ function Board({ slug }: { slug: string }) {
                     <span
                       className={`h-2 w-2 shrink-0 rounded-full ${DOT[participant.colorIndex % DOT.length]} ${participant.connected ? '' : 'opacity-30'}`}
                     />
-                    <span className="truncate text-neutral-300">
+                    <button
+                      className="truncate text-left text-neutral-300 hover:text-neutral-100"
+                      onClick={() => setProfile(participant.githubLogin)}
+                    >
                       {participant.displayName}
                       {(seatsOf.get(participant.githubLogin) ?? 0) > 1 && participant.repoPath ? (
                         <span className="text-mute">
@@ -134,12 +154,23 @@ function Board({ slug }: { slug: string }) {
                           · {participant.repoPath.split('/').filter(Boolean).at(-1)}
                         </span>
                       ) : null}
-                    </span>
+                    </button>
                   </div>
                   <p className="mt-0.5 truncate pl-4 text-[10px] text-mute">
                     {participant.activity.detail}
                     {participant.repoPath ? '' : ' · watching'}
                   </p>
+                  {snapshot.limited?.includes(participant.id) ? (
+                    <p className="truncate pl-4 text-[10px] text-amber-400">
+                      {(() => {
+                        const limit = snapshot.profiles.find((p) => p.login === participant.githubLogin.toLowerCase())?.dailyLimit
+                        const spent = snapshot.spentToday.find(
+                          (s) => s.login === participant.githubLogin.toLowerCase() && s.day === usageDay(Date.now()),
+                        )?.units
+                        return limit != null && (spent ?? 0) >= limit ? 'daily limit reached' : 'out of usage'
+                      })()}
+                    </p>
+                  ) : null}
                   {/* What their own Claude account has spent on this session. */}
                   {(() => {
                     const spent = snapshot.usage
@@ -313,6 +344,16 @@ function Board({ slug }: { slug: string }) {
         ) : null}
       </div>
 
+      {profile ? (
+        <ProfilePanel
+          key={profile}
+          login={profile}
+          snapshot={snapshot}
+          isMe={profile.toLowerCase() === mine?.githubLogin.toLowerCase()}
+          send={send}
+          onClose={() => setProfile(null)}
+        />
+      ) : null}
       {pairing ? <JoinCode sessionRef={slug} mode={mode} onClose={() => setPairing(false)} /> : null}
     </div>
   )

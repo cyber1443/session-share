@@ -9,6 +9,7 @@ import {
   HandoffRequest,
   Lease,
   ParticipantActivity,
+  Profile,
   RepoRef,
   SessionSnapshot,
   Sprint,
@@ -177,6 +178,16 @@ export const ClientCommand = z.discriminatedUnion('type', [
     state: SprintState.optional(),
   }),
   z.object({ type: z.literal('sprint.delete'), sprintId: z.string().min(1) }),
+
+  /**
+   * The caller's own profile. Only ever their own: the login comes from who is
+   * asking, so nobody can set a limit on someone else's account.
+   */
+  z.object({
+    type: z.literal('profile.update'),
+    /** Weighted units per UTC day; null removes the limit. */
+    dailyLimit: z.number().int().min(1_000).max(100_000_000_000).nullable(),
+  }),
 
   /**
    * Ask for a split from the board. Planning needs a repo and a model, neither
@@ -400,6 +411,7 @@ export interface CommandResultMap {
   'sprint.create': { sprint: Sprint }
   'sprint.update': { sprint: Sprint }
   'sprint.delete': { ticketsMoved: number }
+  'profile.update': { profile: Profile }
   'plan.request': { plannerId: ParticipantId; goal: string }
   'decomposition.propose': ProposeResult
   'task.assign': { assignments: Assignment[] }
@@ -422,9 +434,10 @@ export interface CommandResultMap {
    * reader can draw a line at "now" in the server's terms.
    */
   'chat.read': { messages: ChatMessage[]; latestId: MessageId | null; cursorFound: boolean }
-  'usage.report': { ok: true }
+  /** `overLimit`: this person is past their daily limit, so take on nothing new. */
+  'usage.report': { ok: true; overLimit?: boolean }
   'activity.report': { ok: true }
-  'agent.heartbeat': { ok: true }
+  'agent.heartbeat': { ok: true; overLimit?: boolean }
   'agent.doing': { ok: true }
 }
 

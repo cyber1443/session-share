@@ -677,6 +677,36 @@ describe('whose task an agent takes', () => {
   })
 })
 
+describe('a daily token limit', () => {
+  it('hands work on once a person spends what they allowed themselves, and only their own profile', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    liveTicket(s, a, b, 'D', 'src/d/c.ts', [spec('d-mine', ['src/d/x/**']), spec('d-theirs', ['src/d/y/**'])])
+    const bobTask = [...s.state().tasks.values()].find((t) => t.assigneeId === b.participantId)
+    s.run(a, { type: 'agent.heartbeat', autopilot: 'full' })
+    s.run(b, { type: 'agent.heartbeat', autopilot: 'full' })
+
+    const set = s.run(b, { type: 'profile.update', dailyLimit: 1000 })
+    assert.equal(set.profile.login, 'bob', 'the limit lands on the caller')
+
+    const under = s.run(b, { type: 'usage.report', inputTokens: 100, outputTokens: 100 })
+    assert.equal(under.overLimit, false)
+    assert.equal(s.state().tasks.get(bobTask.id).assigneeId, b.participantId)
+
+    const over = s.run(b, { type: 'usage.report', inputTokens: 0, outputTokens: 200 })
+    assert.equal(over.overLimit, true, '100 + 100*5 + 200*5 units is past 1000')
+    assert.equal(s.state().tasks.get(bobTask.id).assigneeId, a.participantId, 'his task is handed on')
+    assert.ok(s.app.service.limitedIn(s.sessionId).includes(b.participantId))
+    assert.equal(s.run(b, { type: 'agent.heartbeat', autopilot: 'full' }).overLimit, true)
+    assert.match(s.run(b, { type: 'task.claim' }).reason, /daily token limit/)
+
+    s.run(b, { type: 'profile.update', dailyLimit: null })
+    assert.equal(s.app.service.limitedIn(s.sessionId).includes(b.participantId), false)
+    assert.equal(s.state().profiles.has('alice'), false, "alice's profile is untouched")
+  })
+})
+
 describe('a ticket that asks for a human look', () => {
   function verifiable(s, a, b) {
     const made = liveTicket(s, a, b, 'Looks', 'src/l/c.ts', [spec('look-one', ['src/l/x/**'])])

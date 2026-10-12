@@ -1,5 +1,8 @@
+import { usageDay, weightedUnits } from './domain.js'
 import type {
   ChatMessage,
+  DailySpend,
+  Profile,
   Decomposition,
   Sprint,
   Subticket,
@@ -86,6 +89,10 @@ export class SessionState {
   readonly chat: ChatMessage[] = []
   /** Keyed by `participant|ticket`, so both totals fall out of one map. */
   readonly usage = new Map<string, Usage>()
+  /** Keyed by lowercase login: one profile per person, whatever seats they hold. */
+  readonly profiles = new Map<string, Profile>()
+  /** What each login spent on the latest day it spent anything, in weighted units. */
+  readonly spentToday = new Map<string, DailySpend>()
   /** Insertion-ordered, which is the order a ticket shows them. */
   readonly comments = new Map<string, TicketComment>()
   readonly sprints = new Map<string, Sprint>()
@@ -450,8 +457,19 @@ export class SessionState {
           cacheCreationTokens: at.cacheCreationTokens + body.cacheCreationTokens,
           turns: at.turns + body.turns,
         })
+        const login = this.participants.get(body.participantId)?.githubLogin.toLowerCase()
+        if (login) {
+          const day = usageDay(envelope.ts)
+          const was = this.spentToday.get(login)
+          const before = was?.day === day ? was.units : 0
+          this.spentToday.set(login, { login, day, units: before + weightedUnits(body) })
+        }
         break
       }
+
+      case 'profile.updated':
+        this.profiles.set(body.profile.login, body.profile)
+        break
 
       case 'merge.queue':
         this.mergeQueue = body.entries
@@ -699,6 +717,18 @@ export class SessionState {
     return tasks.every((task) => task.state === 'merged') ? 'integrate' : 'build'
   }
 
+  /** Weighted units a login has spent on the session so far today (UTC). */
+  spentOn(login: string, now = Date.now()): number {
+    const spend = this.spentToday.get(login.toLowerCase())
+    return spend && spend.day === usageDay(now) ? spend.units : 0
+  }
+
+  /** Whether a login has reached the daily limit it set for itself. */
+  overDailyLimit(login: string, now = Date.now()): boolean {
+    const limit = this.profiles.get(login.toLowerCase())?.dailyLimit ?? null
+    return limit !== null && this.spentOn(login, now) >= limit
+  }
+
   /** Tasks whose blocked/ready state no longer matches their dependencies. */
   staleStateTasks(): Task[] {
     return [...this.tasks.values()].filter((task) => {
@@ -774,6 +804,10 @@ export class SessionState {
     }
     this.comments.clear()
     for (const comment of snapshot.comments ?? []) this.comments.set(comment.id, comment)
+    this.profiles.clear()
+    for (const profile of snapshot.profiles ?? []) this.profiles.set(profile.login, profile)
+    this.spentToday.clear()
+    for (const spend of snapshot.spentToday ?? []) this.spentToday.set(spend.login, spend)
     this.sprints.clear()
     for (const sprint of snapshot.sprints ?? []) this.sprints.set(sprint.id, sprint)
     this.mergeQueue = snapshot.mergeQueue
@@ -805,6 +839,8 @@ export class SessionState {
       handoffs: [...this.handoffs.values()],
       chat: this.chat,
       usage: [...this.usage.values()],
+      profiles: [...this.profiles.values()],
+      spentToday: [...this.spentToday.values()],
       comments: [...this.comments.values()],
       sprints: [...this.sprints.values()],
       mergeQueue: this.mergeQueue,

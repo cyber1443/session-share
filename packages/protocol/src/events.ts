@@ -13,6 +13,7 @@ import {
   MergeQueueEntry,
   Participant,
   ParticipantActivity,
+  Profile,
   Session,
   SessionPhase,
   Sprint,
@@ -149,6 +150,10 @@ export const EventBody = z.discriminatedUnion('type', [
   z.object({ type: z.literal('sprint.updated'), sprint: Sprint }),
   /** Its tickets go back to the backlog; nothing else about them changes. */
   z.object({ type: z.literal('sprint.deleted'), sprintId: z.string().min(1) }),
+
+  // -- profiles -------------------------------------------------------------
+  /** A person's profile as it now stands, whole. */
+  z.object({ type: z.literal('profile.updated'), profile: Profile }),
 
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */

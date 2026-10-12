@@ -324,13 +324,17 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
    * is wrong whenever an autopilot is about to take it. An older server refuses
    * the command; that costs nothing.
    */
-  await runCommand(config, {
+  const beat = await runCommand(config, {
     type: 'agent.heartbeat',
     autopilot: preferences.autopilot,
     limited: Date.now() < limitedUntil,
   }).catch(() => undefined)
   if (Date.now() < limitedUntil) {
     return { ran: false, ok: false, reason: 'this account is out of usage for now' }
+  }
+  // The daily limit set on the board's profile covers unattended work too.
+  if (beat?.overLimit) {
+    return { ran: false, ok: false, reason: 'the daily token limit on your profile is spent' }
   }
 
   let inbox

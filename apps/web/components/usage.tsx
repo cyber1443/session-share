@@ -1,8 +1,8 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import type { SessionSnapshot } from '@session-share/protocol'
-import { api, type UsageDay } from '@/lib/api'
+import { USAGE_WEIGHT as WEIGHT, weightedUnits as weighted, type SessionSnapshot } from '@session-share/protocol'
+import { api } from '@/lib/api'
 import { usePoll } from '@/lib/poll'
 import { tokens } from '@/lib/tokens'
 import { Stat } from './history'
@@ -17,21 +17,6 @@ const BAR = [
   'bg-orange-400',
   'bg-indigo-400',
 ]
-
-/**
- * How much each kind of token counts towards someone's share. A subscription
- * has no per-token price, so these are the API's price ratios relative to an
- * input token: output costs five times as much, writing the cache a quarter
- * more, reading it a tenth. Raw counts would let cache reads -- cheap, and by
- * far the largest number -- decide who gets paid.
- */
-const WEIGHT = { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.1 }
-
-const weighted = (u: Pick<UsageDay, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens'>) =>
-  u.inputTokens * WEIGHT.input +
-  u.outputTokens * WEIGHT.output +
-  u.cacheCreationTokens * WEIGHT.cacheWrite +
-  u.cacheReadTokens * WEIGHT.cacheRead
 
 interface Person {
   login: string
