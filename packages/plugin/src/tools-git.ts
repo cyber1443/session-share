@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { isLoopbackUrl, type SessionSnapshot } from '@session-share/protocol'
+import { isLoopbackUrl, pathMatchesAny, type SessionSnapshot } from '@session-share/protocol'
 import { runCommand } from './client.js'
 import type { SessionConfig } from './config.js'
 import { readDaemon, expectedBuild, lanAddress, probe } from './daemon.js'
@@ -25,6 +25,7 @@ import {
   writeFiles,
 } from './git.js'
 import { describePreferences, readPreferences, writePreferences, PREFERENCES_FILE } from './preferences.js'
+import { subjectProblem, taskMessage, taskSubject } from './conventions.js'
 import {
   buildOf,
   ensureTerminalHost,
@@ -277,7 +278,7 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
       await checkoutBranch(root, branch, state.session.repo.baseBranch)
 
       const written = await writeFiles(root, files)
-      const sha = await commit(root, written, `contract: ${state.session.title}\n\n${summary}`)
+      const sha = await commit(root, written, `chore(contract): ${state.session.title.toLowerCase()}`.slice(0, 72) + `\n\n${summary}`)
 
       const pushed = preferences.push ? await push(root, branch) : false
 
@@ -348,14 +349,26 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
         'Finish a task: commit everything under its owned paths, push, open a pull request, and merge it into the contract branch so whatever was waiting on it becomes claimable.',
       inputSchema: {
         taskId: z.string(),
-        summary: z.string().max(500).describe('One line for the commit message'),
+        summary: z
+          .string()
+          .max(500)
+          .describe('One line for the commit message, ideally "<type>(<task-id>): <subject>"; otherwise filed as feat(<task-id>)'),
+        commits: z
+          .array(
+            z.object({
+              message: z.string().min(1).max(2000).describe('Conventional Commit: "<type>(<scope>): <subject>", optional body after a blank line'),
+              paths: z.array(z.string().min(1)).min(1).describe('Exactly the files in this commit'),
+            }),
+          )
+          .optional()
+          .describe('Land the work as several atomic commits, in this order. Anything under the task left over goes in a final commit from summary.'),
         force: z
           .boolean()
           .default(false)
           .describe('Land it even though the acceptance command has not passed'),
       },
     },
-    async ({ taskId, summary, force }) => {
+    async ({ taskId, summary, force, commits }) => {
       const config = ctx.config()
       const root = await ctx.repoRoot()
       const preferences = readPreferences()
@@ -422,8 +435,23 @@ export function registerGitTools(server: McpServer, ctx: Context): void {
         )
       }
 
+      // Checked before anything moves, so a bad message strands nothing.
+      for (const planned of commits ?? []) {
+        const problem = subjectProblem(planned.message.split('\n')[0]!.trim())
+        if (problem) return ctx.text(`${problem}\n\nNothing was committed.`)
+        const outside = planned.paths.filter((path) => !pathMatchesAny(path, paths))
+        if (outside.length > 0) {
+          return ctx.text(`These paths are outside "${taskId}": ${outside.join(', ')}\n\nNothing was committed.`)
+        }
+      }
+
       await checkoutBranch(root, branch, contract)
-      const sha = await commit(root, paths, `${taskId}: ${summary}`)
+      let sha: string | null = null
+      for (const planned of commits ?? []) {
+        const [subject, ...body] = planned.message.split('\n')
+        sha = (await commit(root, planned.paths, taskMessage(taskId, subject!.trim(), body.join('\n')))) ?? sha
+      }
+      sha = (await commit(root, paths, taskMessage(taskId, taskSubject(taskId, summary)))) ?? sha
 
       const pushed = preferences.push ? await push(root, branch) : false
       let prNumber: number | null = null

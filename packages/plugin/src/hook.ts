@@ -7,6 +7,7 @@ import { isAutopilotRunning, markBusy, markIdle } from './busy.js'
 import { describeDirectives, pendingDirectives } from './inbox.js'
 import { readPreferences, TERSE_STYLE } from './preferences.js'
 import { usageSince } from './usage.js'
+import { GIT_CONVENTIONS, gitCommandProblem } from './conventions.js'
 
 /**
  * Every hook the plugin installs, in one process.
@@ -232,6 +233,13 @@ export async function route(
       if (input.tool_name === 'Bash') {
         const command = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
         const said = typeof input.tool_input?.description === 'string' ? input.tool_input.description : ''
+        // In a session checkout, git is used one way by every agent.
+        const problem = readConfig(input.cwd ?? process.cwd()) ? gitCommandProblem(command) : null
+        if (problem) {
+          return {
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: problem },
+          }
+        }
         await reportDoing(input, `running ${said ? `${said}: ` : ''}${command}`)
         return null
       }
@@ -268,11 +276,9 @@ export async function route(
       }
       const room = await collectRoom(input)
       // Said once when a session starts (and again after a compaction), not on every prompt.
-      const style =
-        event === 'SessionStart' && readConfig(input.cwd ?? process.cwd()) && readPreferences().terse
-          ? TERSE_STYLE
-          : null
-      const additionalContext = [style, room].filter(Boolean).join('\n\n')
+      const starting = event === 'SessionStart' && readConfig(input.cwd ?? process.cwd())
+      const style = starting && readPreferences().terse ? TERSE_STYLE : null
+      const additionalContext = [style, starting ? GIT_CONVENTIONS : null, room].filter(Boolean).join('\n\n')
       return additionalContext
         ? { hookSpecificOutput: { hookEventName: event, additionalContext } }
         : null
