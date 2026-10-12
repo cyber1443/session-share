@@ -281,6 +281,7 @@ export class SessionService {
           how: `checked by hand by ${by}`,
           summary: command.note || 'It does not work when tried by hand.',
           broke: [],
+          followUps: [],
         },
         ctx,
       )
@@ -1086,12 +1087,29 @@ export class SessionService {
     ctx: CommandContext,
   ) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    const ticket = this.openTicket(sessionId, participantId, state, {
+      title: command.title,
+      body: command.body,
+      attachments: command.attachments.map((a) => ({ ...a, kind: 'brief' as const })),
+      needsHuman: command.needsHuman,
+      sprintId: command.sprintId ? this.requireSprint(state, command.sprintId).id : null,
+      followUpOf: null,
+    })
+    return { ticket, plannerId: null }
+  }
 
+  /** Puts a new card in the plan column and tells everyone else it is there. */
+  private openTicket(
+    sessionId: SessionId,
+    participantId: ParticipantId,
+    state: SessionState,
+    fields: Pick<Ticket, 'title' | 'body' | 'attachments' | 'needsHuman' | 'sprintId' | 'followUpOf'>,
+  ): Ticket {
     const ticket: Ticket = {
       id: randomUUID() as TicketId,
       sessionId,
-      title: command.title,
-      body: command.body,
+      title: fields.title,
+      body: fields.body,
       authorId: participantId,
       members: [participantId],
       state: 'plan',
@@ -1099,13 +1117,14 @@ export class SessionService {
       decompositionId: null,
       prNumber: null,
       mergedAt: null,
-      attachments: command.attachments.map((a) => ({ ...a, kind: 'brief' as const })),
-      needsHuman: command.needsHuman,
+      attachments: fields.attachments,
+      needsHuman: fields.needsHuman,
       humanCheck: null,
       subtickets: [],
-      sprintId: command.sprintId ? this.requireSprint(state, command.sprintId).id : null,
+      sprintId: fields.sprintId,
       dueAt: null,
       startedAt: null,
+      followUpOf: fields.followUpOf,
       createdAt: Date.now(),
     }
     this.requireFiles(sessionId, ticket.attachments)
@@ -1120,11 +1139,13 @@ export class SessionService {
         sessionId,
         participantId,
         others.map((p) => p.id),
-        `${author?.displayName ?? 'Someone'} opened "${ticket.title}". Join it on the board if you want in; it is split for whoever is in it when someone presses start.`,
+        fields.followUpOf
+          ? `Verifying "${state.tickets.get(fields.followUpOf)?.title ?? 'a ticket'}" turned up "${ticket.title}", now on the board as a follow-up. Join it if you want in.`
+          : `${author?.displayName ?? 'Someone'} opened "${ticket.title}". Join it on the board if you want in; it is split for whoever is in it when someone presses start.`,
       )
     }
 
-    return { ticket: state.tickets.get(ticket.id)!, plannerId: null }
+    return state.tickets.get(ticket.id)!
   }
 
   /**
@@ -1443,6 +1464,9 @@ export class SessionService {
         'what you saw. Passing sends it to review. Failing reopens work, so it needs `broke`:',
         'the ids of the tasks the failure is on. Leave `broke` out only if you truly cannot tell',
         '-- every task reopens then, and everyone re-does work that was probably fine.',
+        'Pass or fail, anything you found that is not this ticket\'s to fix -- an open question,',
+        'something that needs checking, a bug elsewhere -- goes in `followUps` as { title, body }.',
+        'Each becomes a ticket on the board for the team to pick up.',
       ].join('\n'),
     )
   }
@@ -1583,7 +1607,35 @@ export class SessionService {
       }
     }
 
-    return { ticket: this.requireTicket(state, command.ticketId) }
+    /**
+     * Whatever the run turned up beyond this ticket becomes its own card, in
+     * the plan column and linked back. Nothing starts it: someone still has to
+     * decide it is worth doing. A title already on an open card is skipped, so
+     * a second run reporting the same thing does not file it twice.
+     */
+    const open = new Set(
+      [...state.tickets.values()]
+        .filter((t) => state.ticketStateFor(t.id) !== 'done')
+        .map((t) => t.title.trim().toLowerCase()),
+    )
+    const followUps: Ticket[] = []
+    for (const found of command.followUps) {
+      const key = found.title.trim().toLowerCase()
+      if (open.has(key)) continue
+      open.add(key)
+      followUps.push(
+        this.openTicket(sessionId, participantId, state, {
+          title: found.title,
+          body: [found.body.trim(), `Found while verifying "${ticket.title}" (${command.how}).`].filter(Boolean).join('\n\n'),
+          attachments: [],
+          needsHuman: false,
+          sprintId: ticket.sprintId,
+          followUpOf: ticket.id,
+        }),
+      )
+    }
+
+    return { ticket: this.requireTicket(state, command.ticketId), followUps }
   }
 
   private shipTicket(

@@ -323,6 +323,7 @@ function Card({
       {ticket.state === 'proposed' ? (
         <p className="text-[10px] font-medium text-accent">split ready — open to start it</p>
       ) : null}
+      {ticket.followUpOf ? <p className="text-[10px] text-amber-400">follow-up from verification</p> : null}
       {ticket.attachments.length > 0 || ticket.needsHuman ? (
         <p className="text-[10px] text-mute">
           {ticket.attachments.length > 0 ? `${ticket.attachments.length} picture(s)` : ''}

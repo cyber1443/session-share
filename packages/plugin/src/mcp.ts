@@ -976,27 +976,39 @@ export function createServer(): McpServer {
           .describe(
             'Failing only: the ids of the tasks the failure is on. Those tasks reopen and become claimable again. Omit only if you genuinely cannot tell -- every task reopens then',
           ),
+        followUps: z
+          .array(z.object({ title: z.string().min(1).max(200), body: z.string().max(4000).default('') }))
+          .max(10)
+          .optional()
+          .describe(
+            'Pass or fail: what the run turned up that is not this ticket\'s to fix -- open questions, things that need checking, bugs elsewhere. Each becomes a ticket on the board, linked back here',
+          ),
       },
     },
-    async ({ ticketId, passed, how, summary, broke }) => {
+    async ({ ticketId, passed, how, summary, broke, followUps }) => {
       const cfg = config()
-      const { ticket } = await runCommand(cfg, {
+      const result = await runCommand(cfg, {
         type: 'ticket.verified',
         ticketId: ticketId as never,
         passed,
         how,
         summary,
         broke: (broke ?? []) as never,
+        followUps: followUps ?? [],
       })
+      const { ticket } = result
       const reopened = ticket.verification?.broke ?? []
+      const filed = result.followUps.length
+        ? `\nFiled as follow-up tickets: ${result.followUps.map((t) => `"${t.title}"`).join(', ')}.`
+        : ''
       return text(
-        passed
+        (passed
           ? `"${ticket.title}" verified. It is in review; open the PR with ss_ship.`
           : [
               `Recorded as broken, and the work is open again: ${reopened.join(', ') || 'nothing to reopen'}.`,
               `Everyone who built "${ticket.title}" has been told what you saw and asked to fix it.`,
               'When the last fix lands you will be asked to run it again.',
-            ].join('\n'),
+            ].join('\n')) + filed,
       )
     },
   )

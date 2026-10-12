@@ -10,6 +10,7 @@ import {
   Lease,
   ParticipantActivity,
   Profile,
+  FollowUp,
   RepoRef,
   SessionSnapshot,
   Sprint,
@@ -124,6 +125,12 @@ export const ClientCommand = z.discriminatedUnion('type', [
     summary: z.string().max(2000),
     /** Failing: whose tasks to reopen. Empty reopens the lot. */
     broke: z.array(TaskId).default([]),
+    /**
+     * What the run turned up that is not this ticket's to fix: unknowns,
+     * things that need checking, bugs elsewhere. Each becomes a ticket in the
+     * plan column, linked back here. Never started on its own.
+     */
+    followUps: z.array(FollowUp).max(10).default([]),
   }),
   /** Records the pull request that finished a ticket. */
   z.object({ type: z.literal('ticket.shipped'), ticketId: TicketId, prNumber: z.number().int().nullable().default(null) }),
@@ -391,7 +398,7 @@ export interface CommandResultMap {
   'ticket.delete': { ticketId: TicketId; tasksRemoved: number }
   'ticket.start': { ticket: Ticket; plannerId: ParticipantId | null }
   'ticket.approve': { ticket: Ticket }
-  'ticket.verified': { ticket: Ticket }
+  'ticket.verified': { ticket: Ticket; followUps: Ticket[] }
   'ticket.shipped': { ticket: Ticket }
   'ticket.attach': { ticket: Ticket }
   'ticket.needsHuman': { ticket: Ticket }

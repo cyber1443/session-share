@@ -55,6 +55,7 @@ function completeTicket(ticket: Ticket): Ticket {
     sprintId: ticket.sprintId ?? null,
     dueAt: ticket.dueAt ?? null,
     startedAt: ticket.startedAt ?? null,
+    followUpOf: ticket.followUpOf ?? null,
   }
 }
 

@@ -247,9 +247,18 @@ export const Ticket = z.object({
    * card has existed.
    */
   startedAt: Timestamp.nullable().default(null),
+  /** The ticket whose verification turned this one up, when it came from one. */
+  followUpOf: TicketId.nullable().default(null),
   createdAt: Timestamp,
 })
 export type Ticket = z.infer<typeof Ticket>
+
+/** Something a verification run found that is not this ticket's to fix. */
+export const FollowUp = z.object({
+  title: z.string().trim().min(1).max(200),
+  body: z.string().max(4000).default(''),
+})
+export type FollowUp = z.infer<typeof FollowUp>
 
 /**
  * Something said about a ticket that should stay with it. Chat is the room's

@@ -707,6 +707,31 @@ describe('a daily token limit', () => {
   })
 })
 
+describe('what a verification run turns up', () => {
+  it('files each follow-up as a linked ticket in plan, once', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const { ticket } = liveTicket(s, a, b, 'Checkout', 'src/f/c.ts', [spec('f-one', ['src/f/x/**'])])
+    const task = [...s.state().tasks.values()].find((t) => t.ticketId === ticket.id)
+    const owner = task.assigneeId === a.participantId ? a : b
+    s.run(owner, { type: 'task.claim', taskId: task.id })
+    s.run(owner, { type: 'task.merged', taskId: task.id, commitSha: 'x' })
+
+    const followUps = [
+      { title: 'Coupon field ignores whitespace', body: 'Trailing space rejects valid codes.' },
+      { title: 'Check tax rounding with finance' },
+      { title: 'coupon field ignores whitespace' },
+    ]
+    const result = s.run(a, { type: 'ticket.verified', ticketId: ticket.id, passed: true, how: 'playwright', summary: 'ok', followUps })
+    assert.equal(result.followUps.length, 2, 'the repeated title is filed once')
+    const filed = s.state().tickets.get(result.followUps[0].id)
+    assert.equal(filed.followUpOf, ticket.id)
+    assert.equal(s.state().ticketStateFor(filed.id), 'plan', 'nothing starts it')
+    assert.match(filed.body, /Found while verifying "Checkout"/)
+  })
+})
+
 describe('a ticket that asks for a human look', () => {
   function verifiable(s, a, b) {
     const made = liveTicket(s, a, b, 'Looks', 'src/l/c.ts', [spec('look-one', ['src/l/x/**'])])

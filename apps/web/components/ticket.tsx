@@ -149,6 +149,11 @@ export function TicketPanel({
             {ticket.state}
             {ticket.prNumber ? ` · PR #${ticket.prNumber} ${ticket.mergedAt ? 'merged' : 'open'}` : ''}
           </p>
+          {ticket.followUpOf ? (
+            <p className="mt-1 text-[10px] text-mute">
+              follow-up of &ldquo;{snapshot.tickets.find((t) => t.id === ticket.followUpOf)?.title ?? 'a deleted ticket'}&rdquo;
+            </p>
+          ) : null}
         </div>
         <button className="text-mute hover:text-neutral-300" onClick={onClose}>
           ×
