@@ -51,3 +51,24 @@ jobs:
       - run: pnpm bundle
       - name: The committed bundle must match a fresh build
         run: node scripts/verify-bundle.mjs
+
+  # What Claude Code reads at install time: the manifests, hooks, commands and
+  # skills. A broken one installs fine and fails on the user's machine, so it is
+  # caught here instead.
+  plugin-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          # check-version compares against origin/main, so it needs history.
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: npm install -g @anthropic-ai/claude-code@2.1.296
+      - run: claude plugin validate packages/plugin
+      - run: claude plugin validate .claude-plugin/marketplace.json
+      # The pre-push hook runs this too, but `git push --no-verify` skips it.
+      - name: A changed plugin must come with a version bump
+        run: node scripts/check-version.mjs
