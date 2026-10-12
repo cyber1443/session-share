@@ -732,6 +732,36 @@ describe('what a verification run turns up', () => {
   })
 })
 
+describe('daily summaries', () => {
+  it('takes a digest, asks a checkout for the write-up, and keeps what it posts', () => {
+    const s = session()
+    const a = s.join('alice')
+    s.join('bob')
+    s.run(a, { type: 'ticket.create', title: 'Search page' })
+    s.run(a, { type: 'usage.report', inputTokens: 10, outputTokens: 10 })
+
+    const { summary } = s.run(a, { type: 'summary.request' })
+    assert.equal(summary.writerId, a.participantId, 'no host machine here, so the lead writes it')
+    assert.deepEqual(summary.digest.opened, ['Search page'])
+    assert.equal(summary.digest.spend[0].login, 'alice')
+    assert.ok(s.state().chat.some((m) => m.directive && m.mentions.includes(a.participantId) && /ss_summary/.test(m.body)))
+
+    s.run(a, { type: 'summary.post', day: summary.day, narrative: '**Where we stand** search started.' })
+    assert.match(s.state().summaries.get(summary.day).narrative, /search started/)
+    s.fails(a, { type: 'summary.post', day: '2001-01-01', narrative: 'x' }, 'not_found')
+  })
+
+  it("prefers the host's own checkout as the writer", () => {
+    const s = session()
+    s.join('alice')
+    const b = s.join('bob')
+    const bob = s.state().participants.get(b.participantId)
+    s.state().participants.set(bob.id, { ...bob, machineId: 'host-box' })
+    s.app.service.hostMachineId = 'host-box'
+    assert.equal(s.run(b, { type: 'summary.request' }).summary.writerId, b.participantId)
+  })
+})
+
 describe('a ticket that asks for a human look', () => {
   function verifiable(s, a, b) {
     const made = liveTicket(s, a, b, 'Looks', 'src/l/c.ts', [spec('look-one', ['src/l/x/**'])])

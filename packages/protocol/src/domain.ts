@@ -616,6 +616,39 @@ export const DailySpend = z.object({
 })
 export type DailySpend = z.infer<typeof DailySpend>
 
+/**
+ * The facts of one UTC day, counted by the server from the log. Free and
+ * always there; the AI write-up is laid on top of it when someone's Claude is
+ * around to write one.
+ */
+export const Digest = z.object({
+  day: z.string(),
+  opened: z.array(z.string()).default([]),
+  shipped: z.array(z.string()).default([]),
+  tasksMerged: z.number().int().nonnegative().default(0),
+  verifiedPassed: z.number().int().nonnegative().default(0),
+  verifiedFailed: z.number().int().nonnegative().default(0),
+  followUps: z.array(z.string()).default([]),
+  messages: z.number().int().nonnegative().default(0),
+  spend: z.array(z.object({ login: z.string(), units: z.number().nonnegative() })).default([]),
+  /** Tickets by board column at the time the digest was taken. */
+  columns: z.record(z.string(), z.number().int().nonnegative()).default({}),
+})
+export type Digest = z.infer<typeof Digest>
+
+/** Where the project stood on one day: the digest, and the write-up once it arrives. */
+export const DailySummary = z.object({
+  day: z.string(),
+  digest: Digest,
+  /** Whose Claude was asked to write it; null when nobody could be. */
+  writerId: ParticipantId.nullable().default(null),
+  /** Markdown from the writer's Claude; null until it is posted. */
+  narrative: z.string().nullable().default(null),
+  requestedAt: Timestamp,
+  postedAt: Timestamp.nullable().default(null),
+})
+export type DailySummary = z.infer<typeof DailySummary>
+
 // ---------------------------------------------------------------------------
 // Merge queue
 // ---------------------------------------------------------------------------
@@ -667,6 +700,8 @@ export const SessionSnapshot = z.object({
   profiles: z.array(Profile).default([]),
   /** Today's spend by login, for daily limits; a stale day reads as zero. */
   spentToday: z.array(DailySpend).default([]),
+  /** The most recent daily summaries, oldest first. */
+  summaries: z.array(DailySummary).default([]),
   comments: z.array(TicketComment).default([]),
   sprints: z.array(Sprint).default([]),
   mergeQueue: z.array(MergeQueueEntry),

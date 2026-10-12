@@ -167,6 +167,8 @@ export interface AppOptions {
   webRoot?: string | null
   /** Reads pull requests and Actions runs; injectable so a test never calls GitHub. */
   github?: GitHubReader
+  /** The machine this server runs on; the host's checkout there writes the daily summaries. */
+  hostMachineId?: string | null
 }
 
 export interface App {
@@ -205,6 +207,7 @@ export function createApp(options: AppOptions = {}): App {
     (sessionId, from, frame) => gateway.relayFrame(sessionId, from, frame),
   )
   gateway.attach(service)
+  service.hostMachineId = options.hostMachineId ?? null
   const terminals = new Terminals(auth, store, service)
   fastify.server.on('upgrade', (request, socket, head) => {
     const path = (request.url ?? '').split('?')[0]

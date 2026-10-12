@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import {
   type ActivityFrame,
+  type DailySummary,
+  type Digest,
   type AutopilotMode,
   type Doing,
   type ChatMessage,
@@ -35,6 +37,8 @@ import {
   parseMentions,
   parseTaskRefs,
   validateDecomposition,
+  usageDay,
+  weightedUnits,
 } from '@session-share/protocol'
 import { Store } from './db.js'
 import { CLAIM_CAP, SessionState } from './projection.js'
@@ -140,6 +144,13 @@ export class SessionService {
   readonly autopilots = new Map<ParticipantId, { mode: AutopilotMode; at: number; limited?: boolean }>()
   /** What each seat's Claude is doing now. Memory only; see Doing. */
   readonly doing = new Map<ParticipantId, Doing>()
+  /**
+   * The machine the server runs on. Its owner hosts the session, and the host's
+   * Claude is the one that writes the daily summaries -- the host pays for them.
+   */
+  hostMachineId: string | null = null
+  /** The last day each session was checked for a missing summary, so the log is scanned once a day. */
+  private readonly summarized = new Map<SessionId, string>()
   /**
    * Told when something boards show live (but that is not an event) changed,
    * so it reaches them now rather than on the next heartbeat. Set by the gateway.
@@ -638,6 +649,12 @@ export class SessionService {
         return this.deleteSprint(command, ctx)
       case 'profile.update':
         return this.updateProfile(command, ctx)
+      case 'summary.request': {
+        const { sessionId, participantId } = this.requireParticipant(ctx)
+        return { summary: this.requestSummary(sessionId, participantId, command.day ?? usageDay(Date.now())) }
+      }
+      case 'summary.post':
+        return this.postSummary(command, ctx)
       case 'agent.doing': {
         const { sessionId, participantId } = this.requireParticipant(ctx)
         if (ctx.via === 'board') throw new ServiceError('forbidden', 'Only a checkout reports what its Claude is doing.')
@@ -3275,7 +3292,158 @@ export class SessionService {
     if (!before || before.mode !== command.autopilot || before.limited !== command.limited || Date.now() - before.at > 60_000) {
       this.onLive?.(this.requireSession(ctx))
     }
+    this.dailySummary(this.requireSession(ctx))
     return { ok: true as const, overLimit: this.overLimit(state, participantId) }
+  }
+
+  // -- daily summaries -----------------------------------------------------
+
+  /**
+   * Whose Claude writes a summary: the host's own checkout, open and under its
+   * daily limit. With no host seat -- a server not started by a member -- the
+   * lead's. Nobody fit means a digest without a write-up.
+   */
+  private summaryWriter(state: SessionState): ParticipantId | null {
+    const seats = [...state.participants.values()].filter(
+      (p) => p.repoPath && this.isPresent(p) && !this.overLimit(state, p.id),
+    )
+    const host = this.hostMachineId ? seats.find((p) => p.machineId === this.hostMachineId) : undefined
+    return (host ?? seats.find((p) => p.id === state.session?.leadId))?.id ?? null
+  }
+
+  /** The facts of one UTC day, counted from the log. */
+  digestFor(sessionId: SessionId, day: string): Digest {
+    const state = this.state(sessionId)
+    const start = Date.parse(`${day}T00:00:00Z`)
+    const end = start + 24 * 60 * 60 * 1000
+    const digest: Digest = {
+      day,
+      opened: [],
+      shipped: [],
+      tasksMerged: 0,
+      verifiedPassed: 0,
+      verifiedFailed: 0,
+      followUps: [],
+      messages: 0,
+      spend: [],
+      columns: {},
+    }
+    const spend = new Map<string, number>()
+    const logins = new Map<string, string>()
+    for (let from = 0; ; ) {
+      const page = this.store.readEvents(sessionId, from, 5000)
+      for (const { ts, body } of page) {
+        if (body.type === 'participant.joined') logins.set(body.participant.id, body.participant.githubLogin.toLowerCase())
+        if (ts < start || ts >= end) continue
+        if (body.type === 'ticket.created') {
+          digest.opened.push(body.ticket.title)
+          if (body.ticket.followUpOf) digest.followUps.push(body.ticket.title)
+        } else if (body.type === 'ticket.shipped') {
+          digest.shipped.push(state.tickets.get(body.ticketId)?.title ?? body.ticketId)
+        } else if (body.type === 'task.state' && body.state === 'merged') {
+          digest.tasksMerged += 1
+        } else if (body.type === 'ticket.verified') {
+          if (body.verification.passed) digest.verifiedPassed += 1
+          else digest.verifiedFailed += 1
+        } else if (body.type === 'chat.message' && body.message.authorKind !== 'system') {
+          digest.messages += 1
+        } else if (body.type === 'usage.recorded') {
+          const login = logins.get(body.participantId) ?? body.participantId
+          spend.set(login, (spend.get(login) ?? 0) + weightedUnits(body))
+        }
+      }
+      if (page.length < 5000) break
+      from = page.at(-1)!.seq + 1
+    }
+    digest.spend = [...spend.entries()]
+      .map(([login, units]) => ({ login, units: Math.round(units) }))
+      .sort((a, b) => b.units - a.units)
+    for (const ticket of state.tickets.values()) {
+      const column = state.ticketStateFor(ticket.id)
+      digest.columns[column] = (digest.columns[column] ?? 0) + 1
+    }
+    return digest
+  }
+
+  /**
+   * Takes a day's digest and asks the writer's Claude for the write-up. Asking
+   * again for the same day refreshes the digest and asks again.
+   */
+  private requestSummary(sessionId: SessionId, actorId: ParticipantId | null, day: string): DailySummary {
+    const state = this.state(sessionId)
+    const previous = state.summaries.get(day)
+    const writerId = this.summaryWriter(state)
+    const digest = this.digestFor(sessionId, day)
+    this.emit(sessionId, actorId, {
+      type: 'summary.requested',
+      summary: {
+        day,
+        digest,
+        writerId,
+        narrative: previous?.narrative ?? null,
+        requestedAt: Date.now(),
+        postedAt: previous?.postedAt ?? null,
+      },
+    })
+    if (writerId) {
+      const next = usageDay(Date.parse(`${day}T00:00:00Z`) + 24 * 60 * 60 * 1000)
+      this.systemDirective(
+        sessionId,
+        actorId,
+        [writerId],
+        [
+          `Write the daily summary of this session for ${day} (UTC). It runs on the host's account, so keep it tight.`,
+          '',
+          'What the server counted:',
+          `- opened: ${digest.opened.join('; ') || 'nothing'}`,
+          `- shipped: ${digest.shipped.join('; ') || 'nothing'}`,
+          `- tasks merged: ${digest.tasksMerged}; runs passed ${digest.verifiedPassed}, failed ${digest.verifiedFailed}`,
+          `- follow-ups found while verifying: ${digest.followUps.join('; ') || 'none'}`,
+          `- board now: ${Object.entries(digest.columns).map(([column, n]) => `${column} ${n}`).join(', ') || 'empty'}`,
+          `- spend (weighted units): ${digest.spend.map((s) => `${s.login} ${s.units}`).join(', ') || 'none recorded'}`,
+          '',
+          `1. ss_sync, then read what landed: git log --since=${day}T00:00Z --until=${next}T00:00Z on ${state.session?.contractBranch ?? 'the contract branch'}.`,
+          '2. ss_tickets for the board and ss_chat_read for what people said.',
+          '3. Write markdown, at most about 300 words: **Where we stand** (one paragraph), **What moved**,',
+          '   **Risks and blockers**, **Next** (one line per person). Facts only; say what you do not know.',
+          `4. Post it with ss_summary, day "${day}". Change no code for this.`,
+        ].join('\n'),
+      )
+    }
+    this.summarized.set(sessionId, usageDay(Date.now()))
+    return state.summaries.get(day)!
+  }
+
+  /**
+   * Once a day, on the first beat that finds a writer, yesterday is written
+   * up -- if anything happened in it. A quiet day gets no summary.
+   */
+  private dailySummary(sessionId: SessionId): void {
+    const today = usageDay(Date.now())
+    if (this.summarized.get(sessionId) === today) return
+    const state = this.state(sessionId)
+    const yesterday = usageDay(Date.now() - 24 * 60 * 60 * 1000)
+    if (state.summaries.has(yesterday)) {
+      this.summarized.set(sessionId, today)
+      return
+    }
+    if (!this.summaryWriter(state)) return
+    const digest = this.digestFor(sessionId, yesterday)
+    const quiet =
+      digest.opened.length + digest.shipped.length + digest.tasksMerged + digest.verifiedPassed +
+        digest.verifiedFailed + digest.messages + digest.spend.length === 0
+    if (quiet) this.summarized.set(sessionId, today)
+    else this.requestSummary(sessionId, null, yesterday)
+  }
+
+  private postSummary(command: Extract<ClientCommand, { type: 'summary.post' }>, ctx: CommandContext) {
+    const { sessionId, participantId, state } = this.requireParticipant(ctx)
+    if (ctx.via === 'board') throw new ServiceError('forbidden', 'A summary is written by a checkout\'s Claude.')
+    if (!state.summaries.has(command.day)) {
+      throw new ServiceError('not_found', `No summary was asked for ${command.day}. Ask for one from the board first.`)
+    }
+    this.emit(sessionId, participantId, { type: 'summary.posted', day: command.day, narrative: command.narrative })
+    return { summary: state.summaries.get(command.day)! }
   }
 
   // -- connection lifecycle ------------------------------------------------

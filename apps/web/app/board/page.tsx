@@ -16,6 +16,7 @@ import { UsageView } from '@/components/usage'
 import { GitHubView } from '@/components/github'
 import { TimelineView } from '@/components/timeline'
 import { ProfilePanel } from '@/components/profile'
+import { SummaryView } from '@/components/summary'
 import type { SprintFilter } from '@/components/kanban'
 import { useLiveSession } from '@/lib/live'
 import { tokens } from '@/lib/tokens'
@@ -31,7 +32,7 @@ const DOT = [
   'bg-indigo-400',
 ]
 
-const VIEWS = ['board', 'timeline', 'history', 'usage', 'github'] as const
+const VIEWS = ['board', 'summary', 'timeline', 'history', 'usage', 'github'] as const
 type View = (typeof VIEWS)[number]
 
 
@@ -253,6 +254,11 @@ function Board({ slug }: { slug: string }) {
                   setView('board')
                 }}
               />
+            </div>
+          ) : null}
+          {view === 'summary' ? (
+            <div className="min-h-0 flex-1">
+              <SummaryView snapshot={snapshot} send={send} />
             </div>
           ) : null}
           {view === 'history' ? (

@@ -2,6 +2,7 @@ import { usageDay, weightedUnits } from './domain.js'
 import type {
   ChatMessage,
   DailySpend,
+  DailySummary,
   Profile,
   Decomposition,
   Sprint,
@@ -33,6 +34,9 @@ const ACTIVE_STATES = new Set(['claimed', 'running', 'testing', 'failed'])
 
 /** How many active tasks one participant may hold. Keeps the frontier fair. */
 export const CLAIM_CAP = 1
+
+/** How many days of summaries a snapshot carries. */
+const SNAPSHOT_SUMMARIES = 30
 
 /**
  * A ticket with every field a newer build added filled in. The log and
@@ -94,6 +98,8 @@ export class SessionState {
   readonly profiles = new Map<string, Profile>()
   /** What each login spent on the latest day it spent anything, in weighted units. */
   readonly spentToday = new Map<string, DailySpend>()
+  /** Keyed by UTC day, in the order they were taken. */
+  readonly summaries = new Map<string, DailySummary>()
   /** Insertion-ordered, which is the order a ticket shows them. */
   readonly comments = new Map<string, TicketComment>()
   readonly sprints = new Map<string, Sprint>()
@@ -471,6 +477,16 @@ export class SessionState {
       case 'profile.updated':
         this.profiles.set(body.profile.login, body.profile)
         break
+      case 'summary.requested':
+        // Asked again: the fresh digest replaces the old one, a write-up already in stays until a new one lands.
+        this.summaries.delete(body.summary.day)
+        this.summaries.set(body.summary.day, body.summary)
+        break
+      case 'summary.posted': {
+        const summary = this.summaries.get(body.day)
+        if (summary) this.summaries.set(body.day, { ...summary, narrative: body.narrative, postedAt: envelope.ts })
+        break
+      }
 
       case 'merge.queue':
         this.mergeQueue = body.entries
@@ -809,6 +825,8 @@ export class SessionState {
     for (const profile of snapshot.profiles ?? []) this.profiles.set(profile.login, profile)
     this.spentToday.clear()
     for (const spend of snapshot.spentToday ?? []) this.spentToday.set(spend.login, spend)
+    this.summaries.clear()
+    for (const summary of snapshot.summaries ?? []) this.summaries.set(summary.day, summary)
     this.sprints.clear()
     for (const sprint of snapshot.sprints ?? []) this.sprints.set(sprint.id, sprint)
     this.mergeQueue = snapshot.mergeQueue
@@ -842,6 +860,7 @@ export class SessionState {
       usage: [...this.usage.values()],
       profiles: [...this.profiles.values()],
       spentToday: [...this.spentToday.values()],
+      summaries: [...this.summaries.values()].slice(-SNAPSHOT_SUMMARIES),
       comments: [...this.comments.values()],
       sprints: [...this.sprints.values()],
       mergeQueue: this.mergeQueue,

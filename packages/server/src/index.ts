@@ -16,6 +16,7 @@ if (isEntrypoint) {
   const app = createApp({
     dbPath: process.env.SESSION_SHARE_DB ?? '.data/session-share.db',
     logger: true,
+    hostMachineId: process.env.SESSION_SHARE_MACHINE_ID ?? null,
   })
 
   const shutdown = async () => {

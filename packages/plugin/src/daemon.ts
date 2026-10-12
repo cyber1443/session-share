@@ -336,6 +336,7 @@ export async function ensureDaemon(options: StartOptions = {}): Promise<DaemonIn
       SESSION_SHARE_MODE: 'peer',
       SESSION_SHARE_SECRET: hostSecret(),
       SESSION_SHARE_DB: DB_FILE,
+      SESSION_SHARE_MACHINE_ID: machineId(),
       PORT: String(port),
       HOST: expose === 'lan' ? '0.0.0.0' : '127.0.0.1',
     },

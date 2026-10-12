@@ -273,6 +273,10 @@ function describe(envelope: EventEnvelope): string {
       return `sprint "${body.sprint.name}" is ${body.sprint.state}`
     case 'sprint.deleted':
       return 'deleted a sprint'
+    case 'summary.requested':
+      return `took the digest for ${body.summary.day}`
+    case 'summary.posted':
+      return `wrote up ${body.day}`
     case 'profile.updated':
       return body.profile.dailyLimit === null
         ? 'removed their daily token limit'

@@ -14,6 +14,7 @@ import {
   Participant,
   ParticipantActivity,
   Profile,
+  DailySummary,
   Session,
   SessionPhase,
   Sprint,
@@ -154,6 +155,11 @@ export const EventBody = z.discriminatedUnion('type', [
   // -- profiles -------------------------------------------------------------
   /** A person's profile as it now stands, whole. */
   z.object({ type: z.literal('profile.updated'), profile: Profile }),
+
+  // -- summaries ------------------------------------------------------------
+  /** A day's digest was taken and, when someone could, a write-up asked for. */
+  z.object({ type: z.literal('summary.requested'), summary: DailySummary }),
+  z.object({ type: z.literal('summary.posted'), day: z.string(), narrative: z.string() }),
 
   // -- decomposition --------------------------------------------------------
   /** Someone asked for a split from the board and named whose agent does it. */

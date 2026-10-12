@@ -126,6 +126,7 @@ const PLANNING_TOOLS = [
     'ss_chat_post',
     'ss_chat_read',
     'ss_status',
+    'ss_summary',
   ),
 ]
 
@@ -171,11 +172,12 @@ export const BUILDING_TOOLS = [
     'ss_ticket_comment',
     'ss_subticket',
     'ss_worktree',
+    'ss_summary',
   ),
 ]
 
 const isPlanning = (messages: ChatMessage[]) =>
-  messages.every((message) => /ss_propose|Split the ticket/.test(message.body))
+  messages.every((message) => /ss_propose|Split the ticket|ss_summary/.test(message.body))
 
 let running = false
 /** Until when this account is out of usage, as far as this process knows. */

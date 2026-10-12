@@ -1014,6 +1014,22 @@ export function createServer(): McpServer {
   )
 
   server.registerTool(
+    'ss_summary',
+    {
+      description:
+        'Post the daily summary you were asked for: where the project stands, what moved, risks and blockers, next steps. It shows on the board\'s summary tab.',
+      inputSchema: {
+        day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('The UTC day you were asked to summarize, YYYY-MM-DD'),
+        narrative: z.string().min(1).max(8000).describe('Markdown, at most about 300 words'),
+      },
+    },
+    async ({ day, narrative }) => {
+      await runCommand(config(), { type: 'summary.post', day, narrative })
+      return text(`Summary for ${day} posted to the board.`)
+    },
+  )
+
+  server.registerTool(
     'ss_ticket_shipped',
     {
       description:

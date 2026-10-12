@@ -10,6 +10,7 @@ import {
   Lease,
   ParticipantActivity,
   Profile,
+  DailySummary,
   FollowUp,
   RepoRef,
   SessionSnapshot,
@@ -194,6 +195,15 @@ export const ClientCommand = z.discriminatedUnion('type', [
     type: z.literal('profile.update'),
     /** Weighted units per UTC day; null removes the limit. */
     dailyLimit: z.number().int().min(1_000).max(100_000_000_000).nullable(),
+  }),
+
+  /** Take a digest of a UTC day now and ask the host's Claude to write it up. Defaults to today. */
+  z.object({ type: z.literal('summary.request'), day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().default(null) }),
+  /** The write-up for a day, from the Claude that was asked for it. */
+  z.object({
+    type: z.literal('summary.post'),
+    day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    narrative: z.string().trim().min(1).max(8000),
   }),
 
   /**
@@ -419,6 +429,8 @@ export interface CommandResultMap {
   'sprint.update': { sprint: Sprint }
   'sprint.delete': { ticketsMoved: number }
   'profile.update': { profile: Profile }
+  'summary.request': { summary: DailySummary }
+  'summary.post': { summary: DailySummary }
   'plan.request': { plannerId: ParticipantId; goal: string }
   'decomposition.propose': ProposeResult
   'task.assign': { assignments: Assignment[] }
