@@ -2,7 +2,7 @@
 2:I[2366,[],""]
 3:I[2484,[],""]
 4:I[2383,[],"ClientPageRoot"]
-5:I[6423,["809","static/chunks/809-d3e176a9a5f78d3e.js","433","static/chunks/433-60fa2b1c6eb1789a.js","81","static/chunks/app/board/page-fab0bfa682d7f2e6.js"],"default"]
+5:I[6423,["809","static/chunks/809-d3e176a9a5f78d3e.js","433","static/chunks/433-a23f33bc733bfc88.js","81","static/chunks/app/board/page-0af5784c4ec2d652.js"],"default"]
 8:I[2183,[],"OutletBoundary"]
 a:I[9814,[],"AsyncMetadataOutlet"]
 c:I[2183,[],"ViewportBoundary"]

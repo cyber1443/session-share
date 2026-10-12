@@ -65559,7 +65559,8 @@ var SessionState = class {
       tasks: [...this.tasks.values()],
       leases: [...this.leases.values()],
       handoffs: [...this.handoffs.values()],
-      chat: this.chat,
+      // A copy: the fold appends in place, and a board memoized on this array never saw a new message.
+      chat: [...this.chat],
       usage: [...this.usage.values()],
       profiles: [...this.profiles.values()],
       spentToday: [...this.spentToday.values()],
