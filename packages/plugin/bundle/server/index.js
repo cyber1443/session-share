@@ -68586,23 +68586,42 @@ Issue: ${command.issueRef}` : "",
     return state.summaries.get(day);
   }
   /**
-   * Once a day, on the first beat that finds a writer, yesterday is written
-   * up -- if anything happened in it. A quiet day gets no summary.
+   * Once a day yesterday is written up, if anything happened in it. The digest
+   * is recorded on the first beat whatever is open; the write-up is asked of the
+   * first Claude that turns up, so a day nobody's terminal was open for still
+   * gets one. A quiet day gets no summary.
    */
   dailySummary(sessionId) {
     const today = usageDay(Date.now());
     if (this.summarized.get(sessionId) === today) return;
     const state = this.state(sessionId);
     const yesterday = usageDay(Date.now() - 24 * 60 * 60 * 1e3);
-    if (state.summaries.has(yesterday)) {
+    const existing = state.summaries.get(yesterday);
+    if (existing?.narrative || existing?.writerId) {
       this.summarized.set(sessionId, today);
       return;
     }
-    if (!this.summaryWriter(state)) return;
-    const digest = this.digestFor(sessionId, yesterday);
-    const quiet = digest.opened.length + digest.shipped.length + digest.tasksMerged + digest.verifiedPassed + digest.verifiedFailed + digest.messages + digest.spend.length === 0;
-    if (quiet) this.summarized.set(sessionId, today);
-    else this.requestSummary(sessionId, null, yesterday);
+    if (!existing) {
+      const digest = this.digestFor(sessionId, yesterday);
+      const quiet = digest.opened.length + digest.shipped.length + digest.tasksMerged + digest.verifiedPassed + digest.verifiedFailed + digest.messages + digest.spend.length === 0;
+      if (quiet) {
+        this.summarized.set(sessionId, today);
+        return;
+      }
+    } else if (!this.summaryWriter(state)) {
+      return;
+    }
+    const summary = this.requestSummary(sessionId, null, yesterday);
+    if (!summary.writerId) this.summarized.delete(sessionId);
+  }
+  /** Every session's daily summary, from the server's own clock rather than a checkout's beat. */
+  sweepSummaries() {
+    for (const sessionId of this.store.listSessionIds()) {
+      try {
+        this.dailySummary(sessionId);
+      } catch {
+      }
+    }
   }
   postSummary(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
@@ -69692,6 +69711,8 @@ function createApp(options = {}) {
   );
   gateway.attach(service);
   service.hostMachineId = options.hostMachineId ?? null;
+  const summaries = setInterval(() => service.sweepSummaries(), 10 * 60 * 1e3);
+  summaries.unref();
   const terminals = new Terminals(auth, store, service);
   fastify.server.on("upgrade", (request, socket, head) => {
     const path = (request.url ?? "").split("?")[0];
@@ -70289,6 +70310,7 @@ function createApp(options = {}) {
       return fastify.listen({ port, host });
     },
     async close() {
+      clearInterval(summaries);
       await terminals.close();
       await gateway.close();
       await fastify.close();
