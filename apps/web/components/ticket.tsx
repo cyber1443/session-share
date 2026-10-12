@@ -14,7 +14,7 @@ import { Subtickets } from './subtickets'
 import { Comments } from './comments'
 import { TerminalTab } from './terminal'
 
-type Tab = 'overview' | 'subtickets' | 'comments' | 'terminal'
+type Tab = 'ticket' | 'terminal'
 
 const DOT = [
   'bg-emerald-400',
@@ -92,11 +92,13 @@ export function TicketPanel({
    * there is no undo on this side of it.
    */
   const [confirming, setConfirming] = useState(false)
-  const [tab, setTab] = useState<Tab>('overview')
+  const [tab, setTab] = useState<Tab>('ticket')
   const commentCount = (snapshot.comments ?? []).filter((c) => c.ticketId === ticket.id).length
   const subtickets = ticket.subtickets ?? []
   const liveTerminal = snapshot.terminals?.some((t) => t.ticketId === ticket.id && t.status !== 'exited') ?? false
   const tasks = snapshot.tasks.filter((task) => task.ticketId === ticket.id)
+  // Pictures already shown inline in the description are not repeated below it.
+  const briefPictures = ticket.attachments.filter((a) => a.kind === 'brief' && !ticket.body.includes(`(file:${a.id})`))
   const landed = tasks.filter((task) => task.state === 'merged').length
   // Every ticket has its own split; the session-wide field is only the newest one.
   const decomposition =
@@ -163,9 +165,7 @@ export function TicketPanel({
       <nav className="-mt-2 flex gap-1 border-b border-edge pb-1.5 text-[11px]">
         {(
           [
-            ['overview', 'overview'],
-            ['subtickets', `subtickets${subtickets.length ? ` ${subtickets.filter((s) => s.state === 'done').length}/${subtickets.length}` : ''}`],
-            ['comments', `comments${commentCount ? ` ${commentCount}` : ''}`],
+            ['ticket', 'ticket'],
             ['terminal', `terminal${liveTerminal ? ' ●' : ''}`],
           ] as Array<[Tab, string]>
         ).map(([name, label]) => (
@@ -179,15 +179,20 @@ export function TicketPanel({
         ))}
       </nav>
 
-      {tab === 'subtickets' ? <Subtickets ticket={ticket} snapshot={snapshot} meId={meId} send={send} /> : null}
-      {tab === 'comments' ? <Comments ticket={ticket} snapshot={snapshot} meId={meId} send={send} /> : null}
       {tab === 'terminal' ? <TerminalTab key={ticket.id} ticket={ticket} snapshot={snapshot} slug={slug} meId={meId} /> : null}
 
-      {tab === 'overview' ? (
+      {tab === 'ticket' ? (
       <>
-      <Description key={ticket.id} ticket={ticket} send={send} />
+      <Description key={ticket.id} ticket={ticket} slug={slug} send={send} />
+      <Pictures slug={slug} attachments={briefPictures} />
       <PlanFields ticket={ticket} snapshot={snapshot} send={send} />
-      <Pictures slug={slug} attachments={ticket.attachments.filter((a) => a.kind === 'brief')} />
+
+      <section className="space-y-2">
+        <p className="text-[10px] uppercase tracking-wider text-mute">
+          Subtickets{subtickets.length ? ` · ${subtickets.filter((s) => s.state === 'done').length}/${subtickets.length}` : ''}
+        </p>
+        <Subtickets ticket={ticket} snapshot={snapshot} meId={meId} send={send} />
+      </section>
       {!ticket.mergedAt && !ticket.prNumber ? (
         <label
           className="flex cursor-pointer items-center gap-2 text-[11px] text-mute hover:text-neutral-300"
@@ -599,6 +604,14 @@ export function TicketPanel({
           </ul>
         </div>
       ) : null}
+
+      {/* -- what people have said about it ---------------------------------- */}
+      <section className="space-y-2 border-t border-line pt-3">
+        <p className="text-[10px] uppercase tracking-wider text-mute">
+          Comments{commentCount ? ` · ${commentCount}` : ''}
+        </p>
+        <Comments ticket={ticket} snapshot={snapshot} meId={meId} send={send} />
+      </section>
 
       {/* -- throwing it away ------------------------------------------------ */}
       <div className="border-t border-line pt-3">
