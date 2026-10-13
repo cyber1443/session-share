@@ -179,6 +179,9 @@ export const BUILDING_TOOLS = [
 const isPlanning = (messages: ChatMessage[]) =>
   messages.every((message) => /ss_propose|Split the ticket|ss_summary/.test(message.body))
 
+/** Only daily write-ups: shown as such, so a board does not read it as a split under way. */
+const isSummaryOnly = (messages: ChatMessage[]) => messages.every((message) => /ss_summary/.test(message.body))
+
 let running = false
 /** Until when this account is out of usage, as far as this process knows. */
 let limitedUntil = 0
@@ -390,11 +393,12 @@ export async function tickOnce(options: TickOptions = {}): Promise<TickResult> {
    * Said up front, because a split can take minutes and a board that shows
    * nothing for that long looks exactly like an agent that never started.
    */
+  const label = isSummaryOnly(waiting) ? 'summarizing' : planningOnly ? 'splitting' : 'working'
   await say(
     config,
-    `Nobody is at this keyboard, so a headless Claude is taking ${waiting.length === 1 ? 'this' : `these ${waiting.length} instructions`} now${planningOnly ? ' (splitting)' : ''}.`,
+    `Nobody is at this keyboard, so a headless Claude is taking ${waiting.length === 1 ? 'this' : `these ${waiting.length} instructions`} now${label === 'working' ? '' : ` (${label})`}.`,
   )
-  await report(config, planningOnly ? 'planning' : 'working', planningOnly ? 'autopilot: splitting' : 'autopilot: working')
+  await report(config, planningOnly ? 'planning' : 'working', `autopilot: ${label}`)
   // The board's "now": the instruction itself, not the header every one of them starts with.
   await runCommand(config, { type: 'agent.doing', text: `autopilot: ${headline(waiting)}` }).catch(() => undefined)
   try {
