@@ -271,6 +271,9 @@ export function Kanban({
   )
 }
 
+/** Ticket states in which a member's Claude is working on that ticket. */
+const ACTIVE = new Set<Ticket['state']>(['splitting', 'proposed', 'building', 'verify'])
+
 function Card({
   ticket,
   tasks,
@@ -357,8 +360,12 @@ function Card({
         </p>
       ) : null}
 
-      {/* What the agents on it are doing this minute. */}
-      {workingNow(members, doing).map(({ member, doing: now }) => (
+      {/*
+        What the agents on it are doing this minute. Only while work on it is
+        under way: what a seat is doing is not tied to a ticket, so a member's
+        unrelated work would otherwise show on every card they are in.
+      */}
+      {(ACTIVE.has(ticket.state) ? workingNow(members, doing) : []).map(({ member, doing: now }) => (
         <p key={member.id} className="flex items-baseline gap-1.5 text-[10px] text-neutral-400" title={now.text}>
           <span className={`h-1.5 w-1.5 shrink-0 animate-pulse rounded-full ${DOT[member.colorIndex % DOT.length]}`} />
           <span className="truncate">
