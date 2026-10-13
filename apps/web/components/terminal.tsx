@@ -278,8 +278,16 @@ function TerminalView({
         const message = JSON.parse(String(raw.data)) as ViewerEvent
         switch (message.t) {
           case 'state': {
-            const first = !infoRef.current
+            const previous = infoRef.current
+            const first = !previous
             infoRef.current = message.terminal
+            // The screen only follows a resize, so a viewer who becomes the one it is sized for --
+            // attaching after a reload, or taking the helm -- says how big theirs is. The server
+            // ignores everyone else's.
+            const sizer = (info: TerminalInfo) => info.driver ?? info.openedBy
+            if (message.terminal.status === 'running' && (!previous || sizer(previous) !== sizer(message.terminal))) {
+              send({ t: 'resize', cols: term.cols, rows: term.rows })
+            }
             setInfo(message.terminal)
             if (first && mode.kind === 'open') callbacks.current.onAttached(message.terminal.id)
             return
