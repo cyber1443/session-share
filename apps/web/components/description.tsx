@@ -41,6 +41,8 @@ function Body({ body, slug }: { body: string; slug: string }) {
     if (match.index > last) parts.push(body.slice(last, match.index))
     parts.push(<InlinePicture key={match.index} slug={slug} id={match[2]!} alt={match[1]!} />)
     last = match.index + match[0].length
+    // The picture is its own block; the line break that ended its token would be a blank line under it.
+    if (body[last] === '\n') last += 1
   }
   parts.push(body.slice(last))
   return <div className="whitespace-pre-wrap break-words leading-relaxed text-neutral-400">{parts}</div>
