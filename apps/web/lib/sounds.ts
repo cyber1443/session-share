@@ -81,6 +81,8 @@ export function soundFor(envelope: EventEnvelope, meId: string | null): Sound | 
     case 'chat.message': {
       const { message } = body
       if (meId && message.authorId === meId) return null
+      // An instruction to a seat's Claude is for the agent, not the person at the board.
+      if (message.directive) return null
       if (meId && message.mentions.includes(meId as never)) return 'alert'
       return message.authorKind === 'system' ? null : 'message'
     }
