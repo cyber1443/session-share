@@ -33280,6 +33280,7 @@ var BUILDING_TOOLS = [
   )
 ];
 var isPlanning = (messages) => messages.every((message) => /ss_propose|Split the ticket|ss_summary/.test(message.body));
+var isSummaryOnly = (messages) => messages.every((message) => /ss_summary/.test(message.body));
 var running = false;
 var limitedUntil = 0;
 var firstSeen = /* @__PURE__ */ new Map();
@@ -33402,11 +33403,12 @@ async function tickOnce(options = {}) {
   }
   running = true;
   markAutopilot(config3.repoPath, true);
+  const label = isSummaryOnly(waiting) ? "summarizing" : planningOnly ? "splitting" : "working";
   await say(
     config3,
-    `Nobody is at this keyboard, so a headless Claude is taking ${waiting.length === 1 ? "this" : `these ${waiting.length} instructions`} now${planningOnly ? " (splitting)" : ""}.`
+    `Nobody is at this keyboard, so a headless Claude is taking ${waiting.length === 1 ? "this" : `these ${waiting.length} instructions`} now${label === "working" ? "" : ` (${label})`}.`
   );
-  await report(config3, planningOnly ? "planning" : "working", planningOnly ? "autopilot: splitting" : "autopilot: working");
+  await report(config3, planningOnly ? "planning" : "working", `autopilot: ${label}`);
   await runCommand(config3, { type: "agent.doing", text: `autopilot: ${headline(waiting)}` }).catch(() => void 0);
   try {
     const result = await runHeadless(
