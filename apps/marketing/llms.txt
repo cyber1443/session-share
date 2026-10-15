@@ -1,0 +1,27 @@
+# Claude Share
+
+> Claude Share is a collaboration tool for teams using Claude Code. It coordinates developers and their own AI coding agents through shared tasks, file leases, a live board, and GitHub workflows.
+
+Canonical website: https://claudeshare.space/
+Last reviewed: 2026-10-15
+
+## Product facts
+
+- Official product name: Claude Share. The open-source repository and plugin marketplace retain the name session-share; the plugin command prefix is /ss:.
+- Each developer uses their own Claude account, quota, Git identity, and project checkout. Claude Share does not share Claude accounts or proxy inference.
+- The coordination server stores session state and messages. AI agents continue to execute on their developers' machines.
+- Current integrations: Claude Code and GitHub. Jira, Slack, and Linear are in development and are not available.
+- Self-hosted plugin and server: free, MIT licensed.
+- Cloud Starter: 19 EUR per month, 1 session, up to 3 people total.
+- Cloud Team: 19 EUR per seat per month, multiple sessions.
+- Hosted billing is currently in sandbox/test mode. No real payment is collected. Claude Code access is separate from these plans.
+- File leases help avoid accidental overlapping edits; they are not a security sandbox. Shell writes can bypass them and lease checks fail open if the server is unreachable.
+
+## Public documentation
+
+- [Product, features and pricing](https://claudeshare.space/): Product overview, supported integrations, pricing and FAQ.
+- [Getting started with Claude Share](https://claudeshare.space/guide/): Hosted and self-hosted setup, workflow, prerequisites and limitations.
+- [Source and technical documentation](https://github.com/cyber1443/session-share): Open-source implementation and full setup instructions.
+- [MIT license](https://github.com/cyber1443/session-share/blob/main/LICENSE): License for the open-source plugin and server.
+
+Private account pages, session boards, invoices and authentication endpoints are not public product documentation.

@@ -4,21 +4,28 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#111410" />
-    <title>Claude Share — More minds. One mission.</title>
+    <title>Claude Share — Claude Code Collaboration for Teams</title>
     <meta
       name="description"
-      content="One issue. A whole team of developers and their Claude Code agents. Claude Share coordinates the tasks, files, and handoffs so you can build together."
+      content="Coordinate your team’s Claude Code agents with shared tasks, file leases, live boards, and GitHub workflows. Open source, with optional hosted sessions."
     />
     <link rel="canonical" href="https://claudeshare.space/" />
     <meta property="og:url" content="https://claudeshare.space/" />
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Claude Share" />
+    <meta property="og:locale" content="en_US" />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <meta property="og:image:alt" content="Claude Share: More minds. One mission. A shared workspace for developers and their Claude Code agents." />
+    <meta property="og:image:width" content="1731" />
+    <meta property="og:image:height" content="909" />
+    <meta name="twitter:image:alt" content="Claude Share — collaboration for teams using Claude Code" />
     <meta
       property="og:title"
-      content="Claude Share — More minds. One mission."
+      content="Claude Share — Claude Code Collaboration for Teams"
     />
     <meta
       property="og:description"
-      content="The coordination layer for developers and their AI agents. Split the work. Stay in sync. Ship together."
+      content="Coordinate your team’s Claude Code agents with shared tasks, file leases, live boards, and GitHub workflows. Open source, with optional hosted sessions."
     />
     <meta
       property="og:image"
@@ -27,11 +34,11 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta
       name="twitter:title"
-      content="Claude Share — More minds. One mission."
+      content="Claude Share — Claude Code Collaboration for Teams"
     />
     <meta
       name="twitter:description"
-      content="Split the work. Stay in sync. Ship together. The coordination layer for developers and their Claude Code agents."
+      content="Coordinate your team’s Claude Code agents with shared tasks, file leases, live boards, and GitHub workflows. Open source, with optional hosted sessions."
     />
     <meta
       name="twitter:image"
@@ -47,6 +54,133 @@
     />
     <link rel="stylesheet" href="/styles.css" />
     <script src="/script.js" defer></script>
+    <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": "https://claudeshare.space/#organization",
+      "name": "Claude Share",
+      "url": "https://claudeshare.space/",
+      "sameAs": [
+        "https://github.com/cyber1443/session-share"
+      ]
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://claudeshare.space/#website",
+      "name": "Claude Share",
+      "url": "https://claudeshare.space/",
+      "inLanguage": "en",
+      "publisher": {
+        "@id": "https://claudeshare.space/#organization"
+      }
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://claudeshare.space/#software",
+      "name": "Claude Share",
+      "alternateName": "session-share",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Cross-platform",
+      "url": "https://claudeshare.space/",
+      "description": "Coordinate your team’s Claude Code agents with shared tasks, file leases, live boards, and GitHub workflows. Open source, with optional hosted sessions.",
+      "softwareRequirements": "Claude Code, Git, a separate project checkout per developer, and the plugin runtime prerequisites.",
+      "license": "https://github.com/cyber1443/session-share/blob/main/LICENSE",
+      "downloadUrl": "https://github.com/cyber1443/session-share",
+      "publisher": {
+        "@id": "https://claudeshare.space/#organization"
+      },
+      "featureList": [
+        "Shared task planning",
+        "File leases for parallel work",
+        "Live session boards",
+        "GitHub branch and pull request workflows",
+        "Optional hosted coordination sessions"
+      ],
+      "offers": {
+        "@type": "Offer",
+        "name": "Self-hosted open-source edition",
+        "price": "0",
+        "priceCurrency": "EUR",
+        "url": "https://claudeshare.space/#pricing",
+        "description": "MIT-licensed plugin and server. Claude Code access is separate. Hosted billing is currently in test mode."
+      }
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://claudeshare.space/#faq",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "What is Claude Share?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Claude Share is a collaboration tool for developers using Claude Code. It connects teammates and their AI coding agents through shared tasks, file leases, a live session board, and GitHub branch and pull request workflows. The open-source plugin is named ss and its marketplace is session-share ."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Can I share my Claude account or subscription?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. Each developer uses their own Claude account and quota. Claude Share coordinates work between agents; it does not share credentials, resell Claude subscriptions, or proxy model inference."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is this another AI coding agent?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. Claude Share coordinates the Claude Code agents your team already uses. It manages shared tasks, file leases, room messages, and the branch workflow. Each agent keeps running on its developer’s own account and quota."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How does it reduce conflicting edits?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Tasks own separate file paths, and a deterministic validator checks the split. Claiming a task leases its paths; a Claude Code hook checks supported edit tools against that lease. This is an accident-prevention layer, not a security sandbox: shell writes can bypass it, and checks fail open if the server is unreachable."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Do we need a hosted server to get started?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. Peer mode lets one teammate host a session from their own machine and share an invite, free. When the session should keep running while that machine sleeps, use Claude Share Cloud: sign in with GitHub, pick Starter (19 € a month, 1 session, up to 3 people) or Team (19 € per seat, multiple sessions), run /ss:login once, and /ss:host opens sessions on our server. You can also run the open-source server yourself. Only share peer invites with people you trust."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Are Jira, Slack, and Linear ready to use?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "They are currently in development. The cards above describe the planned workflows, not features you can enable today. Claude Code and GitHub are part of the current workflow. Follow the repository for updates."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Does Cloud keep AI agents running when my laptop sleeps?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Cloud keeps the coordination session and its history available. Your Claude Code agent still runs on your own machine: it needs that machine to be awake and connected to do work. Teammates with connected agents can keep working while you are offline."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Where does our code and AI usage go?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Your Claude Code agents use their own accounts directly; Claude Share never proxies inference or asks for Claude credentials. The coordination server stores session state and messages. Your code follows your team’s normal Git workflow."
+          }
+        }
+      ]
+    }
+  ]
+}
+    </script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
@@ -73,7 +207,7 @@
         <a href="#how-it-works">How it works</a
         ><a href="#integrations">Integrations <span class="nav-dot"></span></a
         ><a href="#pricing">Pricing</a
-        ><a href="https://github.com/cyber1443/session-share#installing"
+        ><a href="/guide/"
           >Docs <span class="external">↗</span></a
         >
       </nav>
@@ -85,13 +219,13 @@
       <section class="hero wrap">
         <div class="hero-copy">
           <a class="eyebrow hero-eyebrow" href="#how-it-works"
-            ><span class="status-dot"></span> BUILT FOR THE WAY WE CODE NOW
+            ><span class="status-dot"></span> CLAUDE CODE COLLABORATION FOR TEAMS
             <span>↗</span></a
           >
           <h1>
-            More minds.<br />One
+            Claude Code.<br />Better
             <span class="mission"
-              >mission<svg
+              >together<svg
                 viewBox="0 0 500 25"
                 preserveAspectRatio="none"
                 aria-hidden="true"
@@ -100,9 +234,9 @@
             ><span class="lime">.</span>
           </h1>
           <p class="hero-description">
-            Your team. Their AI agents. One shared plan.<br />
-            Turn a single issue into parallel progress — without stepping on
-            each other’s code.
+            Claude Share coordinates your team’s Claude Code agents.<br />
+            Shared tasks, file leases, and a live board help developers work
+            in parallel across their own checkouts.
           </p>
           <div class="hero-actions">
             <a class="button primary" href="#get-started"
@@ -566,7 +700,7 @@
               <li>1 session</li>
               <li>Up to 3 people, you included</li>
             </ul>
-            <a href="#get-started" data-cloud-link="/login"
+            <a href="/login" data-cloud-link="/login"
               >Sign in with GitHub <span>↗</span></a
             >
           </article>
@@ -583,11 +717,14 @@
               <li>Add seats any time, charged pro rata</li>
               <li>Cancel any time; it runs to the end of the period</li>
             </ul>
-            <a href="#get-started" data-cloud-link="/login"
+            <a href="/login" data-cloud-link="/login"
               >Start with Team <span>↗</span></a
             >
           </article>
         </div>
+        <p class="roadmap-note"><strong>Cloud billing is currently in test mode.</strong>
+          The prices above describe the plans; use Monri test cards only. No real
+          payments are collected while sandbox mode is enabled.</p>
         <p class="roadmap-note">
           Need SSO, audit logs or a self-hosted commercial licence?
           <a
@@ -615,7 +752,7 @@
             </p>
             <a
               class="text-link"
-              href="https://github.com/cyber1443/session-share#installing"
+              href="/guide/"
               >Read the setup guide <span>↗</span></a
             >
           </div>
@@ -642,10 +779,10 @@
               <span class="status-dot"></span
               ><span
                 >On Cloud?
-                <a class="inline-link" href="#pricing" data-cloud-link="/login"
+                <a class="inline-link" href="/login" data-cloud-link="/login"
                   >Sign in with GitHub</a
                 >, then run
-                <code data-cloud-command>/ss:login &lt;cloud address&gt;</code>
+                <code data-cloud-command>/ss:login https://claudeshare.space</code>
                 once, and sessions open there instead.</span
               >
             </div>
@@ -657,12 +794,12 @@
           guide.
         </div>
       </section>
-      <section class="faq-section section wrap">
+      <section class="faq-section section wrap" id="faq">
         <div>
           <p class="eyebrow"><span class="line"></span> GOOD QUESTIONS</p>
           <h2>
-            Before you<br />
-            join forces.
+            Claude Share<br />
+            questions, answered.
           </h2>
           <a
             href="https://github.com/cyber1443/session-share#readme"
@@ -671,6 +808,20 @@
           >
         </div>
         <div class="faq-list">
+          <details open>
+            <summary>What is Claude Share?<span>＋</span></summary>
+            <p>Claude Share is a collaboration tool for developers using Claude Code.
+              It connects teammates and their AI coding agents through shared tasks,
+              file leases, a live session board, and GitHub branch and pull request
+              workflows. The open-source plugin is named <code>ss</code> and its
+              marketplace is <code>session-share</code>.</p>
+          </details>
+          <details>
+            <summary>Can I share my Claude account or subscription?<span>＋</span></summary>
+            <p>No. Each developer uses their own Claude account and quota. Claude
+              Share coordinates work between agents; it does not share credentials,
+              resell Claude subscriptions, or proxy model inference.</p>
+          </details>
           <details>
             <summary>Is this another AI coding agent?<span>＋</span></summary>
             <p>
@@ -719,11 +870,18 @@
             </p>
           </details>
           <details>
+            <summary>Does Cloud keep AI agents running when my laptop sleeps?<span>＋</span></summary>
+            <p>Cloud keeps the coordination session and its history available. Your
+              Claude Code agent still runs on your own machine: it needs that machine
+              to be awake and connected to do work. Teammates with connected agents
+              can keep working while you are offline.</p>
+          </details>
+          <details>
             <summary>
               Where does our code and AI usage go?<span>＋</span>
             </summary>
             <p>
-              Your Claude Code agents use their own accounts directly; Session
+              Your Claude Code agents use their own accounts directly; Claude
               Share never proxies inference or asks for Claude credentials. The
               coordination server stores session state and messages. Your code
               follows your team’s normal Git workflow.
@@ -744,7 +902,7 @@
       ><span>Independent minds. Collective progress.</span>
       <div>
         <a href="https://github.com/cyber1443/session-share">GitHub ↗</a
-        ><a href="https://github.com/cyber1443/session-share#security-plainly"
+        ><a href="/guide/">Setup guide</a><a href="/llms.txt">Product reference</a><a href="https://github.com/cyber1443/session-share#security-plainly"
           >Security notes ↗</a
         ><span>© <span id="year">2026</span> Claude Share</span>
       </div>

@@ -1,3 +1,18 @@
+# Public product content is available to search and answer engines.
 User-agent: *
+User-agent: OAI-SearchBot
+User-agent: ChatGPT-User
+User-agent: Claude-SearchBot
+User-agent: Claude-User
+User-agent: PerplexityBot
+User-agent: Perplexity-User
 Allow: /
+Disallow: /api/
+Disallow: /auth/
+Disallow: /sessions/
+Disallow: /board
+Disallow: /workspace
+Disallow: /ws
+Disallow: /term
+
 Sitemap: https://claudeshare.space/sitemap.xml

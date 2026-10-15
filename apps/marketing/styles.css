@@ -2235,3 +2235,21 @@ dialog .dialog-note {
     display: none;
   }
 }
+
+/* Public setup documentation: readable without JavaScript. */
+.guide-content { max-width: 960px; padding-top: 72px; padding-bottom: 80px; }
+.guide-content h1 { font: 400 clamp(40px,6vw,72px)/1.08 var(--heading); letter-spacing: -2px; margin: 24px 0; }
+.guide-lead { color: var(--muted); font-size: 20px; line-height: 1.7; max-width: 780px; }
+.guide-toc { position: static; display: flex; flex-wrap: wrap; gap: 12px 24px; padding: 28px 0; margin: 28px 0; border: 0; border-block: 1px solid var(--line); border-radius: 0; background: transparent; box-shadow: none; }
+.guide-content section { scroll-margin-top: 28px; padding: 28px 0; }
+.guide-content h2 { font-size: clamp(25px,4vw,34px); letter-spacing: -1px; margin-bottom: 18px; }
+.guide-content p,.guide-content li { color: var(--muted); line-height: 1.85; }
+.guide-content p { margin: 16px 0; }
+.guide-content ul,.guide-content ol { padding-left: 24px; }
+.guide-content li { margin-bottom: 12px; }
+.guide-content strong { color: var(--text); }
+.guide-content a { color: var(--lime); text-decoration: underline; text-underline-offset: 4px; }
+.guide-content pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 22px; border: 1px solid var(--line); border-radius: 12px; line-height: 1.8; background: #191d17; }
+.guide-content code { font: 13px/1.8 ui-monospace,monospace; }
+.guide-note { border: 1px solid #806430; border-radius: 12px; padding: 18px; line-height: 1.7; color: #f1c376; background: #282319; }
+@media(max-width:800px) { .guide-header nav { display: none; } .guide-header .button { font-size: 12px; padding: 12px; } .guide-content { padding-top: 32px; } .guide-lead { font-size: 17px; } }

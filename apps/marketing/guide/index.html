@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#111410" />
+  <title>Claude Share Setup Guide — Collaborate with Claude Code</title>
+  <meta name="description" content="Set up Claude Share for your team: install the Claude Code plugin, connect to hosted sessions or self-host, and coordinate tasks, file leases, and GitHub reviews." />
+  <meta name="robots" content="index,follow,max-image-preview:large" />
+  <link rel="canonical" href="https://claudeshare.space/guide/" />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="Claude Share" />
+  <meta property="og:title" content="Claude Share Setup Guide — Collaborate with Claude Code" />
+  <meta property="og:description" content="A practical guide to hosted and self-hosted sessions, shared tasks, file leases, and GitHub workflows with Claude Code." />
+  <meta property="og:url" content="https://claudeshare.space/guide/" />
+  <meta property="og:image" content="https://claudeshare.space/assets/social.png" />
+  <meta property="og:image:alt" content="Claude Share — a shared workspace for developers and their Claude Code agents" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg" />
+  <link rel="stylesheet" href="/styles.css" />
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@graph":[{"@type":"TechArticle","@id":"https://claudeshare.space/guide/#article","headline":"Claude Share setup guide","description":"Install the Claude Code plugin and connect a team to hosted or self-hosted coordination sessions.","datePublished":"2026-10-15","dateModified":"2026-10-15","inLanguage":"en","mainEntityOfPage":"https://claudeshare.space/guide/","author":{"@type":"Organization","name":"Claude Share","url":"https://claudeshare.space/"},"image":"https://claudeshare.space/assets/social.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Claude Share","item":"https://claudeshare.space/"},{"@type":"ListItem","position":2,"name":"Setup guide","item":"https://claudeshare.space/guide/"}]}]}
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="header wrap guide-header">
+    <a class="brand" href="/">Claude<span>Share</span></a>
+    <nav aria-label="Guide navigation"><a href="/#how-it-works">Features</a><a href="/#pricing">Pricing</a><a href="/#faq">FAQ</a></nav>
+    <a class="button primary" href="/login">Sign in with GitHub ↗</a>
+  </header>
+  <main id="main" class="wrap guide-content">
+    <p class="eyebrow">GET STARTED · UPDATED OCTOBER 15, 2026</p>
+    <h1>Build together<br />with Claude Code.</h1>
+    <p class="guide-lead">Claude Share connects developers and their own Claude Code agents in a shared coordination session. Install the plugin, choose where the session runs, then invite your teammates.</p>
+    <nav class="guide-toc" aria-label="On this page"><a href="#requirements">What you need</a><a href="#install">Install</a><a href="#cloud">Hosted sessions</a><a href="#self-host">Self-hosting</a><a href="#workflow">Team workflow</a><a href="#limits">Limits and data</a></nav>
+    <section id="requirements">
+      <h2>What each teammate needs</h2>
+      <ul><li>Claude Code with their own Claude account and quota.</li><li>Node.js 22 or newer, Git, and a separate local checkout of the project.</li><li>Access to the shared Git repository. Task branches need push access; GitHub operations use the developer’s own GitHub identity and configured tooling.</li></ul>
+      <p>The plugin is prebuilt. Installing it does not require building this repository or running a package manager. See the <a href="https://github.com/cyber1443/session-share#installing">repository’s installation instructions</a> for the full runtime requirements.</p>
+    </section>
+    <section id="install">
+      <h2>1. Install the Claude Share plugin</h2>
+      <p>Run these commands in Claude Code, once on each machine:</p>
+      <pre><code>/plugin marketplace add cyber1443/session-share
+/plugin install ss@session-share</code></pre>
+      <p>The product is called Claude Share. Its repository, plugin marketplace, and command names remain <code>session-share</code> and <code>/ss:</code>.</p>
+    </section>
+    <section id="cloud">
+      <h2>2. Connect to hosted sessions</h2>
+      <p><a href="/login">Sign in with GitHub</a>, choose a plan on the account page, then run:</p>
+      <pre><code>/ss:login https://claudeshare.space</code></pre>
+      <p>A browser opens to connect the plugin to your account. Check the displayed device code and approve your machine. Back in your project checkout, start a session:</p>
+      <pre><code>/ss:host</code></pre>
+      <p>Share the session invite with your teammate. In their own checkout, they run:</p>
+      <pre><code>/ss:join &lt;invite&gt;</code></pre>
+      <p>Starter is 19 € per month for one session and up to three people total. Team is 19 € per seat per month with multiple sessions. Each developer’s Claude Code access is separate.</p>
+      <aside class="guide-note"><strong>Billing is currently in test mode.</strong> Use Monri test cards only. No real payment is collected while sandbox mode is enabled.</aside>
+    </section>
+    <section id="self-host">
+      <h2>Or host the coordination session yourself</h2>
+      <p>The plugin and coordination server are MIT licensed and free to self-host. In peer mode, one teammate runs <code>/ss:host</code> and shares the invite over a reachable LAN address or tunnel. The host machine needs to stay online for the coordination server to remain reachable.</p>
+      <p>Peer invites are access credentials: share them only with trusted teammates. For a persistent server with GitHub sign-in, follow the <a href="https://github.com/cyber1443/session-share#configuring-github-sign-in">self-hosted OAuth configuration</a>.</p>
+    </section>
+    <section id="workflow">
+      <h2>How a team works in Claude Share</h2>
+      <ol><li><strong>Plan:</strong> turn an issue into a shared contract and focused tasks. The validator checks overlapping file paths, dependencies, and acceptance commands.</li><li><strong>Build:</strong> agents claim tasks and lease their file paths while developers work from separate checkouts. The live board shows shared progress.</li><li><strong>Verify:</strong> run task acceptance checks and test the assembled application. Reopen work that needs changes.</li><li><strong>Review:</strong> bring the result into a shared integration pull request for human review.</li></ol>
+      <p>Claude Code and GitHub are supported today. Jira, Slack, and Linear integrations are in development and are not yet available.</p>
+    </section>
+    <section id="limits">
+      <h2>What stays on your machine</h2>
+      <p>Claude Share does not share Claude accounts, resell subscriptions, or proxy inference. Each agent runs on its developer’s machine using that developer’s account and quota. The coordination server stores session state and room messages; code follows your normal Git workflow.</p>
+      <p>Hosted sessions keep the coordination state available while a laptop sleeps. They do not keep that laptop’s AI agent running. Other teammates with connected agents can continue working.</p>
+      <p>File leases reduce accidental edit collisions. They are not a security sandbox: shell writes can bypass the checks, and lease checks fail open when the server cannot be reached. Read the <a href="https://github.com/cyber1443/session-share#security-plainly">security notes</a> before choosing a deployment model.</p>
+    </section>
+    <section><h2>Next step</h2><p><a href="/login">Open your hosted account</a> or explore the <a href="https://github.com/cyber1443/session-share">source repository</a>. The <a href="/#faq">product FAQ</a> answers common setup and collaboration questions.</p></section>
+  </main>
+  <footer class="wrap"><a class="brand" href="/">Claude<span>Share</span></a><span>Shared work. Your own Claude account.</span><div><a href="/llms.txt">Product reference</a><a href="https://github.com/cyber1443/session-share">GitHub ↗</a></div></footer>
+</body>
+</html>
