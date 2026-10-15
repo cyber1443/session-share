@@ -59,6 +59,34 @@ CREATE TABLE IF NOT EXISTS files (
   created_at  INTEGER NOT NULL
 );
 
+/*
+ * Long-lived credentials a plugin holds for an account on an oauth server, so
+ * a checkout can open and join sessions as a verified person. Only a hash is
+ * kept: a leaked database is not a leaked set of logins.
+ */
+CREATE TABLE IF NOT EXISTS account_tokens (
+  hash        TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  label       TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  used_at     INTEGER,
+  revoked_at  INTEGER
+);
+
+/*
+ * A plugin's sign-in in progress: it shows the person a short code, they
+ * approve it in a browser that is signed in with GitHub, and the plugin picks
+ * up the account token here.
+ */
+CREATE TABLE IF NOT EXISTS device_codes (
+  device_code  TEXT PRIMARY KEY,
+  user_code    TEXT NOT NULL UNIQUE,
+  label        TEXT NOT NULL,
+  expires_at   INTEGER NOT NULL,
+  user_id      TEXT,
+  token        TEXT
+);
+
 /* CSRF state for the OAuth redirect, cleared as soon as it comes back. */
 CREATE TABLE IF NOT EXISTS oauth_states (
   state       TEXT PRIMARY KEY,
@@ -303,6 +331,73 @@ export class Store {
     }
   }
 
+  // -- account tokens ------------------------------------------------------
+
+  saveAccountToken(hash: string, userId: string, label: string, createdAt: number): void {
+    this.db
+      .prepare('INSERT INTO account_tokens (hash, user_id, label, created_at) VALUES (?, ?, ?, ?)')
+      .run(hash, userId, label, createdAt)
+  }
+
+  /** The user a token hash belongs to, if it is live. Touches it so stale tokens can be found. */
+  useAccountToken(hash: string, now: number): string | null {
+    const row = this.db
+      .prepare('SELECT user_id FROM account_tokens WHERE hash = ? AND revoked_at IS NULL')
+      .get(hash) as { user_id: string } | undefined
+    if (!row) return null
+    this.db.prepare('UPDATE account_tokens SET used_at = ? WHERE hash = ?').run(now, hash)
+    return row.user_id
+  }
+
+  revokeAccountToken(hash: string, now: number): boolean {
+    return (
+      this.db
+        .prepare('UPDATE account_tokens SET revoked_at = ? WHERE hash = ? AND revoked_at IS NULL')
+        .run(now, hash).changes > 0
+    )
+  }
+
+  // -- device sign-in ------------------------------------------------------
+
+  createDeviceCode(deviceCode: string, userCode: string, label: string, expiresAt: number): void {
+    this.db.prepare('DELETE FROM device_codes WHERE expires_at < ?').run(Date.now())
+    this.db
+      .prepare('INSERT INTO device_codes (device_code, user_code, label, expires_at) VALUES (?, ?, ?, ?)')
+      .run(deviceCode, userCode, label, expiresAt)
+  }
+
+  findDeviceCodeByUserCode(userCode: string, now: number): DeviceCodeRow | null {
+    const row = this.db
+      .prepare('SELECT * FROM device_codes WHERE user_code = ? AND expires_at > ?')
+      .get(userCode, now) as RawDeviceCodeRow | undefined
+    return row ? rowToDeviceCode(row) : null
+  }
+
+  /** Approves a pending code once; a second approval, or one after expiry, changes nothing. */
+  approveDeviceCode(userCode: string, userId: string, token: string, now: number): boolean {
+    return (
+      this.db
+        .prepare(
+          'UPDATE device_codes SET user_id = ?, token = ? WHERE user_code = ? AND user_id IS NULL AND expires_at > ?',
+        )
+        .run(userId, token, userCode, now).changes > 0
+    )
+  }
+
+  /**
+   * What the polling plugin gets: nothing yet, or the token -- exactly once.
+   * Handing it out deletes the row, so a replayed poll cannot fetch it again.
+   */
+  collectDeviceCode(deviceCode: string, now: number): { state: 'pending' | 'expired' } | { state: 'approved'; token: string; userId: string } {
+    const row = this.db.prepare('SELECT * FROM device_codes WHERE device_code = ?').get(deviceCode) as
+      | RawDeviceCodeRow
+      | undefined
+    if (!row || row.expires_at <= now) return { state: 'expired' }
+    if (!row.token || !row.user_id) return { state: 'pending' }
+    this.db.prepare('DELETE FROM device_codes WHERE device_code = ?').run(deviceCode)
+    return { state: 'approved', token: row.token, userId: row.user_id }
+  }
+
   // -- oauth state ---------------------------------------------------------
 
   createOauthState(state: string, redirectTo: string | null, createdAt: number): void {
@@ -312,7 +407,7 @@ export class Store {
   }
 
   consumeOauthState(state: string): { redirectTo: string | null } | null {
-    const row = this.db.prepare('SELECT redirect_to FROM oauth_states WHERE state = ?').get(state) as
+    const row = this.db.prepare('SELECT redirect_to FROM oauth_states WHERE state = ? AND created_at > ?').get(state, Date.now() - 10 * 60 * 1000) as
       | { redirect_to: string | null }
       | undefined
     if (!row) return null
@@ -322,6 +417,33 @@ export class Store {
 
   close(): void {
     this.db.close()
+  }
+}
+
+export interface DeviceCodeRow {
+  deviceCode: string
+  userCode: string
+  label: string
+  expiresAt: number
+  userId: string | null
+}
+
+interface RawDeviceCodeRow {
+  device_code: string
+  user_code: string
+  label: string
+  expires_at: number
+  user_id: string | null
+  token: string | null
+}
+
+function rowToDeviceCode(row: RawDeviceCodeRow): DeviceCodeRow {
+  return {
+    deviceCode: row.device_code,
+    userCode: row.user_code,
+    label: row.label,
+    expiresAt: row.expires_at,
+    userId: row.user_id,
   }
 }
 

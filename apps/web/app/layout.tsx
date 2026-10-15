@@ -2,7 +2,7 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'session-share',
+  title: 'Claude Share',
   description: 'Split one issue across several devs and their Claude Codes.',
 }
 

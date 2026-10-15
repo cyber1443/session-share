@@ -7,7 +7,8 @@
 }
 
 body {
-  @apply bg-ink text-neutral-200 font-mono antialiased;
+  font-family: 'DM', system-ui, sans-serif;
+  @apply bg-ink text-neutral-200 antialiased;
 }
 
 ::selection {
@@ -33,4 +34,29 @@ body {
 
 .field {
   @apply w-full border border-edge bg-ink px-3 py-2 text-sm outline-none placeholder:text-mute focus:border-neutral-500;
+}
+
+@font-face { font-family: DM; src: url('/assets/dm-sans.ttf') format('truetype'); font-display: swap; }
+@font-face { font-family: Space; src: url('/assets/space-grotesk.ttf') format('truetype'); font-display: swap; }
+h1,h2,h3 { font-family: Space, system-ui, sans-serif; }
+.panel { border-radius: 12px; }
+.btn { border-radius: 8px; min-height: 36px; text-transform: none; letter-spacing: 0; font-size: 13px; }
+.btn-accent { background: #d2fa6910; }
+.field { border-radius: 8px; }
+button:focus-visible,a:focus-visible { outline: 2px solid #d2fa69; outline-offset: 3px; }
+code,pre,textarea { font-family: ui-monospace, monospace; }
+.board-shell > header { min-height: 72px; padding: 14px 24px; background: #191d17; gap: 16px; }
+.board-shell > header h1 { font-size: 18px; }
+.board-shell > div > aside { background: #151a13; padding: 22px 18px; width: 240px; }
+.board-brand { color: #d2fa69; font: 600 17px Space, sans-serif; }
+@media(max-width: 800px) {
+ .board-shell > header { flex-wrap: wrap; padding: 12px 16px; }
+ .board-shell > header > div { flex-wrap: wrap; gap: 12px; }
+ .board-shell > div > aside { width: 180px; padding: 16px 12px; }
+}
+@media(max-width: 560px) {
+ .board-shell { height: auto; min-height: 100dvh; }
+ .board-shell > div { flex-direction: column; }
+ .board-shell > div > aside { width: 100%; border-right: 0; border-bottom: 1px solid #343b2e; gap: 12px; }
+ .board-shell > div > aside ul { display: flex; flex-wrap: wrap; gap: 12px; }
 }

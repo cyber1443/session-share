@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { ParticipantId, SessionId } from '@session-share/protocol'
 import type { Store } from './db.js'
 
@@ -31,6 +31,12 @@ export interface AuthConfig {
    * before anyone registers an OAuth App. Refused on any non-loopback bind.
    */
   devLogin: boolean
+  /**
+   * The address people reach this server at, for links it hands out itself --
+   * the page a plugin's sign-in is approved on. Defaults to the origin of the
+   * OAuth callback, which has to be public anyway.
+   */
+  publicUrl: string
 }
 
 export const JOIN_TOKEN_TTL_MS = 15 * 60 * 1000
@@ -390,7 +396,53 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
     githubClientSecret: env.GITHUB_CLIENT_SECRET ?? null,
     callbackUrl: env.GITHUB_CALLBACK_URL ?? 'http://127.0.0.1:3000/auth/github/callback',
     devLogin: env.SESSION_SHARE_DEV_LOGIN === '1',
+    publicUrl: publicOrigin(env),
   }
+}
+
+function publicOrigin(env: NodeJS.ProcessEnv): string {
+  const configured = env.SESSION_SHARE_PUBLIC_URL ?? env.GITHUB_CALLBACK_URL ?? 'http://127.0.0.1:3000'
+  try {
+    return new URL(configured).origin
+  } catch {
+    return 'http://127.0.0.1:3000'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Account tokens and device sign-in
+// ---------------------------------------------------------------------------
+
+/**
+ * What a plugin holds for an account on an oauth server. Random, not signed:
+ * it has to be revocable, so the server keeps (a hash of) every one it issued.
+ */
+export const ACCOUNT_TOKEN_PREFIX = 'ssa_'
+export const DEVICE_CODE_TTL_MS = 10 * 60 * 1000
+
+export function generateAccountToken(): string {
+  return `${ACCOUNT_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`
+}
+
+export function hashAccountToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex')
+}
+
+export function isAccountToken(token: string): boolean {
+  return token.startsWith(ACCOUNT_TOKEN_PREFIX)
+}
+
+export function generateDeviceCode(): string {
+  return randomBytes(32).toString('base64url')
+}
+
+/** Read off one screen and typed or compared on another, so no 0/O or 1/I. */
+const USER_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+export function generateUserCode(): string {
+  const bytes = randomBytes(8)
+  const chars = [...bytes].map((byte) => USER_CODE_ALPHABET[byte % USER_CODE_ALPHABET.length])
+  return `${chars.slice(0, 4).join('')}-${chars.slice(4).join('')}`
 }
 
 /**

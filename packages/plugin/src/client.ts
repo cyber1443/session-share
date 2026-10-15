@@ -99,6 +99,33 @@ export async function pair(
   return payload
 }
 
+/**
+ * Joining on a server that verifies identity: the invite says which session,
+ * the account token from /ss:login says who.
+ */
+export async function accountJoin(
+  serverUrl: string,
+  invite: string,
+  accountToken: string,
+  repoPath: string,
+): Promise<PairResult> {
+  const response = await fetch(new URL('/api/join', serverUrl), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${accountToken}` },
+    body: JSON.stringify({ invite, repoPath, machineId: machineId() }),
+  })
+  const payload = (await response.json()) as PairResult & Refusal
+  if (!response.ok) {
+    throw new CommandError(
+      payload.error ?? 'internal',
+      payload.message ?? 'join failed',
+      response.status,
+      payload.reason ?? null,
+    )
+  }
+  return payload
+}
+
 export async function runCommand<T extends ClientCommand['type']>(
   config: CommandTarget,
   command: Extract<ClientCommand, { type: T }>,

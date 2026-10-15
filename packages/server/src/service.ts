@@ -156,6 +156,12 @@ export class SessionService {
    * so it reaches them now rather than on the next heartbeat. Set by the gateway.
    */
   onLive: ((sessionId: SessionId) => void) | null = null
+  /**
+   * Asked before anyone takes a new seat, by every path a join can come in on
+   * -- the board's socket, a plugin, a join code. Null allows. Set by the app
+   * from its access policy.
+   */
+  joinGate: ((user: AuthenticatedUser, sessionId: SessionId) => string | null) | null = null
   /** The terminals open in a session and whose machines take one. Set by the terminal relay. */
   terminalsOf: ((sessionId: SessionId) => { terminals: TerminalInfo[]; hosts: string[] }) | null = null
 
@@ -785,6 +791,8 @@ export class SessionService {
         })
       }
     } else {
+      const refused = this.joinGate?.(user, sessionId) ?? null
+      if (refused) throw new ServiceError('forbidden', refused)
       participantId = randomUUID() as ParticipantId
       const participant: Participant = {
         id: participantId,

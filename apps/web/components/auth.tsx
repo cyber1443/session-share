@@ -83,7 +83,7 @@ export function SignIn() {
   return (
     <div className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-8 px-6">
       <div>
-        <h1 className="text-lg tracking-tight">session-share</h1>
+        <h1 className="text-lg tracking-tight">Claude Share</h1>
         <p className="mt-2 text-sm leading-relaxed text-mute">
           Split one issue across several devs and their Claude Codes. Your Claude account stays on
           your machine — this only coordinates who owns which files.

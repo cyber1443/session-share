@@ -40,7 +40,7 @@ function Sessions() {
   return (
     <div className="mx-auto max-w-4xl px-6 py-10">
       <header className="flex items-baseline justify-between border-b border-edge pb-4">
-        <h1 className="text-sm uppercase tracking-wider">session-share</h1>
+        <h1 className="text-sm uppercase tracking-wider">Claude Share</h1>
         <div className="flex items-center gap-4 text-xs text-mute">
           <span>{me?.displayName}</span>
           <button className="hover:text-neutral-300" onClick={() => void logout()}>

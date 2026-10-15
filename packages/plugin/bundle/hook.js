@@ -16116,6 +16116,12 @@ var Preferences = external_exports.object({
    * here: anyone with the invite who joins the ticket can. Off unless chosen.
    */
   terminal: external_exports.enum(["off", "members"]).default("off"),
+  /**
+   * Where /ss:host opens sessions. Null runs a coordination server on this
+   * machine; an address opens them on a hosted session-share you signed in to
+   * with /ss:login, so the session does not depend on this machine being up.
+   */
+  server: external_exports.string().url().nullable().default(null),
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });

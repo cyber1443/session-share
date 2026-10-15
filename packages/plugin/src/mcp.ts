@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { hostname } from 'node:os'
 import { basename, resolve } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -13,10 +14,11 @@ import {
   type SessionSnapshot,
   type TaskState,
 } from '@session-share/protocol'
-import { CommandError, pair, peerJoin, runCommand } from './client.js'
+import { CommandError, accountJoin, pair, peerJoin, runCommand } from './client.js'
+import { accountFor, finishSignIn, originOf, pendingFor, signOut, startSignIn } from './accounts.js'
 import { downloadPictures, uploadPicture } from './files.js'
 import { readConfig, writeConfig, type SessionConfig } from './config.js'
-import { HOST_HEADER, ensureDaemon, hostKey, probe, publicUrlOverride, stopDaemon } from './daemon.js'
+import { HOST_HEADER, ensureDaemon, hostKey, probe, publicUrlOverride, stopDaemon, type Health } from './daemon.js'
 import { describeDirectives, markCaughtUp, peekDirectives, pendingDirectives } from './inbox.js'
 import { startAutopilot } from './autopilot.js'
 import { ensureTerminalHost, stopTerminalHost } from './terminal-launch.js'
@@ -32,7 +34,7 @@ import {
   fetch as gitFetch,
   taskBranch,
 } from './git.js'
-import { readPreferences } from './preferences.js'
+import { readPreferences, writePreferences } from './preferences.js'
 import { registerGitTools } from './tools-git.js'
 import { localIdentity, repoRemote, repoRoot } from './identity.js'
 
@@ -49,14 +51,22 @@ function slugify(value: string): string {
   )
 }
 
+/**
+ * Who is asking a server to open or re-share a session: on this machine's own
+ * server, the host credential (see server/auth.ts hostCredential); on one that
+ * verifies identity, the account token from /ss:login.
+ */
+type Credential = Record<string, string>
+const hostCredential = (): Credential => ({ [HOST_HEADER]: hostKey() })
+
 async function createSession(
   serverUrl: string,
   input: { slug: string; title: string; repo: RepoRef; issueRef: string | null },
+  credential: Credential = hostCredential(),
 ): Promise<{ sessionId: string; slug: string; invite: string | null }> {
   const response = await fetch(new URL('/api/sessions', serverUrl), {
     method: 'POST',
-    // Opening a session is the host's alone; see server/auth.ts hostCredential.
-    headers: { 'content-type': 'application/json', [HOST_HEADER]: hostKey() },
+    headers: { 'content-type': 'application/json', ...credential },
     body: JSON.stringify(input),
   })
   const payload = (await response.json()) as {
@@ -78,10 +88,11 @@ async function createSession(
 async function mintInvite(
   serverUrl: string,
   slug: string,
+  credential: Credential = hostCredential(),
 ): Promise<{ invite: string; repo: RepoRef | null }> {
   const response = await fetch(new URL(`/api/sessions/${slug}/invite`, serverUrl), {
     method: 'POST',
-    headers: { [HOST_HEADER]: hostKey() },
+    headers: credential,
   })
   const payload = (await response.json()) as {
     invite?: string
@@ -136,7 +147,7 @@ function splitHint(
  * loopback address. Only this side can tell the difference, because only this
  * side knows which server the invite claims to come from.
  */
-async function checkReachable(url: string, expectedServerId: string | null): Promise<void> {
+async function checkReachable(url: string, expectedServerId: string | null): Promise<Health> {
   const health = await probe(url, 4000)
 
   if (!health) {
@@ -164,6 +175,21 @@ async function checkReachable(url: string, expectedServerId: string | null): Pro
       ].join('\n'),
     )
   }
+  return health
+}
+
+/** The board for a session on a server that signs people in, rather than seating them by invite. */
+function accountBoardUrl(serverUrl: string, slug: string): string {
+  return `${serverUrl.replace(/\/$/, '')}/board/?s=${encodeURIComponent(slug)}`
+}
+
+function signInFirst(serverUrl: string): Error {
+  return new Error(
+    [
+      `${originOf(serverUrl)} verifies who you are, and this machine is not signed in to it.`,
+      `Run /ss:login ${originOf(serverUrl)} first, then try again.`,
+    ].join('\n'),
+  )
 }
 
 /**
@@ -194,6 +220,137 @@ async function snapshot(cfg: SessionConfig): Promise<SessionSnapshot> {
   })
   if (!response.ok) throw new Error(`Could not read the session: ${response.status}`)
   return (await response.json()) as SessionSnapshot
+}
+
+interface RepoDescription {
+  title: string
+  remote: Awaited<ReturnType<typeof repoRemote>>
+  repo: RepoRef
+  slug: string
+  sameRepo: (stored: RepoRef | null) => boolean
+}
+
+async function describeRepo(root: string, given: string | null | undefined): Promise<RepoDescription> {
+  /**
+   * A session is the repository, not a piece of work -- tickets are the
+   * pieces. Naming it after the work was a leftover from when a session
+   * held exactly one plan, and it made every new session need a decision
+   * nobody had a reason to make.
+   */
+  const title = given?.trim() || basename(root)
+  const remote = await repoRemote(root)
+  const repo: RepoRef = {
+    owner: remote?.owner ?? 'local',
+    name: remote?.name ?? basename(root),
+    baseBranch: await baseBranch(root),
+    remoteUrl: remote?.remoteUrl ?? root,
+  }
+
+  /**
+   * The slug names the repository, so it comes from what identifies one:
+   * the remote, or failing that the path. The folder name alone does not --
+   * two unrelated checkouts both called `app` used to share a slug, and the
+   * second host silently resumed the first one's session.
+   */
+  const slug = given?.trim()
+    ? slugify(title)
+    : remote
+      ? slugify(`${remote.owner}-${remote.name}`)
+      : `${slugify(basename(root)).slice(0, 33)}-${shortHash(root)}`
+  const sameRepo = (stored: RepoRef | null) =>
+    Boolean(stored) &&
+    (remote
+      ? stored!.owner === repo.owner && stored!.name === repo.name
+      : stored!.remoteUrl === repo.remoteUrl)
+  return { title, remote, repo, slug, sameRepo }
+}
+
+/**
+ * Hosting on a server somebody else runs: nothing starts on this machine, no
+ * tunnel, no host key. The account from /ss:login opens the session and the
+ * server's own rules decide what that account may do -- a plan's session or
+ * seat limit comes back as the refusal, word for word.
+ */
+async function hostOnServer(
+  root: string,
+  server: string,
+  described: RepoDescription,
+  given: string | null | undefined,
+  issueRef: string | null | undefined,
+): Promise<string> {
+  const serverUrl = originOf(server)
+  const health = await probe(serverUrl, 5000)
+  if (!health) throw new Error(`Nothing answered at ${serverUrl}. Check the address, or host on this machine with server: "local".`)
+  if (health.mode !== 'oauth') {
+    throw new Error(`${serverUrl} is a peer server with no accounts. Join one of its sessions with an invite instead.`)
+  }
+  const account = accountFor(serverUrl)
+  if (!account) throw signInFirst(serverUrl)
+  const credential = { authorization: `Bearer ${account.token}` }
+  const { title, repo, slug, sameRepo } = described
+
+  const resume = async (candidate: string | undefined) => {
+    if (!candidate) return null
+    try {
+      const existing = await mintInvite(serverUrl, candidate, credential)
+      return sameRepo(existing.repo) ? { invite: existing.invite, resumed: true, slug: candidate } : null
+    } catch {
+      return null
+    }
+  }
+  const open = async (candidate: string) => {
+    try {
+      const fresh = await createSession(serverUrl, { slug: candidate, title, repo, issueRef: issueRef ?? null }, credential)
+      return { invite: fresh.invite, resumed: false, slug: candidate }
+    } catch (error) {
+      // Taken by this account's own session for this repo: carry on in it. Taken by anyone else: try another name.
+      if (!String(error).includes('is taken')) throw error
+      return resume(candidate)
+    }
+  }
+
+  const attached = readConfig(root)
+  const sameServer = attached ? originOf(attached.serverUrl) === serverUrl : false
+  const created =
+    (given?.trim() || !sameServer ? null : await resume(attached?.sessionRef)) ??
+    (await open(slug)) ??
+    (await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`)) ??
+    (await open(`${slug.slice(0, 26)}-${slugify(account.githubLogin).slice(0, 13)}`))
+  if (!created?.invite) {
+    throw new Error(`Sessions named "${slug}" on ${serverUrl} belong to someone else. Pass a title to name this one.`)
+  }
+
+  const joined = await accountJoin(serverUrl, created.invite, account.token, root)
+  const cfg: SessionConfig = {
+    serverUrl,
+    sessionRef: joined.sessionRef,
+    participantId: joined.participantId,
+    participantToken: joined.participantToken,
+    githubLogin: joined.githubLogin,
+    displayName: joined.displayName,
+    repoPath: root,
+  }
+  writeConfig(root, cfg)
+  await markCaughtUp(cfg)
+  ensureTerminalHost(root)
+
+  const packed = packInvite({ url: serverUrl, token: created.invite, serverId: health.serverId ?? null })
+  const board = accountBoardUrl(serverUrl, joined.sessionRef)
+  const opened = readPreferences().openBoard && openInBrowser(board)
+  return [
+    created.resumed
+      ? `Resumed "${title}" on ${serverUrl} as ${joined.displayName}.`
+      : `Hosting "${title}" on ${serverUrl} as ${joined.displayName}.`,
+    '',
+    'Send your teammate this line:',
+    `  /ss:join ${packed}`,
+    '',
+    `They sign in once with /ss:login ${serverUrl}; the invite alone does not let anyone in.`,
+    opened ? `Board opened: ${board}` : `Board: ${board}`,
+    '',
+    `The session lives on ${serverUrl}, so it keeps going when this machine sleeps.`,
+    `Every edit in ${basename(root)} is now checked against this session's file leases.`,
+  ].join('\n')
 }
 
 export function createServer(): McpServer {
@@ -228,17 +385,21 @@ export function createServer(): McpServer {
           .describe(
             'Open a Cloudflare quick tunnel so teammates on any network can join, and put its public address in the invite. Needs cloudflared installed. Defaults to your saved preference.',
           ),
+        server: z
+          .string()
+          .nullish()
+          .describe(
+            'A hosted session-share to open the session on instead of this machine, e.g. https://cloud.example.com. Needs /ss:login there first. Defaults to the server you signed in to; "local" forces this machine.',
+          ),
       },
     },
-    async ({ title: given, issueRef, expose, publicUrl: givenPublicUrl, tunnel }) => {
+    async ({ title: given, issueRef, expose, publicUrl: givenPublicUrl, tunnel, server: givenServer }) => {
       const root = await repoRoot(REPO_ROOT)
-      /**
-       * A session is the repository, not a piece of work -- tickets are the
-       * pieces. Naming it after the work was a leftover from when a session
-       * held exactly one plan, and it made every new session need a decision
-       * nobody had a reason to make.
-       */
-      const title = given?.trim() || basename(root)
+      const { title, remote, repo, slug, sameRepo } = await describeRepo(root, given)
+
+      const server = givenServer?.trim() || readPreferences().server
+      if (server && server !== 'local') return text(await hostOnServer(root, server, { title, remote, repo, slug, sameRepo }, given, issueRef))
+
       const identity = await localIdentity()
       let publicUrl = publicUrlOverride(givenPublicUrl)
       const tunnelled = !publicUrl && (tunnel ?? readPreferences().tunnel)
@@ -248,31 +409,6 @@ export function createServer(): McpServer {
       if (tunnelled) publicUrl = await ensureTunnel(daemon.port)
       // What goes in the invite: what the host said, else what this machine can see.
       const dialUrl = publicUrl ?? daemon.url
-
-      const remote = await repoRemote(root)
-      const repo: RepoRef = {
-        owner: remote?.owner ?? 'local',
-        name: remote?.name ?? basename(root),
-        baseBranch: await baseBranch(root),
-        remoteUrl: remote?.remoteUrl ?? root,
-      }
-
-      /**
-       * The slug names the repository, so it comes from what identifies one:
-       * the remote, or failing that the path. The folder name alone does not --
-       * two unrelated checkouts both called `app` used to share a slug, and the
-       * second host silently resumed the first one's session.
-       */
-      const slug = given?.trim()
-        ? slugify(title)
-        : remote
-          ? slugify(`${remote.owner}-${remote.name}`)
-          : `${slugify(basename(root)).slice(0, 33)}-${shortHash(root)}`
-      const sameRepo = (stored: RepoRef | null) =>
-        Boolean(stored) &&
-        (remote
-          ? stored!.owner === repo.owner && stored!.name === repo.name
-          : stored!.remoteUrl === repo.remoteUrl)
 
       /**
        * Hosting the same thing twice rejoins it rather than failing. The host's
@@ -444,10 +580,19 @@ export function createServer(): McpServer {
        * the wrong server unnoticed.
        */
       const dial = packed ? (serverUrl ? publicUrlOverride(serverUrl)! : packed.url) : null
-      if (packed) await checkReachable(dial!, packed.serverId ?? null)
+      const health = packed ? await checkReachable(dial!, packed.serverId ?? null) : null
+      /**
+       * A server that verifies identity takes the invite as "which session"
+       * only; who is joining comes from this machine's account there.
+       */
+      const verified = health?.mode === 'oauth'
+      const account = verified ? accountFor(dial!) : null
+      if (verified && !account) throw signInFirst(dial!)
 
       const result = packed
-        ? await peerJoin(dial!, packed.token, await localIdentity(), root)
+        ? account
+          ? await accountJoin(dial!, packed.token, account.token, root)
+          : await peerJoin(dial!, packed.token, await localIdentity(), root)
         : await pair(serverUrl ?? DEFAULT_SERVER_URL, trimmed, root)
 
       const cfg: SessionConfig = {
@@ -463,13 +608,15 @@ export function createServer(): McpServer {
       await markCaughtUp(cfg)
       ensureTerminalHost(root)
 
-      const board = packed
-        ? boardUrl(
-            dial!,
-            dial === packed.url ? trimmed : packInvite({ ...packed, url: dial! }),
-            result.githubLogin,
-          )
-        : null
+      const board = !packed
+        ? null
+        : verified
+          ? accountBoardUrl(dial!, result.sessionRef)
+          : boardUrl(
+              dial!,
+              dial === packed.url ? trimmed : packInvite({ ...packed, url: dial! }),
+              result.githubLogin,
+            )
       const opened = Boolean(board) && readPreferences().openBoard && openInBrowser(board!)
 
       return text(
@@ -504,6 +651,10 @@ export function createServer(): McpServer {
       }
 
       const health = await probe(cfg.serverUrl)
+      if (health?.mode === 'oauth') {
+        const board = accountBoardUrl(cfg.serverUrl, cfg.sessionRef)
+        return text(openInBrowser(board) ? `Opened ${board}` : board)
+      }
       const board = boardUrl(
         cfg.serverUrl,
         packInvite({ url: cfg.serverUrl, token: payload.invite, serverId: health?.serverId ?? null }),
@@ -569,6 +720,12 @@ export function createServer(): McpServer {
     async () => {
       // Saved first: whoever hosts next, here or elsewhere, starts from this.
       const attached = readConfig(await repoRoot(REPO_ROOT))
+      // An account there means a server that signs people in -- never this machine's own peer server.
+      if (attached && accountFor(attached.serverUrl)) {
+        return text(
+          `This session runs on ${originOf(attached.serverUrl)}, not on this machine, so there is nothing here to stop. It carries on without you.`,
+        )
+      }
       const saved = attached ? await mirrorOnce(attached).catch(() => null) : null
       stopTunnel()
       // Its terminals talk to this server; with the server gone they have nothing to do.
@@ -580,6 +737,83 @@ export function createServer(): McpServer {
         (await stopDaemon()) === 'stopped'
           ? `Stopped.${note}`
           : `Nothing was running. (Any stale record of one has been cleared.)${note}`,
+      )
+    },
+  )
+
+  server.registerTool(
+    'ss_login',
+    {
+      description:
+        'Sign this machine in to a hosted session-share (or any session-share with GitHub sign-in), so /ss:host can open sessions there and /ss:join can join them. Opens a browser page to approve a short code.',
+      inputSchema: {
+        serverUrl: z
+          .string()
+          .nullish()
+          .describe('The server, e.g. https://cloud.example.com. Defaults to the one you last signed in to.'),
+      },
+    },
+    async ({ serverUrl: given }) => {
+      const target = given?.trim() || readPreferences().server
+      if (!target) throw new Error('Which server? Pass its address, e.g. /ss:login https://cloud.example.com')
+      const serverUrl = originOf(/^https?:\/\//.test(target) ? target : `https://${target}`)
+
+      const health = await probe(serverUrl, 5000)
+      if (!health) throw new Error(`Nothing answered at ${serverUrl}.`)
+      if (health.mode !== 'oauth') {
+        throw new Error(`${serverUrl} has no accounts to sign in to -- it is a peer server. Join its sessions with an invite.`)
+      }
+
+      const existing = accountFor(serverUrl)
+      if (existing) {
+        writePreferences({ server: serverUrl })
+        return text(`Already signed in to ${serverUrl} as @${existing.githubLogin}. /ss:host opens sessions there.`)
+      }
+
+      let pending = pendingFor(serverUrl)
+      if (!pending) {
+        pending = await startSignIn(serverUrl, `Claude Code on ${hostname()}`)
+        openInBrowser(pending.verifyUrl)
+      }
+      const account = await finishSignIn(serverUrl, pending, 90_000)
+      if (!account) {
+        return text(
+          [
+            `Approve this code in your browser: ${pending.userCode}`,
+            `  ${pending.verifyUrl}`,
+            '',
+            'Then run /ss:login again to finish.',
+          ].join('\n'),
+        )
+      }
+      writePreferences({ server: serverUrl })
+      return text(
+        [
+          `Signed in to ${serverUrl} as @${account.githubLogin}.`,
+          `/ss:host now opens sessions there instead of on this machine (pass server: "local" to host here).`,
+        ].join('\n'),
+      )
+    },
+  )
+
+  server.registerTool(
+    'ss_logout',
+    {
+      description: 'Sign this machine out of a hosted session-share and go back to hosting on this machine.',
+      inputSchema: {
+        serverUrl: z.string().nullish().describe('Defaults to the server /ss:host currently uses.'),
+      },
+    },
+    async ({ serverUrl: given }) => {
+      const target = given?.trim() || readPreferences().server
+      if (!target) return text('Not signed in anywhere; /ss:host runs on this machine.')
+      const serverUrl = originOf(/^https?:\/\//.test(target) ? target : `https://${target}`)
+      const account = await signOut(serverUrl)
+      if (readPreferences().server === serverUrl) writePreferences({ server: null })
+      return text(
+        account
+          ? `Signed @${account.githubLogin} out of ${serverUrl}. /ss:host runs on this machine again.`
+          : `This machine was not signed in to ${serverUrl}.`,
       )
     },
   )

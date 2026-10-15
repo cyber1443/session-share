@@ -10,6 +10,8 @@ Attach this checkout: **$ARGUMENTS**
 2. Call `ss_status` and report the phase, who else is here, and what is claimable.
 3. The board opens in the browser automatically; `ss_join` also returns the URL.
 
+If `ss_join` says the server verifies who you are, run `/ss:login <that server>` and then `ss_join` again with the same invite. A refusal about seats or plans comes from that server; show it as is.
+
 If the join is refused because nothing answered, or because the server that answered is not the one that minted the invite, do not retry — the invite is almost certainly pointing at *this* machine because the host's server is bound to loopback. Tell them to ask the host to re-run `/ss:host`. `/ss:doctor` on the host's machine says which it is.
 
 **One checkout per person.** If the join is refused because someone else is working in this path, two Claude Codes are sharing a working tree — they will overwrite each other and no lease can prevent it. Use a separate clone or `git worktree add`.

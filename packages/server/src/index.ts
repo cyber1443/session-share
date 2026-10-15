@@ -1,6 +1,8 @@
 import { createApp } from './app.js'
 
-export { createApp, isLoopbackAddress } from './app.js'
+export { createApp, isLoopbackAddress, type AppContext, type AppOptions } from './app.js'
+export type { AccessPolicy, PolicyUser } from './policy.js'
+export type { User } from './auth.js'
 export { SessionService, ServiceError } from './service.js'
 export { SessionState, CLAIM_CAP } from './projection.js'
 export { Store } from './db.js'

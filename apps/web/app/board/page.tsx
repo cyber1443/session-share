@@ -93,9 +93,10 @@ function Board({ slug }: { slug: string }) {
   }
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="board-shell flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-edge px-4 py-2">
         <div className="flex items-baseline gap-3">
+          <Link href="/" className="board-brand" title="All sessions">✳ Claude Share</Link>
           <h1 className="text-sm">{snapshot.session.title}</h1>
           <span className="text-xs text-mute">
             {snapshot.session.repo.owner}/{snapshot.session.repo.name}

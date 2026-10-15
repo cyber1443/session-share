@@ -42460,8 +42460,8 @@ var require_escape_html = __commonJS({
   "node_modules/.pnpm/escape-html@1.0.3/node_modules/escape-html/index.js"(exports, module) {
     "use strict";
     var matchHtmlRegExp = /["'&<>]/;
-    module.exports = escapeHtml;
-    function escapeHtml(string4) {
+    module.exports = escapeHtml2;
+    function escapeHtml2(string4) {
       var str = "" + string4;
       var match = matchHtmlRegExp.exec(str);
       if (!match) {
@@ -43454,7 +43454,7 @@ var require_send = __commonJS({
     var stream = __require("node:stream");
     var debug = __require("node:util").debuglog("send");
     var decode3 = require_fast_decode_uri_component();
-    var escapeHtml = require_escape_html();
+    var escapeHtml2 = require_escape_html();
     var mime = require_mime();
     var ms = require_dist5();
     var { collapseLeadingSlashes } = require_collapseLeadingSlashes();
@@ -43817,7 +43817,7 @@ var require_send = __commonJS({
         return sendError(403);
       }
       const loc = encodeURI(collapseLeadingSlashes(options.path + "/"));
-      const doc = createHtmlDocument("Redirecting", "Redirecting to " + escapeHtml(loc));
+      const doc = createHtmlDocument("Redirecting", "Redirecting to " + escapeHtml2(loc));
       const headers = {};
       headers["Content-Type"] = "text/html; charset=utf-8";
       headers["Content-Length"] = doc[1];
@@ -47156,7 +47156,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes2, createHash: createHash3 } = __require("crypto");
+    var { randomBytes: randomBytes2, createHash: createHash4 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -47824,7 +47824,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash3("sha1").update(key + GUID).digest("base64");
+        const digest = createHash4("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -48193,7 +48193,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash: createHash3 } = __require("crypto");
+    var { createHash: createHash4 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -48500,7 +48500,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash3("sha1").update(key + GUID).digest("base64");
+        const digest = createHash4("sha1").update(key + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -48590,7 +48590,7 @@ var require_websocket_server = __commonJS({
 // packages/server/src/app.ts
 var import_fastify = __toESM(require_fastify(), 1);
 var import_static = __toESM(require_static(), 1);
-import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash3, randomUUID as randomUUID4 } from "node:crypto";
 import { existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname3, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65606,7 +65606,7 @@ function parseMentions(body, loginToIds) {
 }
 
 // packages/server/src/auth.ts
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 var JOIN_TOKEN_TTL_MS = 15 * 60 * 1e3;
 var WS_TICKET_TTL_MS = 60 * 1e3;
 var COOKIE_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
@@ -65792,8 +65792,37 @@ function loadAuthConfig(env = process.env) {
     githubClientId,
     githubClientSecret: env.GITHUB_CLIENT_SECRET ?? null,
     callbackUrl: env.GITHUB_CALLBACK_URL ?? "http://127.0.0.1:3000/auth/github/callback",
-    devLogin: env.SESSION_SHARE_DEV_LOGIN === "1"
+    devLogin: env.SESSION_SHARE_DEV_LOGIN === "1",
+    publicUrl: publicOrigin(env)
   };
+}
+function publicOrigin(env) {
+  const configured = env.SESSION_SHARE_PUBLIC_URL ?? env.GITHUB_CALLBACK_URL ?? "http://127.0.0.1:3000";
+  try {
+    return new URL(configured).origin;
+  } catch {
+    return "http://127.0.0.1:3000";
+  }
+}
+var ACCOUNT_TOKEN_PREFIX = "ssa_";
+var DEVICE_CODE_TTL_MS = 10 * 60 * 1e3;
+function generateAccountToken() {
+  return `${ACCOUNT_TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
+}
+function hashAccountToken(token) {
+  return createHash("sha256").update(token).digest("hex");
+}
+function isAccountToken(token) {
+  return token.startsWith(ACCOUNT_TOKEN_PREFIX);
+}
+function generateDeviceCode() {
+  return randomBytes(32).toString("base64url");
+}
+var USER_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+function generateUserCode() {
+  const bytes = randomBytes(8);
+  const chars = [...bytes].map((byte) => USER_CODE_ALPHABET[byte % USER_CODE_ALPHABET.length]);
+  return `${chars.slice(0, 4).join("")}-${chars.slice(4).join("")}`;
 }
 var FORWARDED_HEADERS = [
   "forwarded",
@@ -65812,12 +65841,12 @@ function devLoginAllowed(config2, remoteAddress, headers = {}) {
 }
 
 // packages/server/src/build.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 function computeBuildId(entry = process.argv[1] ?? "") {
   if (!entry || !existsSync(entry)) return "unknown";
-  const hash2 = createHash("sha256");
+  const hash2 = createHash2("sha256");
   try {
     const dir = dirname(entry);
     const files = readdirSync(dir).filter((name) => name.endsWith(".js")).sort();
@@ -65887,6 +65916,34 @@ CREATE TABLE IF NOT EXISTS files (
   type        TEXT NOT NULL,
   bytes       BLOB NOT NULL,
   created_at  INTEGER NOT NULL
+);
+
+/*
+ * Long-lived credentials a plugin holds for an account on an oauth server, so
+ * a checkout can open and join sessions as a verified person. Only a hash is
+ * kept: a leaked database is not a leaked set of logins.
+ */
+CREATE TABLE IF NOT EXISTS account_tokens (
+  hash        TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  label       TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  used_at     INTEGER,
+  revoked_at  INTEGER
+);
+
+/*
+ * A plugin's sign-in in progress: it shows the person a short code, they
+ * approve it in a browser that is signed in with GitHub, and the plugin picks
+ * up the account token here.
+ */
+CREATE TABLE IF NOT EXISTS device_codes (
+  device_code  TEXT PRIMARY KEY,
+  user_code    TEXT NOT NULL UNIQUE,
+  label        TEXT NOT NULL,
+  expires_at   INTEGER NOT NULL,
+  user_id      TEXT,
+  token        TEXT
 );
 
 /* CSRF state for the OAuth redirect, cleared as soon as it comes back. */
@@ -66065,12 +66122,52 @@ var Store = class {
       usedAt: row.used_at
     };
   }
+  // -- account tokens ------------------------------------------------------
+  saveAccountToken(hash2, userId, label, createdAt) {
+    this.db.prepare("INSERT INTO account_tokens (hash, user_id, label, created_at) VALUES (?, ?, ?, ?)").run(hash2, userId, label, createdAt);
+  }
+  /** The user a token hash belongs to, if it is live. Touches it so stale tokens can be found. */
+  useAccountToken(hash2, now) {
+    const row = this.db.prepare("SELECT user_id FROM account_tokens WHERE hash = ? AND revoked_at IS NULL").get(hash2);
+    if (!row) return null;
+    this.db.prepare("UPDATE account_tokens SET used_at = ? WHERE hash = ?").run(now, hash2);
+    return row.user_id;
+  }
+  revokeAccountToken(hash2, now) {
+    return this.db.prepare("UPDATE account_tokens SET revoked_at = ? WHERE hash = ? AND revoked_at IS NULL").run(now, hash2).changes > 0;
+  }
+  // -- device sign-in ------------------------------------------------------
+  createDeviceCode(deviceCode, userCode, label, expiresAt) {
+    this.db.prepare("DELETE FROM device_codes WHERE expires_at < ?").run(Date.now());
+    this.db.prepare("INSERT INTO device_codes (device_code, user_code, label, expires_at) VALUES (?, ?, ?, ?)").run(deviceCode, userCode, label, expiresAt);
+  }
+  findDeviceCodeByUserCode(userCode, now) {
+    const row = this.db.prepare("SELECT * FROM device_codes WHERE user_code = ? AND expires_at > ?").get(userCode, now);
+    return row ? rowToDeviceCode(row) : null;
+  }
+  /** Approves a pending code once; a second approval, or one after expiry, changes nothing. */
+  approveDeviceCode(userCode, userId, token, now) {
+    return this.db.prepare(
+      "UPDATE device_codes SET user_id = ?, token = ? WHERE user_code = ? AND user_id IS NULL AND expires_at > ?"
+    ).run(userId, token, userCode, now).changes > 0;
+  }
+  /**
+   * What the polling plugin gets: nothing yet, or the token -- exactly once.
+   * Handing it out deletes the row, so a replayed poll cannot fetch it again.
+   */
+  collectDeviceCode(deviceCode, now) {
+    const row = this.db.prepare("SELECT * FROM device_codes WHERE device_code = ?").get(deviceCode);
+    if (!row || row.expires_at <= now) return { state: "expired" };
+    if (!row.token || !row.user_id) return { state: "pending" };
+    this.db.prepare("DELETE FROM device_codes WHERE device_code = ?").run(deviceCode);
+    return { state: "approved", token: row.token, userId: row.user_id };
+  }
   // -- oauth state ---------------------------------------------------------
   createOauthState(state, redirectTo, createdAt) {
     this.db.prepare("INSERT INTO oauth_states (state, redirect_to, created_at) VALUES (?, ?, ?)").run(state, redirectTo, createdAt);
   }
   consumeOauthState(state) {
-    const row = this.db.prepare("SELECT redirect_to FROM oauth_states WHERE state = ?").get(state);
+    const row = this.db.prepare("SELECT redirect_to FROM oauth_states WHERE state = ? AND created_at > ?").get(state, Date.now() - 10 * 60 * 1e3);
     if (!row) return null;
     this.db.prepare("DELETE FROM oauth_states WHERE state = ?").run(state);
     return { redirectTo: row.redirect_to };
@@ -66079,6 +66176,15 @@ var Store = class {
     this.db.close();
   }
 };
+function rowToDeviceCode(row) {
+  return {
+    deviceCode: row.device_code,
+    userCode: row.user_code,
+    label: row.label,
+    expiresAt: row.expires_at,
+    userId: row.user_id
+  };
+}
 function rowToUser(row) {
   return {
     id: row.id,
@@ -66160,6 +66266,12 @@ var SessionService = class {
    * so it reaches them now rather than on the next heartbeat. Set by the gateway.
    */
   onLive = null;
+  /**
+   * Asked before anyone takes a new seat, by every path a join can come in on
+   * -- the board's socket, a plugin, a join code. Null allows. Set by the app
+   * from its access policy.
+   */
+  joinGate = null;
   /** The terminals open in a session and whose machines take one. Set by the terminal relay. */
   terminalsOf = null;
   // -- state access --------------------------------------------------------
@@ -66664,6 +66776,8 @@ var SessionService = class {
         });
       }
     } else {
+      const refused = this.joinGate?.(user, sessionId) ?? null;
+      if (refused) throw new ServiceError("forbidden", refused);
       participantId = randomUUID2();
       const participant = {
         id: participantId,
@@ -69642,6 +69756,11 @@ var TOKEN_REFUSALS = {
     message: "The seat this token was for is no longer in the session. Join again with the invite."
   }
 };
+var NO_ACCESS = {
+  error: "forbidden",
+  reason: "no_access",
+  message: "You do not have access to this session."
+};
 var OTHER_SESSION = {
   error: "forbidden",
   reason: "other_session",
@@ -69658,11 +69777,20 @@ var CreateSessionRequest = external_exports.object({
   repo: RepoRef,
   issueRef: external_exports.string().nullish()
 });
-var JoinRequest = external_exports.object({
-  token: external_exports.string().min(1),
-  repoPath: external_exports.string().min(1),
-  machineId: external_exports.string().min(1).max(100).nullish()
-});
+var JoinRequest = external_exports.union([
+  external_exports.object({
+    token: external_exports.string().min(1),
+    repoPath: external_exports.string().min(1),
+    machineId: external_exports.string().min(1).max(100).nullish()
+  }),
+  external_exports.object({
+    invite: external_exports.string().min(1),
+    repoPath: external_exports.string().min(1),
+    machineId: external_exports.string().min(1).max(100).nullish()
+  })
+]);
+var DeviceStartRequest = external_exports.object({ label: external_exports.string().min(1).max(100).nullish() });
+var DeviceTokenRequest = external_exports.object({ deviceCode: external_exports.string().min(1).max(200) });
 var PeerJoinRequest = external_exports.object({
   invite: external_exports.string().min(1),
   githubLogin: external_exports.string().min(1),
@@ -69729,10 +69857,28 @@ function createApp(options = {}) {
     displayName: user.displayName,
     avatarUrl: user.avatarUrl
   });
+  const policy = options.policy ?? {};
+  const accountToken = (request) => {
+    const presented = request.headers.authorization?.replace(/^Bearer\s+/i, "");
+    return presented && isAccountToken(presented) ? presented : null;
+  };
   const currentUser = (request) => {
+    const token = accountToken(request);
+    if (token) {
+      const userId2 = store.useAccountToken(hashAccountToken(token), Date.now());
+      return userId2 ? store.findUserById(userId2) : null;
+    }
     const userId = readUserIdFromCookies(auth, request.headers.cookie);
     return userId ? store.findUserById(userId) : null;
   };
+  const maySee = (user, sessionId) => {
+    const seated = [...service.state(sessionId).participants.values()].some((p) => p.userId === user.id);
+    return seated || (policy.maySeeSession?.(user, sessionId) ?? true);
+  };
+  if (policy.mayJoinSession) {
+    const gate = policy.mayJoinSession.bind(policy);
+    service.joinGate = (user, sessionId) => auth.mode === "oauth" ? gate(user, sessionId) : null;
+  }
   const requireUser = (request, reply) => {
     const user = currentUser(request);
     if (!user) {
@@ -69743,7 +69889,7 @@ function createApp(options = {}) {
   };
   const bearer = (request) => {
     const presented = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-    if (!presented) return null;
+    if (!presented || isAccountToken(presented)) return null;
     const claims = readParticipantToken(auth, presented);
     if (!claims) return { ok: false, ...TOKEN_REFUSALS.token_invalid };
     const state = service.state(claims.sessionId);
@@ -69765,7 +69911,7 @@ function createApp(options = {}) {
   const via = (claims) => claims && !claims.board ? "checkout" : "board";
   const isHost = (request) => isHostCredential(auth, request.headers[HOST_HEADER]);
   const logIn = (reply, user, redirectTo) => {
-    reply.header("set-cookie", buildCookie(issueCookieValue(auth, user.id), auth.callbackUrl.startsWith("https://")));
+    reply.header("set-cookie", [buildCookie(issueCookieValue(auth, user.id), auth.callbackUrl.startsWith("https://")), "ss_oauth_state=; Path=/auth/github; HttpOnly; SameSite=Lax; Max-Age=0"]);
     if (redirectTo) return reply.redirect(redirectTo);
     return reply.send({ user: toAuthUser(user) });
   };
@@ -69795,7 +69941,9 @@ function createApp(options = {}) {
     }
     const { redirect_to: redirectTo } = request.query;
     const state = randomUUID4();
-    store.createOauthState(state, redirectTo ?? "/", Date.now());
+    const safeRedirect = redirectTo && redirectTo.startsWith("/") && !redirectTo.startsWith("//") && !/[\\\r\n]/.test(redirectTo) ? redirectTo : "/";
+    store.createOauthState(state, safeRedirect, Date.now());
+    reply.header("set-cookie", `ss_oauth_state=${state}; Path=/auth/github; HttpOnly; SameSite=Lax; Max-Age=600${auth.callbackUrl.startsWith("https://") ? "; Secure" : ""}`);
     return reply.redirect(githubAuthorizeUrl(auth, state));
   });
   fastify.get("/auth/github/callback", async (request, reply) => {
@@ -69803,6 +69951,8 @@ function createApp(options = {}) {
     if (!code || !state) {
       return reply.code(400).send({ error: "bad_request", message: "Missing code or state." });
     }
+    const browserState = request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith("ss_oauth_state="))?.slice("ss_oauth_state=".length);
+    if (browserState !== state) return reply.code(400).send({ error: "bad_request", message: "Sign-in expired or started in another browser. Please sign in again." });
     const stored = store.consumeOauthState(state);
     if (!stored) {
       return reply.code(400).send({ error: "bad_request", message: "Unknown or reused state." });
@@ -69832,6 +69982,89 @@ function createApp(options = {}) {
   });
   fastify.post("/auth/logout", async (_request, reply) => {
     reply.header("set-cookie", clearCookie());
+    return { ok: true };
+  });
+  fastify.post("/api/device", async (request, reply) => {
+    if (auth.mode !== "oauth") {
+      return reply.code(404).send({ error: "not_found", message: "This server has no accounts; join with an invite." });
+    }
+    const parsed = DeviceStartRequest.safeParse(request.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: "bad_request", message: parsed.error.message });
+    const deviceCode = generateDeviceCode();
+    const userCode = generateUserCode();
+    const expiresAt = Date.now() + DEVICE_CODE_TTL_MS;
+    store.createDeviceCode(deviceCode, userCode, parsed.data.label ?? "plugin", expiresAt);
+    return {
+      deviceCode,
+      userCode,
+      verifyUrl: `${auth.publicUrl}/auth/device?code=${encodeURIComponent(userCode)}`,
+      expiresAt,
+      interval: 3
+    };
+  });
+  fastify.post("/api/device/token", async (request, reply) => {
+    const parsed = DeviceTokenRequest.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "bad_request", message: parsed.error.message });
+    const result = store.collectDeviceCode(parsed.data.deviceCode, Date.now());
+    if (result.state === "pending") return reply.code(202).send({ status: "pending" });
+    if (result.state !== "approved") {
+      return reply.code(410).send({ error: "expired", message: "That sign-in expired. Start it again." });
+    }
+    const user = store.findUserById(result.userId);
+    if (!user) return reply.code(401).send({ error: "unauthorized" });
+    return { status: "approved", token: result.token, user: toAuthUser(user) };
+  });
+  fastify.get("/auth/device", async (request, reply) => {
+    const { code } = request.query;
+    const userCode = (code ?? "").toUpperCase().trim();
+    const user = currentUser(request);
+    if (!user) {
+      const back = `/auth/device?code=${encodeURIComponent(userCode)}`;
+      return reply.redirect(`/auth/github?redirect_to=${encodeURIComponent(back)}`);
+    }
+    const pending = userCode ? store.findDeviceCodeByUserCode(userCode, Date.now()) : null;
+    reply.type("text/html; charset=utf-8");
+    if (!pending || pending.userId) {
+      return devicePage("Nothing to approve", "<p>That code has expired or was already used. Run the sign-in again from Claude Code.</p>");
+    }
+    return devicePage(
+      "Sign in a plugin",
+      `<p>Approve <strong>${escapeHtml(pending.label)}</strong> to act as <strong>@${escapeHtml(user.githubLogin)}</strong> on this server.</p>
+       <p>Check it shows the same code as your terminal:</p>
+       <p class="code">${escapeHtml(pending.userCode)}</p>
+       <form method="post" action="/auth/device">
+         <input type="hidden" name="code" value="${escapeHtml(pending.userCode)}">
+         <button type="submit">Approve</button>
+       </form>`
+    );
+  });
+  fastify.addContentTypeParser(
+    "application/x-www-form-urlencoded",
+    { parseAs: "string", bodyLimit: 4096 },
+    (_request, body, done) => done(null, Object.fromEntries(new URLSearchParams(body)))
+  );
+  fastify.post("/auth/device", async (request, reply) => {
+    const origin = request.headers.origin;
+    if (origin && origin !== auth.publicUrl) {
+      return reply.code(403).send({ error: "forbidden", message: "Approve sign-ins from this server's own page." });
+    }
+    const user = currentUser(request);
+    if (!user) return reply.code(401).send({ error: "unauthorized", message: "Sign in first." });
+    const { code } = request.body ?? {};
+    const userCode = (code ?? "").toUpperCase().trim();
+    const token = generateAccountToken();
+    const pending = userCode ? store.findDeviceCodeByUserCode(userCode, Date.now()) : null;
+    reply.type("text/html; charset=utf-8");
+    if (!pending || !store.approveDeviceCode(userCode, user.id, token, Date.now())) {
+      return devicePage("Nothing to approve", "<p>That code has expired or was already used.</p>");
+    }
+    store.saveAccountToken(hashAccountToken(token), user.id, pending.label, Date.now());
+    return devicePage("Signed in", "<p>Done. You can close this tab and go back to Claude Code.</p>");
+  });
+  fastify.post("/api/account/logout", async (request, reply) => {
+    const token = accountToken(request);
+    if (!token) return reply.code(401).send({ error: "unauthorized", message: "No account token on this request." });
+    store.revokeAccountToken(hashAccountToken(token), Date.now());
     return { ok: true };
   });
   fastify.get("/api/me", async (request) => {
@@ -69883,6 +70116,8 @@ function createApp(options = {}) {
     } else {
       user = requireUser(request, reply);
       if (!user) return;
+      const me = user;
+      visible = store.listSessionIds().filter((id) => maySee(me, id));
     }
     const sessions = (visible ?? store.listSessionIds()).flatMap((id) => {
       const state = service.state(id);
@@ -69922,6 +70157,8 @@ function createApp(options = {}) {
     } else {
       user = requireUser(request, reply);
       if (!user) return;
+      const refused = policy.mayCreateSession?.(user) ?? null;
+      if (refused) return reply.code(403).send({ error: "forbidden", message: refused });
     }
     const parsed = CreateSessionRequest.safeParse(request.body);
     if (!parsed.success) {
@@ -69932,10 +70169,15 @@ function createApp(options = {}) {
         { type: "session.create", ...parsed.data, issueRef: parsed.data.issueRef ?? null },
         { sessionId: null, participantId: null, user: user ? toAuthUser(user) : null }
       );
+      if (user) policy.sessionCreated?.(user, created.sessionId);
       return {
         ...created,
-        // Peer sessions are useless without the string that lets someone in.
-        invite: auth.mode === "peer" ? issueInvite(auth, created.sessionId) : null
+        /**
+         * Peer sessions are useless without the string that lets someone in.
+         * On an oauth server the invite only names the session: whoever uses
+         * it still signs in, and the policy still decides.
+         */
+        invite: issueInvite(auth, created.sessionId)
       };
     } catch (error51) {
       return sendServiceError(reply, error51);
@@ -69989,7 +70231,8 @@ function createApp(options = {}) {
   });
   const readable = (request, reply) => {
     const claims = bearerClaims(request);
-    if (!claims && !currentUser(request)) {
+    const user = claims ? null : currentUser(request);
+    if (!claims && !user) {
       void refuse(request, reply, {
         status: 401,
         body: { error: "unauthorized", message: "Sign in first." }
@@ -70005,6 +70248,10 @@ function createApp(options = {}) {
     }
     if (claims && claims.sessionId !== sessionId) {
       void reply.code(403).send(OTHER_SESSION);
+      return null;
+    }
+    if (user && !maySee(user, sessionId)) {
+      void reply.code(403).send(NO_ACCESS);
       return null;
     }
     if (claims) {
@@ -70038,7 +70285,7 @@ function createApp(options = {}) {
       name = decodeURIComponent(String(request.headers["x-file-name"] ?? "picture")).slice(0, 200) || "picture";
     } catch {
     }
-    const id = createHash2("sha256").update(bytes).digest("hex").slice(0, 32);
+    const id = createHash3("sha256").update(bytes).digest("hex").slice(0, 32);
     store.saveFile({ id, sessionId, name, type, bytes });
     return { id, name, type, size: bytes.length };
   });
@@ -70096,7 +70343,7 @@ function createApp(options = {}) {
     if (!user) return;
     const { ref } = request.params;
     const sessionId = store.findSessionIdByRef(ref);
-    if (!sessionId) return reply.code(404).send({ error: "not_found" });
+    if (!sessionId || !maySee(user, sessionId)) return reply.code(404).send({ error: "not_found" });
     const token = generateJoinToken();
     const expiresAt = Date.now() + JOIN_TOKEN_TTL_MS;
     store.createJoinToken(token, user.id, sessionId, expiresAt);
@@ -70107,12 +70354,27 @@ function createApp(options = {}) {
     if (!parsed.success) {
       return reply.code(400).send({ error: "bad_request", message: parsed.error.message });
     }
-    const redeemed = store.redeemJoinToken(parsed.data.token, Date.now());
-    if (!redeemed) {
-      return reply.code(401).send({
-        error: "unauthorized",
-        message: "That join code is expired or has already been used. Generate a fresh one."
-      });
+    let redeemed;
+    if ("token" in parsed.data) {
+      redeemed = store.redeemJoinToken(parsed.data.token, Date.now());
+      if (!redeemed) {
+        return reply.code(401).send({
+          error: "unauthorized",
+          message: "That join code is expired or has already been used. Generate a fresh one."
+        });
+      }
+    } else {
+      const signedIn = currentUser(request);
+      if (!signedIn) {
+        return reply.code(401).send({
+          error: "unauthorized",
+          reason: "sign_in",
+          message: "This server verifies who you are. Sign in with /ss:login first."
+        });
+      }
+      const checked = readInvite(auth, parsed.data.invite);
+      if (!checked.ok) return reply.code(401).send(inviteRefusal(checked, serverFingerprint(auth)));
+      redeemed = { userId: signedIn.id, sessionId: checked.claims.sessionId };
     }
     const user = store.findUserById(redeemed.userId);
     if (!user) return reply.code(401).send({ error: "unauthorized" });
@@ -70163,8 +70425,13 @@ function createApp(options = {}) {
         });
       }
     } else {
-      const user = requireUser(request, reply);
-      if (!user) return;
+      const claims = bearerClaims(request);
+      const seated = claims !== null && claims.sessionId === sessionId;
+      if (!seated) {
+        const user = requireUser(request, reply);
+        if (!user) return;
+        if (sessionId && !maySee(user, sessionId)) return reply.code(404).send({ error: "not_found" });
+      }
     }
     if (!sessionId) return reply.code(404).send({ error: "not_found" });
     const state = service.state(sessionId);
@@ -70273,7 +70540,7 @@ function createApp(options = {}) {
       user = toAuthUser(record2);
       if (parsed.data.sessionRef) {
         sessionId = store.findSessionIdByRef(parsed.data.sessionRef);
-        if (!sessionId) return reply.code(404).send({ error: "not_found" });
+        if (!sessionId || !maySee(record2, sessionId)) return reply.code(404).send({ error: "not_found" });
         participantId = [...service.state(sessionId).participants.values()].find((p) => p.userId === record2.id)?.id ?? null;
       }
     }
@@ -70289,6 +70556,7 @@ function createApp(options = {}) {
       return sendServiceError(reply, error51);
     }
   });
+  options.extend?.({ fastify, store, service, auth, userFor: currentUser });
   const webRoot = options.webRoot ?? defaultWebRoot();
   if (webRoot && existsSync2(webRoot)) {
     fastify.register(import_static.default, { root: webRoot });
@@ -70318,6 +70586,24 @@ function createApp(options = {}) {
       store.close();
     }
   };
+}
+function escapeHtml(value) {
+  return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+}
+function devicePage(title, body) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)} - session-share</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fafafa; --fg: #111; --mute: #666; --edge: #ddd; --accent: #111; --on-accent: #fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0b0b0c; --fg: #eee; --mute: #999; --edge: #2a2a2e; --accent: #eee; --on-accent: #111; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 420px; margin: 12vh auto; padding: 0 16px; }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  p { color: var(--mute); } strong { color: var(--fg); }
+  .code { font: 600 28px/1 ui-monospace, monospace; letter-spacing: 0.12em; color: var(--fg); padding: 16px; border: 1px solid var(--edge); border-radius: 8px; text-align: center; }
+  button { font: inherit; padding: 10px 18px; border-radius: 8px; border: 0; background: var(--accent); color: var(--on-accent); cursor: pointer; }
+</style></head><body><main><h1>${escapeHtml(title)}</h1>${body}</main></body></html>`;
 }
 function sendServiceError(reply, error51) {
   if (error51 instanceof ServiceError) {

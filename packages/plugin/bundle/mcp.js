@@ -6922,6 +6922,7 @@ var require_dist = __commonJS({
 
 // packages/plugin/src/mcp.ts
 import { createHash as createHash4 } from "node:crypto";
+import { hostname as hostname3 } from "node:os";
 import { basename as basename2, resolve as resolve5 } from "node:path";
 
 // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v3/helpers/util.js
@@ -32748,6 +32749,23 @@ async function pair(serverUrl, token, repoPath) {
   }
   return payload;
 }
+async function accountJoin(serverUrl, invite, accountToken, repoPath) {
+  const response = await fetch(new URL("/api/join", serverUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${accountToken}` },
+    body: JSON.stringify({ invite, repoPath, machineId: machineId() })
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new CommandError(
+      payload.error ?? "internal",
+      payload.message ?? "join failed",
+      response.status,
+      payload.reason ?? null
+    );
+  }
+  return payload;
+}
 async function runCommand(config3, command, timeoutMs = 3e3) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -32777,9 +32795,115 @@ async function runCommand(config3, command, timeoutMs = 3e3) {
   }
 }
 
+// packages/plugin/src/accounts.ts
+import { chmodSync, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname2, join as join2 } from "node:path";
+var ACCOUNTS_FILE = join2(STATE_DIR, "accounts.json");
+function originOf(url2) {
+  return new URL(url2).origin;
+}
+function read() {
+  if (!existsSync2(ACCOUNTS_FILE)) return { accounts: {}, pending: {} };
+  try {
+    const parsed = JSON.parse(readFileSync2(ACCOUNTS_FILE, "utf8"));
+    return { accounts: parsed.accounts ?? {}, pending: parsed.pending ?? {} };
+  } catch {
+    return { accounts: {}, pending: {} };
+  }
+}
+function write(file2) {
+  mkdirSync2(dirname2(ACCOUNTS_FILE), { recursive: true });
+  const temporary = `${ACCOUNTS_FILE}.${process.pid}.tmp`;
+  writeFileSync2(temporary, `${JSON.stringify(file2, null, 2)}
+`, { mode: 384 });
+  chmodSync(temporary, 384);
+  renameSync(temporary, ACCOUNTS_FILE);
+}
+function accountFor(serverUrl) {
+  return read().accounts[originOf(serverUrl)] ?? null;
+}
+function saveAccount(serverUrl, account) {
+  const file2 = read();
+  const origin = originOf(serverUrl);
+  file2.accounts[origin] = account;
+  delete file2.pending[origin];
+  write(file2);
+}
+function forgetAccount(serverUrl) {
+  const file2 = read();
+  const origin = originOf(serverUrl);
+  const had = file2.accounts[origin] ?? null;
+  delete file2.accounts[origin];
+  delete file2.pending[origin];
+  write(file2);
+  return had;
+}
+function pendingFor(serverUrl) {
+  const pending = read().pending[originOf(serverUrl)];
+  return pending && pending.expiresAt > Date.now() ? pending : null;
+}
+function savePending(serverUrl, pending) {
+  const file2 = read();
+  file2.pending[originOf(serverUrl)] = pending;
+  write(file2);
+}
+async function startSignIn(serverUrl, label) {
+  const response = await fetch(new URL("/api/device", serverUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ label })
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.message ?? payload.error ?? `sign-in failed (${response.status})`);
+  const pending = {
+    deviceCode: payload.deviceCode,
+    userCode: payload.userCode,
+    verifyUrl: payload.verifyUrl,
+    expiresAt: payload.expiresAt
+  };
+  savePending(serverUrl, pending);
+  return pending;
+}
+async function finishSignIn(serverUrl, pending, waitMs, intervalMs = 3e3) {
+  const deadline = Math.min(Date.now() + waitMs, pending.expiresAt);
+  while (Date.now() < deadline) {
+    const response = await fetch(new URL("/api/device/token", serverUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: pending.deviceCode })
+    });
+    if (response.status === 200) {
+      const payload = await response.json();
+      const account = {
+        token: payload.token,
+        githubLogin: payload.user.githubLogin,
+        displayName: payload.user.displayName
+      };
+      saveAccount(serverUrl, account);
+      return account;
+    }
+    if (response.status !== 202) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.message ?? `sign-in failed (${response.status})`);
+    }
+    await new Promise((done) => setTimeout(done, intervalMs));
+  }
+  return null;
+}
+async function signOut(serverUrl) {
+  const account = accountFor(serverUrl);
+  if (account) {
+    await fetch(new URL("/api/account/logout", serverUrl), {
+      method: "POST",
+      headers: { authorization: `Bearer ${account.token}` }
+    }).catch(() => null);
+  }
+  return forgetAccount(serverUrl);
+}
+
 // packages/plugin/src/files.ts
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { basename, extname, join as join2 } from "node:path";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync3, statSync as statSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { basename, extname, join as join3 } from "node:path";
 var TYPES = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -32801,7 +32925,7 @@ async function uploadPicture(config3, path, kind, caption = "") {
   const response = await fetch(new URL(`/sessions/${config3.sessionRef}/files`, config3.serverUrl), {
     method: "POST",
     headers: { "content-type": type, "x-file-name": encodeURIComponent(basename(path)), ...auth(config3) },
-    body: readFileSync2(path),
+    body: readFileSync3(path),
     signal: AbortSignal.timeout(3e4)
   });
   const payload = await response.json();
@@ -32809,11 +32933,11 @@ async function uploadPicture(config3, path, kind, caption = "") {
   return { id: payload.id, name: payload.name ?? basename(path), type, size: payload.size ?? 0, kind, caption };
 }
 async function downloadPictures(config3, attachments) {
-  const dir = join2(STATE_DIR, "files");
-  mkdirSync2(dir, { recursive: true });
+  const dir = join3(STATE_DIR, "files");
+  mkdirSync3(dir, { recursive: true });
   const saved = [];
   for (const attachment of attachments) {
-    const path = join2(dir, `${attachment.id}${EXTENSIONS[attachment.type] ?? ""}`);
+    const path = join3(dir, `${attachment.id}${EXTENSIONS[attachment.type] ?? ""}`);
     try {
       statSync2(path);
     } catch {
@@ -32822,7 +32946,7 @@ async function downloadPictures(config3, attachments) {
         { headers: auth(config3), signal: AbortSignal.timeout(3e4) }
       );
       if (!response.ok) continue;
-      writeFileSync2(path, Buffer.from(await response.arrayBuffer()));
+      writeFileSync3(path, Buffer.from(await response.arrayBuffer()));
     }
     saved.push({ path, name: attachment.name, kind: attachment.kind, caption: attachment.caption });
   }
@@ -32831,8 +32955,8 @@ async function downloadPictures(config3, attachments) {
 
 // packages/plugin/src/config.ts
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname2, isAbsolute, join as join3, resolve as resolve2 } from "node:path";
+import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname3, isAbsolute, join as join4, resolve as resolve2 } from "node:path";
 var SessionConfig = external_exports.object({
   serverUrl: external_exports.string().min(1),
   sessionRef: external_exports.string().min(1),
@@ -32846,13 +32970,13 @@ var SessionConfig = external_exports.object({
   displayName: external_exports.string().min(1),
   repoPath: external_exports.string().min(1)
 });
-var CONFIG_RELATIVE_PATH = join3(".session-share", "session.json");
+var CONFIG_RELATIVE_PATH = join4(".session-share", "session.json");
 function findConfigPath(startDir) {
   let dir = resolve2(startDir);
   for (; ; ) {
-    const candidate = join3(dir, CONFIG_RELATIVE_PATH);
-    if (existsSync2(candidate)) return candidate;
-    const parent = dirname2(dir);
+    const candidate = join4(dir, CONFIG_RELATIVE_PATH);
+    if (existsSync3(candidate)) return candidate;
+    const parent = dirname3(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -32861,15 +32985,15 @@ function readConfig(startDir) {
   const path = findConfigPath(startDir);
   if (!path) return null;
   try {
-    return SessionConfig.parse(JSON.parse(readFileSync3(path, "utf8")));
+    return SessionConfig.parse(JSON.parse(readFileSync4(path, "utf8")));
   } catch {
     return null;
   }
 }
 function writeConfig(repoPath, config3) {
-  const path = join3(repoPath, CONFIG_RELATIVE_PATH);
-  mkdirSync3(dirname2(path), { recursive: true });
-  writeFileSync3(path, `${JSON.stringify(config3, null, 2)}
+  const path = join4(repoPath, CONFIG_RELATIVE_PATH);
+  mkdirSync4(dirname3(path), { recursive: true });
+  writeFileSync4(path, `${JSON.stringify(config3, null, 2)}
 `, { mode: 384 });
   excludeFromGit(repoPath);
   return path;
@@ -32881,10 +33005,10 @@ function excludeFromGit(repoPath) {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
-    const exclude = join3(isAbsolute(common) ? common : join3(repoPath, common), "info", "exclude");
-    const current = existsSync2(exclude) ? readFileSync3(exclude, "utf8") : "";
+    const exclude = join4(isAbsolute(common) ? common : join4(repoPath, common), "info", "exclude");
+    const current = existsSync3(exclude) ? readFileSync4(exclude, "utf8") : "";
     if (current.split("\n").some((line) => line.trim() === ".session-share/")) return;
-    mkdirSync3(dirname2(exclude), { recursive: true });
+    mkdirSync4(dirname3(exclude), { recursive: true });
     appendFileSync(exclude, `${current && !current.endsWith("\n") ? "\n" : ""}.session-share/
 `);
   } catch {
@@ -32892,22 +33016,22 @@ function excludeFromGit(repoPath) {
 }
 
 // packages/plugin/src/inbox.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync4, renameSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 function stateDir() {
-  return process.env.SESSION_SHARE_HOME ?? join4(homedir2(), ".session-share");
+  return process.env.SESSION_SHARE_HOME ?? join5(homedir2(), ".session-share");
 }
-var inboxFile = () => join4(stateDir(), "inbox.json");
+var inboxFile = () => join5(stateDir(), "inbox.json");
 var PAGE = 200;
 function cursorKey(config3) {
   return `${config3.serverUrl}|${config3.sessionRef}|${config3.participantId}`;
 }
 function readCursors() {
   const path = inboxFile();
-  if (!existsSync3(path)) return {};
+  if (!existsSync4(path)) return {};
   try {
-    return JSON.parse(readFileSync4(path, "utf8"));
+    return JSON.parse(readFileSync5(path, "utf8"));
   } catch {
     return {};
   }
@@ -32917,12 +33041,12 @@ function readCursor(key) {
   return typeof value === "string" ? value : void 0;
 }
 function writeCursor(key, value) {
-  mkdirSync4(stateDir(), { recursive: true });
+  mkdirSync5(stateDir(), { recursive: true });
   const path = inboxFile();
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync4(temporary, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
+  writeFileSync5(temporary, `${JSON.stringify({ ...readCursors(), [key]: value }, null, 2)}
 `);
-  renameSync(temporary, path);
+  renameSync2(temporary, path);
 }
 async function markCaughtUp(config3, timeoutMs = 2500) {
   try {
@@ -33006,20 +33130,20 @@ function describeDirectives(messages, names) {
 
 // packages/plugin/src/autopilot.ts
 import { spawn as spawn2 } from "node:child_process";
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync7, readFileSync as readFileSync7, writeFileSync as writeFileSync7 } from "node:fs";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync8, readFileSync as readFileSync8, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 
 // packages/plugin/src/busy.ts
 import { createHash as createHash2 } from "node:crypto";
-import { mkdirSync as mkdirSync5, readFileSync as readFileSync5, rmSync as rmSync2, statSync as statSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync6, rmSync as rmSync2, statSync as statSync3, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 var MAX_TURN_MS = 2 * 60 * 60 * 1e3;
 function marker(repoPath) {
-  const home = process.env.SESSION_SHARE_HOME ?? join5(homedir3(), ".session-share");
+  const home = process.env.SESSION_SHARE_HOME ?? join6(homedir3(), ".session-share");
   const id = createHash2("sha256").update(repoPath).digest("hex").slice(0, 16);
-  return join5(home, "busy", id);
+  return join6(home, "busy", id);
 }
 var autopilotMarker = (repoPath) => `${marker(repoPath)}.autopilot`;
 function markAutopilot(repoPath, running3) {
@@ -33029,8 +33153,8 @@ function markAutopilot(repoPath, running3) {
       rmSync2(path, { force: true });
       return;
     }
-    mkdirSync5(join5(path, ".."), { recursive: true });
-    writeFileSync5(path, `${process.pid}
+    mkdirSync6(join6(path, ".."), { recursive: true });
+    writeFileSync6(path, `${process.pid}
 `);
   } catch {
   }
@@ -33045,7 +33169,7 @@ function isBusy(repoPath) {
 var terminalMarker = (repoPath) => `${marker(repoPath)}.terminal`;
 function isTerminalOpen(repoPath) {
   try {
-    const pid = Number(readFileSync5(terminalMarker(repoPath), "utf8").trim());
+    const pid = Number(readFileSync6(terminalMarker(repoPath), "utf8").trim());
     if (!pid) return false;
     process.kill(pid, 0);
     return true;
@@ -33055,8 +33179,8 @@ function isTerminalOpen(repoPath) {
 }
 
 // packages/plugin/src/preferences.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync6, readFileSync as readFileSync6, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname3, join as join6 } from "node:path";
+import { existsSync as existsSync5, mkdirSync as mkdirSync7, readFileSync as readFileSync7, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname4, join as join7 } from "node:path";
 var Preferences = external_exports.object({
   /**
    * explicit: nothing is committed until you run /ss:done.
@@ -33112,22 +33236,28 @@ var Preferences = external_exports.object({
    * here: anyone with the invite who joins the ticket can. Off unless chosen.
    */
   terminal: external_exports.enum(["off", "members"]).default("off"),
+  /**
+   * Where /ss:host opens sessions. Null runs a coordination server on this
+   * machine; an address opens them on a hosted session-share you signed in to
+   * with /ss:login, so the session does not depend on this machine being up.
+   */
+  server: external_exports.string().url().nullable().default(null),
   /** Set once the setup questions have been answered. */
   configured: external_exports.boolean().default(false)
 });
-var PREFERENCES_PATH = join6(STATE_DIR, "preferences.json");
+var PREFERENCES_PATH = join7(STATE_DIR, "preferences.json");
 function readPreferences() {
-  if (!existsSync4(PREFERENCES_PATH)) return Preferences.parse({});
+  if (!existsSync5(PREFERENCES_PATH)) return Preferences.parse({});
   try {
-    return Preferences.parse(JSON.parse(readFileSync6(PREFERENCES_PATH, "utf8")));
+    return Preferences.parse(JSON.parse(readFileSync7(PREFERENCES_PATH, "utf8")));
   } catch {
     return Preferences.parse({});
   }
 }
 function writePreferences(update) {
   const merged = Preferences.parse({ ...readPreferences(), ...update });
-  mkdirSync6(dirname3(PREFERENCES_PATH), { recursive: true });
-  writeFileSync6(PREFERENCES_PATH, `${JSON.stringify(merged, null, 2)}
+  mkdirSync7(dirname4(PREFERENCES_PATH), { recursive: true });
+  writeFileSync7(PREFERENCES_PATH, `${JSON.stringify(merged, null, 2)}
 `);
   return merged;
 }
@@ -33145,6 +33275,7 @@ function describePreferences(preferences) {
     `commits:  ${preferences.commitPolicy === "explicit" ? "only when you run /ss:done" : "automatically when the acceptance test passes"}`,
     `push:     ${preferences.push ? "branches are pushed to origin" : "nothing leaves this machine"}`,
     `PRs:      ${preferences.openPullRequests ? "opened per task and for the session" : "never opened"}`,
+    `server:   ${preferences.server ? `sessions are opened on ${preferences.server}` : "sessions run on a server on this machine"}`,
     `hosting:  ${preferences.expose === "lan" ? "reachable on your local network" : "this machine only"}`,
     `board:    ${preferences.openBoard ? "opens in your browser on host and join" : "never opened for you"}`,
     `room:     ${preferences.acceptDirectives ? "directives from the room run in this session" : "read-only; nothing from the room reaches your agent"}`,
@@ -33192,12 +33323,12 @@ var IDLE_GRACE_MS = Number(process.env.SESSION_SHARE_AUTOPILOT_GRACE_MS ?? 0);
 var LIMIT_BACKOFF_MS = 30 * 60 * 1e3;
 var LIMIT_PATTERN = /spend limit|usage limit|rate limit|limit reached|hit your .*limit|credit balance|out of (credits|usage)|quota/i;
 function stateDir2() {
-  return process.env.SESSION_SHARE_HOME ?? join7(homedir4(), ".session-share");
+  return process.env.SESSION_SHARE_HOME ?? join8(homedir4(), ".session-share");
 }
-var spendFile = () => join7(stateDir2(), "autopilot.json");
+var spendFile = () => join8(stateDir2(), "autopilot.json");
 function readSpend(today) {
   try {
-    const spend = JSON.parse(readFileSync7(spendFile(), "utf8"));
+    const spend = JSON.parse(readFileSync8(spendFile(), "utf8"));
     return spend.day === today ? spend : { day: today, tokens: 0 };
   } catch {
     return { day: today, tokens: 0 };
@@ -33205,8 +33336,8 @@ function readSpend(today) {
 }
 function addSpend(today, tokens) {
   const spend = readSpend(today);
-  mkdirSync7(stateDir2(), { recursive: true });
-  writeFileSync7(spendFile(), `${JSON.stringify({ day: today, tokens: spend.tokens + tokens })}
+  mkdirSync8(stateDir2(), { recursive: true });
+  writeFileSync8(spendFile(), `${JSON.stringify({ day: today, tokens: spend.tokens + tokens })}
 `);
 }
 function decide(input) {
@@ -33286,10 +33417,10 @@ var limitedUntil = 0;
 var firstSeen = /* @__PURE__ */ new Map();
 var failedUntil = 0;
 var FAILURE_BACKOFF_MS = 5 * 60 * 1e3;
-var logFile = () => join7(stateDir2(), "autopilot.log");
+var logFile = () => join8(stateDir2(), "autopilot.log");
 function log(line) {
   try {
-    mkdirSync7(stateDir2(), { recursive: true });
+    mkdirSync8(stateDir2(), { recursive: true });
     appendFileSync2(logFile(), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
   } catch {
@@ -33478,23 +33609,23 @@ function startAutopilot() {
 // packages/plugin/src/terminal-launch.ts
 import { spawn as spawn3 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync6, mkdirSync as mkdirSync8, openSync as openSync2, readFileSync as readFileSync8, rmSync as rmSync3, statSync as statSync4, writeFileSync as writeFileSync8 } from "node:fs";
+import { existsSync as existsSync7, mkdirSync as mkdirSync9, openSync as openSync2, readFileSync as readFileSync9, rmSync as rmSync3, statSync as statSync4, writeFileSync as writeFileSync9 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { dirname as dirname4, join as join8, resolve as resolve3 } from "node:path";
+import { dirname as dirname5, join as join9, resolve as resolve3 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function stateDir3() {
-  return process.env.SESSION_SHARE_HOME ?? join8(homedir5(), ".session-share");
+  return process.env.SESSION_SHARE_HOME ?? join9(homedir5(), ".session-share");
 }
-var lockFile = (repoPath) => join8(stateDir3(), "terminal", `${createHash3("sha256").update(resolve3(repoPath)).digest("hex").slice(0, 16)}.json`);
-var terminalLogFile = () => join8(stateDir3(), "terminal.log");
+var lockFile = (repoPath) => join9(stateDir3(), "terminal", `${createHash3("sha256").update(resolve3(repoPath)).digest("hex").slice(0, 16)}.json`);
+var terminalLogFile = () => join9(stateDir3(), "terminal.log");
 function terminalHostEntry() {
-  const here = dirname4(fileURLToPath2(import.meta.url));
+  const here = dirname5(fileURLToPath2(import.meta.url));
   const candidates = [
     process.env.SESSION_SHARE_TERMINAL_ENTRY,
     resolve3(here, "terminal.js"),
     resolve3(here, "terminal-host.js")
   ].filter((value) => Boolean(value));
-  return candidates.find((candidate) => existsSync6(candidate)) ?? null;
+  return candidates.find((candidate) => existsSync7(candidate)) ?? null;
 }
 function buildOf(entry) {
   const stat = statSync4(entry);
@@ -33502,7 +33633,7 @@ function buildOf(entry) {
 }
 function readLock(repoPath) {
   try {
-    return JSON.parse(readFileSync8(lockFile(repoPath), "utf8"));
+    return JSON.parse(readFileSync9(lockFile(repoPath), "utf8"));
   } catch {
     return null;
   }
@@ -33529,7 +33660,7 @@ function ensureTerminalHost(repoPath) {
     } catch {
     }
   }
-  mkdirSync8(stateDir3(), { recursive: true });
+  mkdirSync9(stateDir3(), { recursive: true });
   const out = openSync2(terminalLogFile(), "a");
   const child = spawn3(process.execPath, [entry], {
     detached: true,
@@ -33556,7 +33687,7 @@ function stopTerminalHost(repoPath) {
 import { spawn as spawn4 } from "node:child_process";
 import { mkdtempSync, rmSync as rmSync4 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 var LOG_BRANCH = "session-share/log";
 var REMOTE_REF = `refs/remotes/origin/${LOG_BRANCH}`;
 var CHUNK = 1e3;
@@ -33673,11 +33804,11 @@ async function pushLog(cwd, source, attempts = 3) {
     if (mirrored >= source.maxSeq && newFiles.length === 0) {
       return { pushed: false, reason: "the branch is already up to date" };
     }
-    const dir = mkdtempSync(join9(tmpdir(), "ss-mirror-"));
-    const env = { GIT_INDEX_FILE: join9(dir, "index") };
+    const dir = mkdtempSync(join10(tmpdir(), "ss-mirror-"));
+    const env = { GIT_INDEX_FILE: join10(dir, "index") };
     try {
       await git(cwd, parent ? ["read-tree", parent] : ["read-tree", "--empty"], { env });
-      const write = async (path, content) => {
+      const write2 = async (path, content) => {
         const blob = await git(cwd, ["hash-object", "-w", "--stdin"], { input: content });
         await git(cwd, ["update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], { env });
       };
@@ -33690,7 +33821,7 @@ async function pushLog(cwd, source, attempts = 3) {
           await git(cwd, ["update-index", "--add", "--cacheinfo", `100644,${blob},${sessionDir(source.meta.sessionId)}/files/${id}`], { env });
           index.push({ id, name: file2.name, type: file2.type });
         }
-        await write(filesPath, `${JSON.stringify(index, null, 2)}
+        await write2(filesPath, `${JSON.stringify(index, null, 2)}
 `);
       }
       const firstChunk = Math.floor((mirrored + 1) / CHUNK);
@@ -33702,14 +33833,14 @@ async function pushLog(cwd, source, attempts = 3) {
         const lines = events.map(
           (event) => JSON.stringify({ seq: event.seq, ts: event.ts, actorId: event.actorId, body: event.body })
         );
-        await write(`${sessionDir(source.meta.sessionId)}/events/${chunkName(from)}.jsonl`, `${lines.join("\n")}
+        await write2(`${sessionDir(source.meta.sessionId)}/events/${chunkName(from)}.jsonl`, `${lines.join("\n")}
 `);
       }
       const meta3 = { ...source.meta, upToSeq: Math.max(source.maxSeq, mirrored), updatedAt: Date.now() };
-      await write(metaPath, `${JSON.stringify(meta3, null, 2)}
+      await write2(metaPath, `${JSON.stringify(meta3, null, 2)}
 `);
       if (!parent) {
-        await write(
+        await write2(
           "README.md",
           [
             "# session-share log",
@@ -33744,12 +33875,12 @@ async function pushLog(cwd, source, attempts = 3) {
 
 // packages/plugin/src/tunnel.ts
 import { execFile, spawn as spawn5 } from "node:child_process";
-import { closeSync, existsSync as existsSync7, mkdirSync as mkdirSync9, openSync as openSync3, readFileSync as readFileSync9, rmSync as rmSync5, writeFileSync as writeFileSync9 } from "node:fs";
-import { join as join10 } from "node:path";
+import { closeSync, existsSync as existsSync8, mkdirSync as mkdirSync10, openSync as openSync3, readFileSync as readFileSync10, rmSync as rmSync5, writeFileSync as writeFileSync10 } from "node:fs";
+import { join as join11 } from "node:path";
 import { promisify } from "node:util";
 var run = promisify(execFile);
-var TUNNEL_FILE = join10(STATE_DIR, "tunnel.json");
-var TUNNEL_LOG = join10(STATE_DIR, "tunnel.log");
+var TUNNEL_FILE = join11(STATE_DIR, "tunnel.json");
+var TUNNEL_LOG = join11(STATE_DIR, "tunnel.log");
 var QUICK_URL = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/;
 var alive = (pid) => {
   try {
@@ -33761,14 +33892,14 @@ var alive = (pid) => {
 };
 function readRecord() {
   try {
-    return JSON.parse(readFileSync9(TUNNEL_FILE, "utf8"));
+    return JSON.parse(readFileSync10(TUNNEL_FILE, "utf8"));
   } catch {
     return null;
   }
 }
 function registered() {
   try {
-    return /Registered tunnel connection/.test(readFileSync9(TUNNEL_LOG, "utf8"));
+    return /Registered tunnel connection/.test(readFileSync10(TUNNEL_LOG, "utf8"));
   } catch {
     return false;
   }
@@ -33792,8 +33923,8 @@ async function ensureTunnel(port) {
       "Tunnelling needs cloudflared, which is not installed here. Install it (macOS: `brew install cloudflared`; others: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and host again, or use Tailscale and pass its address as publicUrl."
     );
   }
-  mkdirSync9(STATE_DIR, { recursive: true });
-  writeFileSync9(TUNNEL_LOG, "");
+  mkdirSync10(STATE_DIR, { recursive: true });
+  writeFileSync10(TUNNEL_LOG, "");
   const log3 = openSync3(TUNNEL_LOG, "a");
   const child = spawn5(
     "cloudflared",
@@ -33805,7 +33936,7 @@ async function ensureTunnel(port) {
   const deadline = Date.now() + 3e4;
   let url2 = null;
   while (Date.now() < deadline) {
-    const found = readFileSync9(TUNNEL_LOG, "utf8").match(QUICK_URL);
+    const found = readFileSync10(TUNNEL_LOG, "utf8").match(QUICK_URL);
     if (found && registered()) {
       url2 = found[0];
       break;
@@ -33817,13 +33948,13 @@ async function ensureTunnel(port) {
     if (child.pid && alive(child.pid)) process.kill(child.pid);
     throw new Error(`cloudflared did not come up with an address. Its log is at ${TUNNEL_LOG}.`);
   }
-  writeFileSync9(TUNNEL_FILE, `${JSON.stringify({ pid: child.pid, url: url2, port })}
+  writeFileSync10(TUNNEL_FILE, `${JSON.stringify({ pid: child.pid, url: url2, port })}
 `);
   return url2;
 }
 function stopTunnel() {
   const record2 = readRecord();
-  if (existsSync7(TUNNEL_FILE)) rmSync5(TUNNEL_FILE, { force: true });
+  if (existsSync8(TUNNEL_FILE)) rmSync5(TUNNEL_FILE, { force: true });
   if (!record2 || !alive(record2.pid)) return false;
   try {
     process.kill(record2.pid);
@@ -33834,14 +33965,14 @@ function stopTunnel() {
 }
 
 // packages/plugin/src/mirror-sync.ts
-import { appendFileSync as appendFileSync3, mkdirSync as mkdirSync10 } from "node:fs";
+import { appendFileSync as appendFileSync3, mkdirSync as mkdirSync11 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 var MIRROR_MS = Number(process.env.SESSION_SHARE_MIRROR_MS ?? 2 * 6e4);
-var logFile2 = () => join11(process.env.SESSION_SHARE_HOME ?? join11(homedir6(), ".session-share"), "mirror.log");
+var logFile2 = () => join12(process.env.SESSION_SHARE_HOME ?? join12(homedir6(), ".session-share"), "mirror.log");
 function log2(line) {
   try {
-    mkdirSync10(join11(logFile2(), ".."), { recursive: true });
+    mkdirSync11(join12(logFile2(), ".."), { recursive: true });
     appendFileSync3(logFile2(), `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
   } catch {
@@ -34001,8 +34132,8 @@ function boardUrl(serverUrl, packedInvite, as) {
 
 // packages/plugin/src/git.ts
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync8, mkdirSync as mkdirSync11, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname5, isAbsolute as isAbsolute2, relative, resolve as resolve4 } from "node:path";
+import { existsSync as existsSync9, mkdirSync as mkdirSync12, writeFileSync as writeFileSync11 } from "node:fs";
+import { dirname as dirname6, isAbsolute as isAbsolute2, relative, resolve as resolve4 } from "node:path";
 import { promisify as promisify2 } from "node:util";
 var run2 = promisify2(execFile2);
 var GitError = class extends Error {
@@ -34182,8 +34313,8 @@ async function writeFiles(cwd, files) {
   const written = [];
   for (const [index, file2] of files.entries()) {
     const absolute = targets[index];
-    mkdirSync11(dirname5(absolute), { recursive: true });
-    writeFileSync10(absolute, file2.contents);
+    mkdirSync12(dirname6(absolute), { recursive: true });
+    writeFileSync11(absolute, file2.contents);
     written.push(file2.path);
   }
   return written;
@@ -34270,7 +34401,7 @@ async function existingPullRequest(cwd, head) {
   }
 }
 async function addWorktree(cwd, path, branch, from) {
-  if (existsSync8(path)) return "existing";
+  if (existsSync9(path)) return "existing";
   await fetch2(cwd);
   const base = await remoteBranchExists(cwd, from) ? `origin/${from}` : from;
   const args = await branchExists(cwd, branch) ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, base];
@@ -34795,11 +34926,11 @@ var DEFAULT_SERVER_URL = process.env.SESSION_SHARE_URL ?? "http://127.0.0.1:4310
 function slugify2(value) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "session";
 }
-async function createSession(serverUrl, input) {
+var hostCredential = () => ({ [HOST_HEADER]: hostKey() });
+async function createSession(serverUrl, input, credential = hostCredential()) {
   const response = await fetch(new URL("/api/sessions", serverUrl), {
     method: "POST",
-    // Opening a session is the host's alone; see server/auth.ts hostCredential.
-    headers: { "content-type": "application/json", [HOST_HEADER]: hostKey() },
+    headers: { "content-type": "application/json", ...credential },
     body: JSON.stringify(input)
   });
   const payload = await response.json();
@@ -34810,10 +34941,10 @@ async function createSession(serverUrl, input) {
     invite: payload.invite ?? null
   };
 }
-async function mintInvite(serverUrl, slug) {
+async function mintInvite(serverUrl, slug, credential = hostCredential()) {
   const response = await fetch(new URL(`/api/sessions/${slug}/invite`, serverUrl), {
     method: "POST",
-    headers: { [HOST_HEADER]: hostKey() }
+    headers: credential
   });
   const payload = await response.json();
   if (!response.ok || !payload.invite) {
@@ -34860,6 +34991,18 @@ async function checkReachable(url2, expectedServerId2) {
       ].join("\n")
     );
   }
+  return health;
+}
+function accountBoardUrl(serverUrl, slug) {
+  return `${serverUrl.replace(/\/$/, "")}/board/?s=${encodeURIComponent(slug)}`;
+}
+function signInFirst(serverUrl) {
+  return new Error(
+    [
+      `${originOf(serverUrl)} verifies who you are, and this machine is not signed in to it.`,
+      `Run /ss:login ${originOf(serverUrl)} first, then try again.`
+    ].join("\n")
+  );
 }
 var REPO_ROOT = process.env.SESSION_SHARE_REPO ?? process.cwd();
 function config2() {
@@ -34881,6 +35024,83 @@ async function snapshot(cfg) {
   if (!response.ok) throw new Error(`Could not read the session: ${response.status}`);
   return await response.json();
 }
+async function describeRepo(root, given) {
+  const title = given?.trim() || basename2(root);
+  const remote = await repoRemote(root);
+  const repo = {
+    owner: remote?.owner ?? "local",
+    name: remote?.name ?? basename2(root),
+    baseBranch: await baseBranch(root),
+    remoteUrl: remote?.remoteUrl ?? root
+  };
+  const slug = given?.trim() ? slugify2(title) : remote ? slugify2(`${remote.owner}-${remote.name}`) : `${slugify2(basename2(root)).slice(0, 33)}-${shortHash(root)}`;
+  const sameRepo = (stored) => Boolean(stored) && (remote ? stored.owner === repo.owner && stored.name === repo.name : stored.remoteUrl === repo.remoteUrl);
+  return { title, remote, repo, slug, sameRepo };
+}
+async function hostOnServer(root, server, described, given, issueRef) {
+  const serverUrl = originOf(server);
+  const health = await probe(serverUrl, 5e3);
+  if (!health) throw new Error(`Nothing answered at ${serverUrl}. Check the address, or host on this machine with server: "local".`);
+  if (health.mode !== "oauth") {
+    throw new Error(`${serverUrl} is a peer server with no accounts. Join one of its sessions with an invite instead.`);
+  }
+  const account = accountFor(serverUrl);
+  if (!account) throw signInFirst(serverUrl);
+  const credential = { authorization: `Bearer ${account.token}` };
+  const { title, repo, slug, sameRepo } = described;
+  const resume = async (candidate) => {
+    if (!candidate) return null;
+    try {
+      const existing = await mintInvite(serverUrl, candidate, credential);
+      return sameRepo(existing.repo) ? { invite: existing.invite, resumed: true, slug: candidate } : null;
+    } catch {
+      return null;
+    }
+  };
+  const open = async (candidate) => {
+    try {
+      const fresh = await createSession(serverUrl, { slug: candidate, title, repo, issueRef: issueRef ?? null }, credential);
+      return { invite: fresh.invite, resumed: false, slug: candidate };
+    } catch (error51) {
+      if (!String(error51).includes("is taken")) throw error51;
+      return resume(candidate);
+    }
+  };
+  const attached = readConfig(root);
+  const sameServer = attached ? originOf(attached.serverUrl) === serverUrl : false;
+  const created = (given?.trim() || !sameServer ? null : await resume(attached?.sessionRef)) ?? await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? await open(`${slug.slice(0, 26)}-${slugify2(account.githubLogin).slice(0, 13)}`);
+  if (!created?.invite) {
+    throw new Error(`Sessions named "${slug}" on ${serverUrl} belong to someone else. Pass a title to name this one.`);
+  }
+  const joined = await accountJoin(serverUrl, created.invite, account.token, root);
+  const cfg = {
+    serverUrl,
+    sessionRef: joined.sessionRef,
+    participantId: joined.participantId,
+    participantToken: joined.participantToken,
+    githubLogin: joined.githubLogin,
+    displayName: joined.displayName,
+    repoPath: root
+  };
+  writeConfig(root, cfg);
+  await markCaughtUp(cfg);
+  ensureTerminalHost(root);
+  const packed = packInvite({ url: serverUrl, token: created.invite, serverId: health.serverId ?? null });
+  const board = accountBoardUrl(serverUrl, joined.sessionRef);
+  const opened = readPreferences().openBoard && openInBrowser(board);
+  return [
+    created.resumed ? `Resumed "${title}" on ${serverUrl} as ${joined.displayName}.` : `Hosting "${title}" on ${serverUrl} as ${joined.displayName}.`,
+    "",
+    "Send your teammate this line:",
+    `  /ss:join ${packed}`,
+    "",
+    `They sign in once with /ss:login ${serverUrl}; the invite alone does not let anyone in.`,
+    opened ? `Board opened: ${board}` : `Board: ${board}`,
+    "",
+    `The session lives on ${serverUrl}, so it keeps going when this machine sleeps.`,
+    `Every edit in ${basename2(root)} is now checked against this session's file leases.`
+  ].join("\n");
+}
 function createServer() {
   const server = new McpServer({ name: "session-share", version: "0.1.0" });
   server.registerTool(
@@ -34898,12 +35118,17 @@ function createServer() {
         ),
         tunnel: external_exports.boolean().nullish().describe(
           "Open a Cloudflare quick tunnel so teammates on any network can join, and put its public address in the invite. Needs cloudflared installed. Defaults to your saved preference."
+        ),
+        server: external_exports.string().nullish().describe(
+          'A hosted session-share to open the session on instead of this machine, e.g. https://cloud.example.com. Needs /ss:login there first. Defaults to the server you signed in to; "local" forces this machine.'
         )
       }
     },
-    async ({ title: given, issueRef, expose, publicUrl: givenPublicUrl, tunnel }) => {
+    async ({ title: given, issueRef, expose, publicUrl: givenPublicUrl, tunnel, server: givenServer }) => {
       const root = await repoRoot(REPO_ROOT);
-      const title = given?.trim() || basename2(root);
+      const { title, remote, repo, slug, sameRepo } = await describeRepo(root, given);
+      const server2 = givenServer?.trim() || readPreferences().server;
+      if (server2 && server2 !== "local") return text(await hostOnServer(root, server2, { title, remote, repo, slug, sameRepo }, given, issueRef));
       const identity = await localIdentity();
       let publicUrl = publicUrlOverride(givenPublicUrl);
       const tunnelled = !publicUrl && (tunnel ?? readPreferences().tunnel);
@@ -34911,15 +35136,6 @@ function createServer() {
       const loopback = `http://127.0.0.1:${daemon.port}`;
       if (tunnelled) publicUrl = await ensureTunnel(daemon.port);
       const dialUrl = publicUrl ?? daemon.url;
-      const remote = await repoRemote(root);
-      const repo = {
-        owner: remote?.owner ?? "local",
-        name: remote?.name ?? basename2(root),
-        baseBranch: await baseBranch(root),
-        remoteUrl: remote?.remoteUrl ?? root
-      };
-      const slug = given?.trim() ? slugify2(title) : remote ? slugify2(`${remote.owner}-${remote.name}`) : `${slugify2(basename2(root)).slice(0, 33)}-${shortHash(root)}`;
-      const sameRepo = (stored) => Boolean(stored) && (remote ? stored.owner === repo.owner && stored.name === repo.name : stored.remoteUrl === repo.remoteUrl);
       const open = async (candidate) => {
         try {
           const fresh = await createSession(loopback, {
@@ -35030,8 +35246,11 @@ function createServer() {
         );
       }
       const dial = packed ? serverUrl ? publicUrlOverride(serverUrl) : packed.url : null;
-      if (packed) await checkReachable(dial, packed.serverId ?? null);
-      const result = packed ? await peerJoin(dial, packed.token, await localIdentity(), root) : await pair(serverUrl ?? DEFAULT_SERVER_URL, trimmed, root);
+      const health = packed ? await checkReachable(dial, packed.serverId ?? null) : null;
+      const verified = health?.mode === "oauth";
+      const account = verified ? accountFor(dial) : null;
+      if (verified && !account) throw signInFirst(dial);
+      const result = packed ? account ? await accountJoin(dial, packed.token, account.token, root) : await peerJoin(dial, packed.token, await localIdentity(), root) : await pair(serverUrl ?? DEFAULT_SERVER_URL, trimmed, root);
       const cfg = {
         serverUrl: dial ?? serverUrl ?? DEFAULT_SERVER_URL,
         sessionRef: result.sessionRef,
@@ -35044,11 +35263,11 @@ function createServer() {
       const path = writeConfig(root, cfg);
       await markCaughtUp(cfg);
       ensureTerminalHost(root);
-      const board = packed ? boardUrl(
+      const board = !packed ? null : verified ? accountBoardUrl(dial, result.sessionRef) : boardUrl(
         dial,
         dial === packed.url ? trimmed : packInvite({ ...packed, url: dial }),
         result.githubLogin
-      ) : null;
+      );
       const opened = Boolean(board) && readPreferences().openBoard && openInBrowser(board);
       return text(
         [
@@ -35077,6 +35296,10 @@ function createServer() {
         throw new Error(payload.message ?? "Could not get a board link for this session.");
       }
       const health = await probe(cfg.serverUrl);
+      if (health?.mode === "oauth") {
+        const board2 = accountBoardUrl(cfg.serverUrl, cfg.sessionRef);
+        return text(openInBrowser(board2) ? `Opened ${board2}` : board2);
+      }
       const board = boardUrl(
         cfg.serverUrl,
         packInvite({ url: cfg.serverUrl, token: payload.invite, serverId: health?.serverId ?? null }),
@@ -35125,12 +35348,83 @@ function createServer() {
     },
     async () => {
       const attached = readConfig(await repoRoot(REPO_ROOT));
+      if (attached && accountFor(attached.serverUrl)) {
+        return text(
+          `This session runs on ${originOf(attached.serverUrl)}, not on this machine, so there is nothing here to stop. It carries on without you.`
+        );
+      }
       const saved = attached ? await mirrorOnce(attached).catch(() => null) : null;
       stopTunnel();
       if (attached) stopTerminalHost(attached.repoPath);
       const note = saved?.pushed ? ` The session is saved on the ${LOG_BRANCH} branch; /ss:host on any machine picks it up from there.` : "";
       return text(
         await stopDaemon() === "stopped" ? `Stopped.${note}` : `Nothing was running. (Any stale record of one has been cleared.)${note}`
+      );
+    }
+  );
+  server.registerTool(
+    "ss_login",
+    {
+      description: "Sign this machine in to a hosted session-share (or any session-share with GitHub sign-in), so /ss:host can open sessions there and /ss:join can join them. Opens a browser page to approve a short code.",
+      inputSchema: {
+        serverUrl: external_exports.string().nullish().describe("The server, e.g. https://cloud.example.com. Defaults to the one you last signed in to.")
+      }
+    },
+    async ({ serverUrl: given }) => {
+      const target = given?.trim() || readPreferences().server;
+      if (!target) throw new Error("Which server? Pass its address, e.g. /ss:login https://cloud.example.com");
+      const serverUrl = originOf(/^https?:\/\//.test(target) ? target : `https://${target}`);
+      const health = await probe(serverUrl, 5e3);
+      if (!health) throw new Error(`Nothing answered at ${serverUrl}.`);
+      if (health.mode !== "oauth") {
+        throw new Error(`${serverUrl} has no accounts to sign in to -- it is a peer server. Join its sessions with an invite.`);
+      }
+      const existing = accountFor(serverUrl);
+      if (existing) {
+        writePreferences({ server: serverUrl });
+        return text(`Already signed in to ${serverUrl} as @${existing.githubLogin}. /ss:host opens sessions there.`);
+      }
+      let pending = pendingFor(serverUrl);
+      if (!pending) {
+        pending = await startSignIn(serverUrl, `Claude Code on ${hostname3()}`);
+        openInBrowser(pending.verifyUrl);
+      }
+      const account = await finishSignIn(serverUrl, pending, 9e4);
+      if (!account) {
+        return text(
+          [
+            `Approve this code in your browser: ${pending.userCode}`,
+            `  ${pending.verifyUrl}`,
+            "",
+            "Then run /ss:login again to finish."
+          ].join("\n")
+        );
+      }
+      writePreferences({ server: serverUrl });
+      return text(
+        [
+          `Signed in to ${serverUrl} as @${account.githubLogin}.`,
+          `/ss:host now opens sessions there instead of on this machine (pass server: "local" to host here).`
+        ].join("\n")
+      );
+    }
+  );
+  server.registerTool(
+    "ss_logout",
+    {
+      description: "Sign this machine out of a hosted session-share and go back to hosting on this machine.",
+      inputSchema: {
+        serverUrl: external_exports.string().nullish().describe("Defaults to the server /ss:host currently uses.")
+      }
+    },
+    async ({ serverUrl: given }) => {
+      const target = given?.trim() || readPreferences().server;
+      if (!target) return text("Not signed in anywhere; /ss:host runs on this machine.");
+      const serverUrl = originOf(/^https?:\/\//.test(target) ? target : `https://${target}`);
+      const account = await signOut(serverUrl);
+      if (readPreferences().server === serverUrl) writePreferences({ server: null });
+      return text(
+        account ? `Signed @${account.githubLogin} out of ${serverUrl}. /ss:host runs on this machine again.` : `This machine was not signed in to ${serverUrl}.`
       );
     }
   );

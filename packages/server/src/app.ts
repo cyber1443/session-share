@@ -15,6 +15,7 @@ import {
   type SessionId,
 } from '@session-share/protocol'
 import {
+  DEVICE_CODE_TTL_MS,
   HOST_HEADER,
   JOIN_TOKEN_TTL_MS,
   buildCookie,
@@ -22,8 +23,13 @@ import {
   devLoginAllowed,
   exchangeGithubCode,
   fetchGithubUser,
+  generateAccountToken,
+  generateDeviceCode,
   generateJoinToken,
+  generateUserCode,
   githubAuthorizeUrl,
+  hashAccountToken,
+  isAccountToken,
   issueCookieValue,
   issueInvite,
   issueParticipantToken,
@@ -49,6 +55,7 @@ import { GitHubReader } from './github.js'
 import { History } from './history.js'
 import { Gateway } from './ws.js'
 import { Terminals } from './terminals.js'
+import type { AccessPolicy } from './policy.js'
 
 const STATUS: Record<ErrorCode, number> = {
   bad_request: 400,
@@ -88,6 +95,12 @@ const TOKEN_REFUSALS = {
   },
 } as const
 
+const NO_ACCESS = {
+  error: 'forbidden',
+  reason: 'no_access',
+  message: 'You do not have access to this session.',
+} as const
+
 const OTHER_SESSION = {
   error: 'forbidden',
   reason: 'other_session',
@@ -116,11 +129,25 @@ const CreateSessionRequest = z.object({
   issueRef: z.string().nullish(),
 })
 
-const JoinRequest = z.object({
-  token: z.string().min(1),
-  repoPath: z.string().min(1),
-  machineId: z.string().min(1).max(100).nullish(),
-})
+/**
+ * A plugin attaching on an oauth server: with a one-time join code minted on
+ * the board, or with an invite plus the account token it signed in with.
+ */
+const JoinRequest = z.union([
+  z.object({
+    token: z.string().min(1),
+    repoPath: z.string().min(1),
+    machineId: z.string().min(1).max(100).nullish(),
+  }),
+  z.object({
+    invite: z.string().min(1),
+    repoPath: z.string().min(1),
+    machineId: z.string().min(1).max(100).nullish(),
+  }),
+])
+
+const DeviceStartRequest = z.object({ label: z.string().min(1).max(100).nullish() })
+const DeviceTokenRequest = z.object({ deviceCode: z.string().min(1).max(200) })
 
 const PeerJoinRequest = z.object({
   invite: z.string().min(1),
@@ -169,6 +196,23 @@ export interface AppOptions {
   github?: GitHubReader
   /** The machine this server runs on; the host's checkout there writes the daily summaries. */
   hostMachineId?: string | null
+  /** Who may open, see and join which sessions in oauth mode. See policy.ts. */
+  policy?: AccessPolicy
+  /**
+   * Adds routes of a deployment's own before the board's catch-all is
+   * registered -- billing pages, admin, webhooks. Called once, synchronously.
+   */
+  extend?: (context: AppContext) => void
+}
+
+/** What an extension gets to build on. */
+export interface AppContext {
+  fastify: FastifyInstance
+  store: Store
+  service: SessionService
+  auth: AuthConfig
+  /** The signed-in user behind a request: a board cookie or an account token. */
+  userFor(request: FastifyRequest): User | null
 }
 
 export interface App {
@@ -228,9 +272,35 @@ export function createApp(options: AppOptions = {}): App {
     avatarUrl: user.avatarUrl,
   })
 
+  const policy = options.policy ?? {}
+
+  /** An account token a plugin signed in with, if the request carries one. */
+  const accountToken = (request: FastifyRequest): string | null => {
+    const presented = request.headers.authorization?.replace(/^Bearer\s+/i, '')
+    return presented && isAccountToken(presented) ? presented : null
+  }
+
+  /** A browser's cookie, or a plugin's account token: either way, a verified person. */
   const currentUser = (request: FastifyRequest): User | null => {
+    const token = accountToken(request)
+    if (token) {
+      const userId = store.useAccountToken(hashAccountToken(token), Date.now())
+      return userId ? store.findUserById(userId) : null
+    }
     const userId = readUserIdFromCookies(auth, request.headers.cookie)
     return userId ? store.findUserById(userId) : null
+  }
+
+  /** A seat is always enough; otherwise the policy decides, and with none, anyone signed in may. */
+  const maySee = (user: User, sessionId: SessionId): boolean => {
+    const seated = [...service.state(sessionId).participants.values()].some((p) => p.userId === user.id)
+    return seated || (policy.maySeeSession?.(user, sessionId) ?? true)
+  }
+
+  if (policy.mayJoinSession) {
+    const gate = policy.mayJoinSession.bind(policy)
+    // Peer servers have no accounts to apply a policy to; the invite is the rule there.
+    service.joinGate = (user, sessionId) => (auth.mode === 'oauth' ? gate(user, sessionId) : null)
   }
 
   const requireUser = (request: FastifyRequest, reply: FastifyReply): User | null => {
@@ -252,7 +322,8 @@ export function createApp(options: AppOptions = {}): App {
    */
   const bearer = (request: FastifyRequest): BearerCheck => {
     const presented = request.headers.authorization?.replace(/^Bearer\s+/i, '')
-    if (!presented) return null
+    // An account token names a person, not a seat; currentUser reads it.
+    if (!presented || isAccountToken(presented)) return null
     const claims = readParticipantToken(auth, presented)
     if (!claims) return { ok: false, ...TOKEN_REFUSALS.token_invalid }
     const state = service.state(claims.sessionId)
@@ -292,7 +363,7 @@ export function createApp(options: AppOptions = {}): App {
   const isHost = (request: FastifyRequest) => isHostCredential(auth, request.headers[HOST_HEADER])
 
   const logIn = (reply: FastifyReply, user: User, redirectTo: string | null) => {
-    reply.header('set-cookie', buildCookie(issueCookieValue(auth, user.id), auth.callbackUrl.startsWith('https://')))
+    reply.header('set-cookie', [buildCookie(issueCookieValue(auth, user.id), auth.callbackUrl.startsWith('https://')), 'ss_oauth_state=; Path=/auth/github; HttpOnly; SameSite=Lax; Max-Age=0'])
     if (redirectTo) return reply.redirect(redirectTo)
     return reply.send({ user: toAuthUser(user) })
   }
@@ -327,7 +398,9 @@ export function createApp(options: AppOptions = {}): App {
     }
     const { redirect_to: redirectTo } = request.query as { redirect_to?: string }
     const state = randomUUID()
-    store.createOauthState(state, redirectTo ?? '/', Date.now())
+    const safeRedirect = redirectTo && redirectTo.startsWith('/') && !redirectTo.startsWith('//') && !/[\\\r\n]/.test(redirectTo) ? redirectTo : '/'
+    store.createOauthState(state, safeRedirect, Date.now())
+    reply.header('set-cookie', `ss_oauth_state=${state}; Path=/auth/github; HttpOnly; SameSite=Lax; Max-Age=600${auth.callbackUrl.startsWith('https://') ? '; Secure' : ''}`)
     return reply.redirect(githubAuthorizeUrl(auth, state))
   })
 
@@ -337,6 +410,8 @@ export function createApp(options: AppOptions = {}): App {
       return reply.code(400).send({ error: 'bad_request', message: 'Missing code or state.' })
     }
 
+    const browserState = request.headers.cookie?.split(';').map((part) => part.trim()).find((part) => part.startsWith('ss_oauth_state='))?.slice('ss_oauth_state='.length)
+    if (browserState !== state) return reply.code(400).send({ error: 'bad_request', message: 'Sign-in expired or started in another browser. Please sign in again.' })
     const stored = store.consumeOauthState(state)
     if (!stored) {
       return reply.code(400).send({ error: 'bad_request', message: 'Unknown or reused state.' })
@@ -377,6 +452,113 @@ export function createApp(options: AppOptions = {}): App {
 
   fastify.post('/auth/logout', async (_request, reply) => {
     reply.header('set-cookie', clearCookie())
+    return { ok: true }
+  })
+
+  // -- plugin sign-in ------------------------------------------------------
+
+  /**
+   * A plugin cannot complete a GitHub redirect, so it signs in the way a TV
+   * does: it asks for a code, the person approves that code in a browser that
+   * is signed in, and the plugin collects an account token. Peer servers have
+   * no accounts, so there is nothing to sign in to.
+   */
+  fastify.post('/api/device', async (request, reply) => {
+    if (auth.mode !== 'oauth') {
+      return reply.code(404).send({ error: 'not_found', message: 'This server has no accounts; join with an invite.' })
+    }
+    const parsed = DeviceStartRequest.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: 'bad_request', message: parsed.error.message })
+
+    const deviceCode = generateDeviceCode()
+    const userCode = generateUserCode()
+    const expiresAt = Date.now() + DEVICE_CODE_TTL_MS
+    store.createDeviceCode(deviceCode, userCode, parsed.data.label ?? 'plugin', expiresAt)
+    return {
+      deviceCode,
+      userCode,
+      verifyUrl: `${auth.publicUrl}/auth/device?code=${encodeURIComponent(userCode)}`,
+      expiresAt,
+      interval: 3,
+    }
+  })
+
+  /** Polled by the plugin until the person approves, or the code runs out. */
+  fastify.post('/api/device/token', async (request, reply) => {
+    const parsed = DeviceTokenRequest.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: 'bad_request', message: parsed.error.message })
+
+    const result = store.collectDeviceCode(parsed.data.deviceCode, Date.now())
+    if (result.state === 'pending') return reply.code(202).send({ status: 'pending' })
+    if (result.state !== 'approved') {
+      return reply.code(410).send({ error: 'expired', message: 'That sign-in expired. Start it again.' })
+    }
+    const user = store.findUserById(result.userId)
+    if (!user) return reply.code(401).send({ error: 'unauthorized' })
+    return { status: 'approved', token: result.token, user: toAuthUser(user) }
+  })
+
+  /** The page the person approves a plugin's sign-in on. */
+  fastify.get('/auth/device', async (request, reply) => {
+    const { code } = request.query as { code?: string }
+    const userCode = (code ?? '').toUpperCase().trim()
+    const user = currentUser(request)
+    if (!user) {
+      const back = `/auth/device?code=${encodeURIComponent(userCode)}`
+      return reply.redirect(`/auth/github?redirect_to=${encodeURIComponent(back)}`)
+    }
+    const pending = userCode ? store.findDeviceCodeByUserCode(userCode, Date.now()) : null
+    reply.type('text/html; charset=utf-8')
+    if (!pending || pending.userId) {
+      return devicePage('Nothing to approve', '<p>That code has expired or was already used. Run the sign-in again from Claude Code.</p>')
+    }
+    return devicePage(
+      'Sign in a plugin',
+      `<p>Approve <strong>${escapeHtml(pending.label)}</strong> to act as <strong>@${escapeHtml(user.githubLogin)}</strong> on this server.</p>
+       <p>Check it shows the same code as your terminal:</p>
+       <p class="code">${escapeHtml(pending.userCode)}</p>
+       <form method="post" action="/auth/device">
+         <input type="hidden" name="code" value="${escapeHtml(pending.userCode)}">
+         <button type="submit">Approve</button>
+       </form>`,
+    )
+  })
+
+  fastify.addContentTypeParser(
+    'application/x-www-form-urlencoded',
+    { parseAs: 'string', bodyLimit: 4096 },
+    (_request, body, done) => done(null, Object.fromEntries(new URLSearchParams(body as string))),
+  )
+
+  fastify.post('/auth/device', async (request, reply) => {
+    /**
+     * The cookie is SameSite=Lax, so another site cannot post this form with
+     * it -- but a browser that says where the form came from is checked too.
+     */
+    const origin = request.headers.origin
+    if (origin && origin !== auth.publicUrl) {
+      return reply.code(403).send({ error: 'forbidden', message: 'Approve sign-ins from this server\'s own page.' })
+    }
+    const user = currentUser(request)
+    if (!user) return reply.code(401).send({ error: 'unauthorized', message: 'Sign in first.' })
+    const { code } = (request.body ?? {}) as { code?: string }
+    const userCode = (code ?? '').toUpperCase().trim()
+
+    const token = generateAccountToken()
+    const pending = userCode ? store.findDeviceCodeByUserCode(userCode, Date.now()) : null
+    reply.type('text/html; charset=utf-8')
+    if (!pending || !store.approveDeviceCode(userCode, user.id, token, Date.now())) {
+      return devicePage('Nothing to approve', '<p>That code has expired or was already used.</p>')
+    }
+    store.saveAccountToken(hashAccountToken(token), user.id, pending.label, Date.now())
+    return devicePage('Signed in', '<p>Done. You can close this tab and go back to Claude Code.</p>')
+  })
+
+  /** Signs a plugin out: the token it presents stops working everywhere. */
+  fastify.post('/api/account/logout', async (request, reply) => {
+    const token = accountToken(request)
+    if (!token) return reply.code(401).send({ error: 'unauthorized', message: 'No account token on this request.' })
+    store.revokeAccountToken(hashAccountToken(token), Date.now())
     return { ok: true }
   })
 
@@ -454,6 +636,8 @@ export function createApp(options: AppOptions = {}): App {
     } else {
       user = requireUser(request, reply)
       if (!user) return
+      const me = user
+      visible = store.listSessionIds().filter((id) => maySee(me, id))
     }
 
     const sessions = (visible ?? store.listSessionIds()).flatMap((id) => {
@@ -501,6 +685,8 @@ export function createApp(options: AppOptions = {}): App {
     } else {
       user = requireUser(request, reply)
       if (!user) return
+      const refused = policy.mayCreateSession?.(user) ?? null
+      if (refused) return reply.code(403).send({ error: 'forbidden', message: refused })
     }
 
     const parsed = CreateSessionRequest.safeParse(request.body)
@@ -513,10 +699,15 @@ export function createApp(options: AppOptions = {}): App {
         { type: 'session.create', ...parsed.data, issueRef: parsed.data.issueRef ?? null },
         { sessionId: null, participantId: null, user: user ? toAuthUser(user) : null },
       )
+      if (user) policy.sessionCreated?.(user, created.sessionId as SessionId)
       return {
         ...created,
-        // Peer sessions are useless without the string that lets someone in.
-        invite: auth.mode === 'peer' ? issueInvite(auth, created.sessionId) : null,
+        /**
+         * Peer sessions are useless without the string that lets someone in.
+         * On an oauth server the invite only names the session: whoever uses
+         * it still signs in, and the policy still decides.
+         */
+        invite: issueInvite(auth, created.sessionId as SessionId),
       }
     } catch (error) {
       return sendServiceError(reply, error)
@@ -592,7 +783,8 @@ export function createApp(options: AppOptions = {}): App {
    */
   const readable = (request: FastifyRequest, reply: FastifyReply): SessionId | null => {
     const claims = bearerClaims(request)
-    if (!claims && !currentUser(request)) {
+    const user = claims ? null : currentUser(request)
+    if (!claims && !user) {
       void refuse(request, reply, {
         status: 401,
         body: { error: 'unauthorized', message: 'Sign in first.' },
@@ -609,6 +801,10 @@ export function createApp(options: AppOptions = {}): App {
     }
     if (claims && claims.sessionId !== sessionId) {
       void reply.code(403).send(OTHER_SESSION)
+      return null
+    }
+    if (user && !maySee(user, sessionId)) {
+      void reply.code(403).send(NO_ACCESS)
       return null
     }
     // Reading the session is being here: an agent that only polls is still present.
@@ -743,7 +939,7 @@ export function createApp(options: AppOptions = {}): App {
 
     const { ref } = request.params as { ref: string }
     const sessionId = store.findSessionIdByRef(ref)
-    if (!sessionId) return reply.code(404).send({ error: 'not_found' })
+    if (!sessionId || !maySee(user, sessionId)) return reply.code(404).send({ error: 'not_found' })
 
     const token = generateJoinToken()
     const expiresAt = Date.now() + JOIN_TOKEN_TTL_MS
@@ -758,12 +954,32 @@ export function createApp(options: AppOptions = {}): App {
       return reply.code(400).send({ error: 'bad_request', message: parsed.error.message })
     }
 
-    const redeemed = store.redeemJoinToken(parsed.data.token, Date.now())
-    if (!redeemed) {
-      return reply.code(401).send({
-        error: 'unauthorized',
-        message: 'That join code is expired or has already been used. Generate a fresh one.',
-      })
+    let redeemed: { userId: string; sessionId: SessionId } | null
+    if ('token' in parsed.data) {
+      redeemed = store.redeemJoinToken(parsed.data.token, Date.now())
+      if (!redeemed) {
+        return reply.code(401).send({
+          error: 'unauthorized',
+          message: 'That join code is expired or has already been used. Generate a fresh one.',
+        })
+      }
+    } else {
+      /**
+       * An invite says which session; the account token says who. Neither is
+       * enough alone on an oauth server -- and whether this person may take a
+       * seat is the policy's call, made when the join runs.
+       */
+      const signedIn = currentUser(request)
+      if (!signedIn) {
+        return reply.code(401).send({
+          error: 'unauthorized',
+          reason: 'sign_in',
+          message: 'This server verifies who you are. Sign in with /ss:login first.',
+        })
+      }
+      const checked = readInvite(auth, parsed.data.invite)
+      if (!checked.ok) return reply.code(401).send(inviteRefusal(checked, serverFingerprint(auth)))
+      redeemed = { userId: signedIn.id, sessionId: checked.claims.sessionId }
     }
 
     const user = store.findUserById(redeemed.userId)
@@ -830,8 +1046,13 @@ export function createApp(options: AppOptions = {}): App {
         })
       }
     } else {
-      const user = requireUser(request, reply)
-      if (!user) return
+      const claims = bearerClaims(request)
+      const seated = claims !== null && claims.sessionId === sessionId
+      if (!seated) {
+        const user = requireUser(request, reply)
+        if (!user) return
+        if (sessionId && !maySee(user, sessionId)) return reply.code(404).send({ error: 'not_found' })
+      }
     }
     if (!sessionId) return reply.code(404).send({ error: 'not_found' })
 
@@ -981,7 +1202,7 @@ export function createApp(options: AppOptions = {}): App {
       user = toAuthUser(record)
       if (parsed.data.sessionRef) {
         sessionId = store.findSessionIdByRef(parsed.data.sessionRef)
-        if (!sessionId) return reply.code(404).send({ error: 'not_found' })
+        if (!sessionId || !maySee(record, sessionId)) return reply.code(404).send({ error: 'not_found' })
         participantId =
           [...service.state(sessionId).participants.values()].find((p) => p.userId === record.id)
             ?.id ?? null
@@ -1000,6 +1221,8 @@ export function createApp(options: AppOptions = {}): App {
       return sendServiceError(reply, error)
     }
   })
+
+  options.extend?.({ fastify, store, service, auth, userFor: currentUser })
 
   // Registered last so it can never shadow an API route.
   const webRoot = options.webRoot ?? defaultWebRoot()
@@ -1033,6 +1256,27 @@ export function createApp(options: AppOptions = {}): App {
       store.close()
     },
   }
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`)
+}
+
+/** A bare page for the sign-in approval: no board, no script, nothing to load. */
+function devicePage(title: string, body: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)} - session-share</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fafafa; --fg: #111; --mute: #666; --edge: #ddd; --accent: #111; --on-accent: #fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0b0b0c; --fg: #eee; --mute: #999; --edge: #2a2a2e; --accent: #eee; --on-accent: #111; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 420px; margin: 12vh auto; padding: 0 16px; }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  p { color: var(--mute); } strong { color: var(--fg); }
+  .code { font: 600 28px/1 ui-monospace, monospace; letter-spacing: 0.12em; color: var(--fg); padding: 16px; border: 1px solid var(--edge); border-radius: 8px; text-align: center; }
+  button { font: inherit; padding: 10px 18px; border-radius: 8px; border: 0; background: var(--accent); color: var(--on-accent); cursor: pointer; }
+</style></head><body><main><h1>${escapeHtml(title)}</h1>${body}</main></body></html>`
 }
 
 function sendServiceError(reply: FastifyReply, error: unknown) {

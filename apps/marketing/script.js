@@ -1,3 +1,18 @@
+/**
+ * The hosted Cloud's address. Empty until it is live: the Cloud buttons then
+ * point at the install steps and the login line shows a placeholder.
+ */
+const CLOUD_URL = "https://claudeshare.space";
+
+if (CLOUD_URL) {
+  document.querySelectorAll("[data-cloud-link]").forEach((link) => {
+    link.href = CLOUD_URL + link.dataset.cloudLink;
+  });
+  document.querySelectorAll("[data-cloud-command]").forEach((code) => {
+    code.textContent = "/ss:login " + CLOUD_URL;
+  });
+}
+
 const stages = {
   plan: {
     banner:

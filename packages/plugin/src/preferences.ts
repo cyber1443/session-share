@@ -63,6 +63,12 @@ export const Preferences = z.object({
    * here: anyone with the invite who joins the ticket can. Off unless chosen.
    */
   terminal: z.enum(['off', 'members']).default('off'),
+  /**
+   * Where /ss:host opens sessions. Null runs a coordination server on this
+   * machine; an address opens them on a hosted session-share you signed in to
+   * with /ss:login, so the session does not depend on this machine being up.
+   */
+  server: z.string().url().nullable().default(null),
   /** Set once the setup questions have been answered. */
   configured: z.boolean().default(false),
 })
@@ -108,6 +114,7 @@ export function describePreferences(preferences: Preferences): string {
     `commits:  ${preferences.commitPolicy === 'explicit' ? 'only when you run /ss:done' : 'automatically when the acceptance test passes'}`,
     `push:     ${preferences.push ? 'branches are pushed to origin' : 'nothing leaves this machine'}`,
     `PRs:      ${preferences.openPullRequests ? 'opened per task and for the session' : 'never opened'}`,
+    `server:   ${preferences.server ? `sessions are opened on ${preferences.server}` : 'sessions run on a server on this machine'}`,
     `hosting:  ${preferences.expose === 'lan' ? 'reachable on your local network' : 'this machine only'}`,
     `board:    ${preferences.openBoard ? 'opens in your browser on host and join' : 'never opened for you'}`,
     `room:     ${preferences.acceptDirectives ? 'directives from the room run in this session' : 'read-only; nothing from the room reaches your agent'}`,

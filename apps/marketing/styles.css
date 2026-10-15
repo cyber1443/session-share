@@ -1130,6 +1130,108 @@ h2 {
   color: var(--muted);
   margin: 21px 0 0;
 }
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.plan-card {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #171b14;
+  padding: 27px;
+  display: flex;
+  flex-direction: column;
+  transition:
+    border-color 0.2s,
+    transform 0.2s;
+}
+.plan-card:hover {
+  border-color: #6d8251;
+  transform: translateY(-3px);
+}
+.plan-card h3 {
+  font: 23px var(--heading);
+  letter-spacing: -0.7px;
+  margin: 0;
+}
+.plan-featured {
+  background: linear-gradient(135deg, #27351c, #1a2115);
+  border-color: #4c6134;
+}
+.plan-price {
+  font: 44px/1 var(--heading);
+  letter-spacing: -1.5px;
+  margin: 4px 0 8px;
+}
+.plan-price span {
+  font: 11px var(--mono);
+  letter-spacing: 0;
+  color: var(--muted);
+}
+.plan-featured .plan-price {
+  color: var(--lime);
+}
+.plan-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 20px;
+}
+.plan-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 25px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: #cad9b8;
+}
+.plan-list li {
+  padding: 6px 0 6px 18px;
+  border-top: 1px solid #262c21;
+  position: relative;
+}
+.plan-list li:before {
+  content: "•";
+  color: var(--lime);
+  position: absolute;
+  left: 2px;
+}
+.plan-card > a {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  color: #cad9b8;
+  font-size: 11px;
+  border-top: 1px solid var(--line);
+  padding: 15px 0 0;
+  margin-top: auto;
+}
+.plan-card > a:hover {
+  color: var(--lime);
+}
+.plan-card > a > span {
+  font-size: 19px;
+}
+.inline-link {
+  color: #cad9b8;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.inline-link:hover {
+  color: var(--lime);
+}
+.install-cloud {
+  border-top: 1px solid #3d4932;
+}
+.install-cloud code {
+  color: #d1f499;
+  overflow-wrap: anywhere;
+}
+.faq-list code {
+  font: 0.9em var(--mono);
+  color: var(--text);
+}
 .get-started-section {
   background: var(--lime);
   color: var(--bg);
@@ -1643,6 +1745,10 @@ dialog .dialog-note {
   .integration-grid {
     grid-template-columns: repeat(2, 1fr);
   }
+  .pricing-grid {
+    grid-template-columns: 1fr;
+    max-width: 560px;
+  }
   .integration-card {
     min-height: 280px;
   }
@@ -2018,6 +2124,9 @@ dialog .dialog-note {
   }
   .integration-card {
     min-height: 260px;
+    padding: 25px;
+  }
+  .plan-card {
     padding: 25px;
   }
   .integration-card p {

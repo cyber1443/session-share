@@ -6,6 +6,8 @@ allowed-tools: Bash, mcp__session-share__ss_host, mcp__plugin_ss_session-share__
 
 Host a session for: **$ARGUMENTS**
 
+If `ss_host` says the session is on a hosted server (they ran `/ss:login`), nothing runs on this machine: skip everything below about exposure, LAN and tunnels. Show the `/ss:join` line and tell them each teammate signs in once with `/ss:login <server>`. If it was refused by a plan limit, show the message as is -- it says where to upgrade.
+
 1. Call `ss_host` with that as the title. Pass `issueRef` if the argument is or contains an issue URL. It starts a coordination server on this machine if one is not already running, creates the session for this repository, and attaches this checkout.
 2. Show them the `/ss:join ssx_…` line to send. The board opens in their browser automatically.
 
