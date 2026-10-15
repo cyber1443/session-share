@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import { CloudLinks } from '@/components/cloud-links'
 import { chooseSeat, usageDay, type Participant, type Task } from '@session-share/protocol'
 import { AuthProvider, SignIn, useAuth } from '@/components/auth'
 import { PeerGate } from '@/components/peer-gate'
@@ -96,13 +97,14 @@ function Board({ slug }: { slug: string }) {
     <div className="board-shell flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-edge px-4 py-2">
         <div className="flex items-baseline gap-3">
-          <Link href="/" className="board-brand" title="All sessions">✳ Claude Share</Link>
+          <Link href="/" className="board-brand" title="Claude Share home">✳ Claude Share</Link>
           <h1 className="text-sm">{snapshot.session.title}</h1>
           <span className="text-xs text-mute">
             {snapshot.session.repo.owner}/{snapshot.session.repo.name}
           </span>
         </div>
         <div className="flex items-center gap-4 text-xs">
+          {mode === 'oauth' ? <CloudLinks /> : null}
           <span
             className={
               status === 'live'
@@ -248,6 +250,7 @@ function Board({ slug }: { slug: string }) {
             {VIEWS.map((name) => (
               <button
                 key={name}
+                aria-current={view === name ? 'page' : undefined}
                 className={`rounded px-2 py-0.5 ${view === name ? 'bg-neutral-800 text-neutral-200' : 'text-mute hover:text-neutral-300'}`}
                 onClick={() => setView(name)}
               >

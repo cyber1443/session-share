@@ -60,3 +60,16 @@ code,pre,textarea { font-family: ui-monospace, monospace; }
  .board-shell > div > aside { width: 100%; border-right: 0; border-bottom: 1px solid #343b2e; gap: 12px; }
  .board-shell > div > aside ul { display: flex; flex-wrap: wrap; gap: 12px; }
 }
+
+.board-shell .text-xs { font-size: 13px; line-height: 1.5; }
+.board-shell h2 { font-size: 12px; font-weight: 600; color: #cbd4c0; }
+.board-shell main > nav { padding: 10px 16px; gap: 6px; overflow-x: auto; }
+.board-shell main > nav button { padding: 7px 13px; border-radius: 7px; text-transform: capitalize; }
+.board-shell main > nav button[aria-current] { background: #d2fa6920; color: #d2fa69; }
+.board-shell textarea { font-size: 13px; }
+@media(max-width:560px) {
+ .board-shell > div > aside { max-height: 160px; overflow-y: auto; }
+ .board-shell main > .relative { min-height: 430px; }
+ .board-shell main > nav { flex-wrap: nowrap; }
+ .board-shell > header h1 { font-size: 16px; }
+}
