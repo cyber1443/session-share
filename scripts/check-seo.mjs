@@ -38,7 +38,9 @@ for (const path of ['/', '/guide/']) {
       assert.ok(visible.includes(faq.acceptedAnswer.text), `FAQ answer must match visible text: ${faq.name}`)
     }
   }
-  assert.match(visible, /test mode/)
+  assert.match(visible, /Secure billing through Monri/)
+  assert.match(visible, /teka\.management/)
+  assert.doesNotMatch(visible, /billing is currently in test mode|use Monri test cards only/i)
   assert.match(html, /href="\/login"/)
   console.log(`PASS ${path}: static content, metadata, canonical, structured data`)
 }
