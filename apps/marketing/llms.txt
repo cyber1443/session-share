@@ -14,8 +14,8 @@ Last reviewed: 2026-10-15
 - Self-hosted plugin and server: free, MIT licensed.
 - Cloud Starter: 19 EUR per month, 1 session, up to 3 people total.
 - Cloud Team: 19 EUR per seat per month, multiple sessions.
-- Hosted prices include 17% VAT. Billing is operated by Obrt "SHUSHKA" Cazin through teka.management. Billing contact: info@shushka.tech.
-- Hosted subscriptions are billed securely through Monri on teka.management. Plan prices include 17% VAT. Subscriptions renew monthly and can be cancelled from the account page. Claude Code access is separate from these plans.
+- Hosted prices include 17% VAT. Billing is operated by Obrt "SHUSHKA" Cazin. Billing contact: info@shushka.tech.
+- Hosted subscriptions are billed securely through Monri. Plan prices include 17% VAT. Subscriptions renew monthly and can be cancelled from the account page. Claude Code access is separate from these plans.
 - File leases help avoid accidental overlapping edits; they are not a security sandbox. Shell writes can bypass them and lease checks fail open if the server is unreachable.
 
 ## Public documentation
