@@ -331,125 +331,41 @@
             <h2>Parallel work.<br />Shared direction.</h2>
           </div>
           <p>
-            Less “who’s touching that file?”<br />More “look what we just
-            shipped.”
+            Host a space. Invite your friends.<br />Watch your tickets become tested pull requests.
           </p>
         </div>
-        <div
-          class="demo-tabs"
-          role="tablist"
-          aria-label="Explore the Claude Share workflow"
-        >
-          <button
-            id="tab-plan"
-            role="tab"
-            aria-controls="demo-panel"
-            aria-selected="false"
-            tabindex="-1"
-            data-stage="plan"
+        <figure class="walkthrough">
+          <video
+            id="walkthrough-video"
+            controls
+            muted
+            playsinline
+            preload="none"
+            width="1920"
+            height="1080"
+            poster="/assets/claude-share-walkthrough-poster.png"
+            aria-label="How Claude Share works: a one-minute walkthrough"
+            aria-describedby="walkthrough-caption"
           >
-            <span>01</span> Plan the mission</button
-          ><button
-            id="tab-build"
-            role="tab"
-            aria-controls="demo-panel"
-            aria-selected="true"
-            data-stage="build"
-          >
-            <span>02</span> Build in parallel</button
-          ><button
-            id="tab-verify"
-            role="tab"
-            aria-controls="demo-panel"
-            aria-selected="false"
-            tabindex="-1"
-            data-stage="verify"
-          >
-            <span>03</span> Verify & ship
-          </button>
-        </div>
-        <div
-          class="product-window"
-          id="demo-panel"
-          role="tabpanel"
-          aria-labelledby="tab-build"
-          tabindex="0"
-        >
-          <div class="window-top">
-            <div class="window-dots"><i></i><i></i><i></i></div>
-            <span>Claude Share / team workspace</span
-            ><span class="example-badge">INTERACTIVE EXAMPLE</span>
-          </div>
-          <div class="workspace">
-            <aside class="workspace-sidebar">
-              <div class="workspace-brand">
-                <span>▦</span> acme / platform <small>⌄</small>
-              </div>
-              <div class="sidebar-item active">
-                ▤ <span>Mission board</span><small>03</small>
-              </div>
-              <div class="sidebar-item">
-                ◎ <span>Team room</span><span class="small-led"></span>
-              </div>
-              <div class="sidebar-item">↳ <span>Activity</span></div>
-              <div class="sidebar-label">IN THIS SESSION</div>
-              <div class="mini-person">
-                <span class="avatar lavender">AL</span
-                ><span>Alex <small>+ Claude</small></span
-                ><i></i>
-              </div>
-              <div class="mini-person">
-                <span class="avatar peach">JM</span
-                ><span>Jamie <small>+ Claude</small></span
-                ><i></i>
-              </div>
-              <div class="mini-person">
-                <span class="avatar mint">SK</span
-                ><span>Sam <small>+ Claude</small></span
-                ><i></i>
-              </div>
-              <div class="sidebar-bottom">
-                <span class="status-dot"></span> Everyone, on the same page.
-              </div>
-            </aside>
-            <div class="board">
-              <div class="board-title">
-                <div>
-                  <p>SPRINT 04 / COLLABORATIVE BUILD</p>
-                  <h3 id="board-title">Make checkout feel effortless.</h3>
-                </div>
-                <div class="stacked-avatars">
-                  <span class="avatar lavender">AL</span
-                  ><span class="avatar peach">JM</span
-                  ><span class="avatar mint">SK</span>
-                </div>
-              </div>
-              <div class="board-banner">
-                <span>⌘</span>
-                <p id="board-banner">
-                  <b>Shared contract, locked in.</b> Every agent builds against
-                  the same types.
-                </p>
-                <span class="banner-check">✓</span>
-              </div>
-              <div class="board-columns" id="board-columns"></div>
-              <div class="activity-strip">
-                <span class="status-dot"></span
-                ><span id="activity-text"
-                  >Jamie’s Claude is building within its assigned files.</span
-                ><span class="activity-time">just now</span>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="demo-caption">
-          <span
-            ><span class="caption-dot"></span> A real workflow. Illustrative
-            tasks and teammates.</span
-          ><span id="stage-description" aria-live="polite"
-            >Separate file ownership keeps parallel work coordinated.</span
-          >
-        </div>
+            <source src="/assets/claude-share-walkthrough.mp4" type="video/mp4" />
+            <p><a href="/assets/claude-share-walkthrough.mp4">Watch the Claude Share walkthrough</a>.</p>
+          </video>
+          <figcaption class="demo-caption" id="walkthrough-caption">
+            <span><span class="caption-dot"></span> From shared plan to reviewed PR — in 60 seconds.</span>
+            <span>Silent video · Illustrative workflow with real browser tests.</span>
+          </figcaption>
+        </figure>
+        <details class="walkthrough-transcript">
+          <summary>Read the walkthrough</summary>
+          <ol>
+            <li><strong>Host a space.</strong> Start Claude Share from your Claude Code.</li>
+            <li><strong>Invite your friends.</strong> Share the join invite. Everyone connects with their own Claude Code.</li>
+            <li><strong>Plan together.</strong> Add tasks in Plan, agree on acceptance criteria, then press Start.</li>
+            <li><strong>Let Autopilot work.</strong> Connected agents split, build, and test the tickets as they progress across the board.</li>
+            <li><strong>Verify the result.</strong> Test the assembled app in a real browser. The sample shows search, shopping bag, and mobile layout checks.</li>
+            <li><strong>Review and keep going.</strong> Review the PR and test evidence. Discovered follow-up tickets return to Plan, waiting for your next Start.</li>
+          </ol>
+        </details>
       </section>
       <section class="why-section section" id="how-it-works">
         <div class="wrap">

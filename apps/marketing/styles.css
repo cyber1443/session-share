@@ -478,6 +478,23 @@ h2 {
   height: 1px;
   background: var(--lime);
 }
+.walkthrough { margin: 0; }
+.walkthrough video {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  background: #111410;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 30px 80px #0003;
+}
+.walkthrough video:focus-visible { outline: 2px solid var(--lime); outline-offset: 5px; }
+.walkthrough-transcript { margin-top: 24px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+.walkthrough-transcript summary { cursor: pointer; color: var(--text); width: fit-content; }
+.walkthrough-transcript ol { max-width: 760px; padding-left: 24px; }
+.walkthrough-transcript li + li { margin-top: 10px; }
+.walkthrough-transcript strong { color: var(--text); }
 .demo-tabs {
   display: flex;
   border-bottom: 1px solid var(--line);

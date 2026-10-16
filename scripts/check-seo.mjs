@@ -39,7 +39,7 @@ for (const path of ['/', '/guide/']) {
     }
   }
   assert.match(visible, /Secure billing through Monri/)
-  assert.match(visible, /teka\.management/)
+  assert.doesNotMatch(visible, /teka\.management|approved billing domain/i)
   assert.doesNotMatch(visible, /billing is currently in test mode|use Monri test cards only/i)
   assert.match(html, /href="\/login"/)
   console.log(`PASS ${path}: static content, metadata, canonical, structured data`)

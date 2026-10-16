@@ -28,7 +28,7 @@ The Vercel project uses this directory as the deployment source. Its configurati
 
 ## Content and interactions
 
-- Three-stage interactive, illustrative workflow demo with keyboard tab navigation.
+- One-minute video walkthrough with native playback controls, inline mobile playback, a poster, and an accessible text walkthrough. Video loads only when requested (`preload="none"`).
 - Claude Code and GitHub reflect the existing product workflow.
 - Jira, Slack, and Linear are explicitly labeled **In development**. Roadmap dialogs describe planned functionality only.
 - Copyable install commands, mobile navigation, accessible native FAQ and integration dialogs.
