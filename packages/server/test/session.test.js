@@ -1342,6 +1342,7 @@ describe('tickets', () => {
       passed: true,
       how: 'pnpm dev, toggled the theme and reloaded',
       summary: 'Persists across a reload and follows the system default.',
+      commitSha: 'a'.repeat(40),
     })
     assert.equal(passed.ticket.state, 'review')
     await settle()
@@ -1521,6 +1522,7 @@ describe('tickets', () => {
       passed: true,
       how: 'ran it',
       summary: 'works',
+      commitSha: 'a'.repeat(40),
     })
 
     const shipped = await alice.send({

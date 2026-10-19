@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, relative, resolve } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { pathMatchesAny } from '@session-share/protocol'
 
@@ -228,7 +229,16 @@ export async function updateLocalBranch(
   return 'updated'
 }
 
-async function isAncestor(cwd: string, ancestor: string, of: string): Promise<boolean> {
+/** The commit `ref` names, or null when it names none. */
+export async function revision(cwd: string, ref: string): Promise<string | null> {
+  try {
+    return await git(cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+  } catch {
+    return null
+  }
+}
+
+export async function isAncestor(cwd: string, ancestor: string, of: string): Promise<boolean> {
   try {
     await git(cwd, ['merge-base', '--is-ancestor', ancestor, of])
     return true
@@ -282,6 +292,15 @@ export async function writeFiles(
  */
 export async function changedFiles(cwd: string): Promise<string[]> {
   return (await statusEntries(cwd)).map((entry) => entry.path)
+}
+
+/**
+ * Files on disk that are not as the index has them: modified, deleted,
+ * untracked or unmerged. What is only staged is left out -- in a merge, that
+ * is what the merge itself brought in.
+ */
+export async function unstagedChanges(cwd: string): Promise<string[]> {
+  return (await statusEntries(cwd)).filter((entry) => entry.status[1] !== ' ').map((entry) => entry.path)
 }
 
 /**
@@ -365,6 +384,177 @@ export async function mergeInto(cwd: string, into: string, from: string): Promis
   }
 }
 
+/**
+ * Starts merging `from` into the checked-out branch and leaves it in progress,
+ * never committed: on conflict with markers in the files and both sides in the
+ * index, otherwise fully staged. Either way the result is a tree nobody has
+ * tested, so concluding it is left to whoever tests it. Anything other than a
+ * conflict is aborted and thrown, as in mergeInto.
+ */
+export async function beginMerge(cwd: string, from: string): Promise<MergeResult> {
+  try {
+    await git(cwd, ['merge', '--no-ff', '--no-commit', from])
+    return { merged: true, conflicts: [] }
+  } catch (error) {
+    const conflicts = await unmergedFiles(cwd)
+    if (conflicts.length === 0) {
+      await git(cwd, ['merge', '--abort']).catch(() => undefined)
+      throw error
+    }
+    return { merged: false, conflicts }
+  }
+}
+
+export async function abortMerge(cwd: string): Promise<void> {
+  await git(cwd, ['merge', '--abort'])
+}
+
+/** Paths git still holds as conflicted in the index. */
+export async function unmergedFiles(cwd: string): Promise<string[]> {
+  return (await git(cwd, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean)
+}
+
+/** The commit being merged in, while a merge is in progress. */
+export async function mergeHead(cwd: string): Promise<string | null> {
+  return revision(cwd, 'MERGE_HEAD')
+}
+
+/**
+ * Every resolved index entry, path to mode and blob. Taken while a merge
+ * stops on conflicts, it is exactly what git merged by itself; compared later,
+ * it shows whatever else changed while the conflicts were being resolved.
+ */
+export async function indexEntries(cwd: string): Promise<Record<string, string>> {
+  const { stdout } = await run('git', ['ls-files', '--stage', '-z'], { cwd, timeout: 60_000, maxBuffer: 50 * 1024 * 1024 })
+  const entries: Record<string, string> = {}
+  for (const line of stdout.split('\0')) {
+    const match = line.match(/^(\d+) ([0-9a-f]+) (\d)\t(.*)$/s)
+    if (match && match[3] === '0') entries[match[4]!] = `${match[1]} ${match[2]}`
+  }
+  return entries
+}
+
+/** Tracked files that differ between the index and the working tree. */
+export async function unstagedFiles(cwd: string): Promise<string[]> {
+  return (await git(cwd, ['diff', '--name-only'])).split('\n').filter(Boolean)
+}
+
+/** Lines in `paths` that are still git conflict markers, as `path:line`. */
+export async function conflictMarkers(cwd: string, paths: string[]): Promise<string[]> {
+  // A side that deleted the file leaves nothing to search, and git grep stops at a missing path.
+  const present = paths.filter((path) => existsSync(insideRepo(cwd, path)))
+  if (present.length === 0) return []
+  try {
+    const { stdout } = await run('git', ['grep', '--no-index', '-n', '-I', '-E', '^(<{7}|>{7}|\\|{7}) ', '--', ...present], {
+      cwd,
+      timeout: 60_000,
+      maxBuffer: 10 * 1024 * 1024,
+    })
+    return stdout.split('\n').filter(Boolean)
+  } catch (error) {
+    // Exit 1 is "no match", the answer hoped for. Anything else means nobody looked.
+    const failure = error as { code?: unknown; stderr?: string; message?: string }
+    if (failure.code === 1 && !failure.stderr?.trim()) return []
+    throw new GitError(`git grep failed: ${summarize(failure.stderr ?? failure.message ?? '')}`, failure.stderr ?? '')
+  }
+}
+
+export async function stage(cwd: string, paths: string[]): Promise<void> {
+  if (paths.length > 0) await git(cwd, ['add', '-A', '--', ...paths])
+}
+
+/** The tree a commit holds. */
+export async function treeOf(cwd: string, commit: string): Promise<string> {
+  return git(cwd, ['rev-parse', '--verify', `${commit}^{tree}`])
+}
+
+/** The tree the index holds now. Throws while any path is still unmerged. */
+export async function indexTree(cwd: string): Promise<string> {
+  return git(cwd, ['write-tree'])
+}
+
+/**
+ * The tree the working tree holds now: every file git does not ignore,
+ * tracked or not, as it is on disk -- except under `exclude`. Built in a
+ * scratch index, so the real one is untouched. Equal to indexTree exactly
+ * when nothing that is not ignored lies outside the index.
+ */
+export async function workingTree(cwd: string, exclude: string[]): Promise<string> {
+  const scratch = join(mkdtempSync(join(tmpdir(), 'ss-index-')), 'index')
+  try {
+    const real = await gitPath(cwd, 'index')
+    if (existsSync(real)) copyFileSync(real, scratch)
+    const env = { ...process.env, GIT_INDEX_FILE: scratch }
+    const options = { cwd, env, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 }
+    const excluded = exclude.map((prefix) => `:(exclude,top)${prefix}`)
+    await run('git', ['add', '-A', '--', ':/', ...excluded], options)
+    return (await run('git', ['write-tree'], options)).stdout.trim()
+  } catch (error) {
+    const failure = error as { stderr?: string; message?: string }
+    throw new GitError(`git add failed: ${summarize(failure.stderr ?? failure.message ?? '')}`, failure.stderr ?? '')
+  } finally {
+    rmSync(dirname(scratch), { recursive: true, force: true })
+  }
+}
+
+/**
+ * Commits exactly `tree` onto `branch`, which must still be at `parents[0]`,
+ * and leaves the index and working tree as they are -- they hold that tree
+ * already. Concluding a merge is this with the merged commit as the second
+ * parent; git's own merge state is then cleared, since the merge is done.
+ */
+export async function commitTree(
+  cwd: string,
+  branch: string,
+  tree: string,
+  parents: string[],
+  message: string,
+): Promise<string> {
+  const sha = await git(cwd, ['commit-tree', tree, ...parents.flatMap((parent) => ['-p', parent]), '-m', message])
+  await git(cwd, ['update-ref', '-m', 'session-share: tested resolution', `refs/heads/${branch}`, sha, parents[0]!])
+  if (parents.length > 1) {
+    for (const name of ['MERGE_HEAD', 'MERGE_MSG', 'MERGE_MODE', 'AUTO_MERGE']) rmSync(await gitPath(cwd, name), { force: true })
+  }
+  return sha
+}
+
+/**
+ * Records everything in the working tree that is not ignored -- tracked or
+ * not, staged or not, conflicted or not -- as a commit on top of HEAD, kept
+ * only under `ref`. Nothing in the checkout moves. It is what makes undoing a
+ * merge safe for edits nobody committed.
+ */
+export async function snapshotWork(cwd: string, ref: string, exclude: string[], message: string): Promise<string> {
+  const tree = await workingTree(cwd, exclude)
+  const head = await git(cwd, ['rev-parse', 'HEAD'])
+  const sha = await git(cwd, ['commit-tree', tree, '-p', head, '-m', message])
+  await git(cwd, ['update-ref', ref, sha])
+  return sha
+}
+
+/** One-line commits in `range` touching `paths`, for showing what collided. */
+export async function logTouching(cwd: string, range: string, paths: string[]): Promise<string[]> {
+  try {
+    return (await git(cwd, ['log', '--format=%h %an: %s', '-n', '10', range, '--', ...paths])).split('\n').filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+/** Points a ref at a commit -- here only refs under refs/session-share/. */
+export async function setRef(cwd: string, ref: string, sha: string, expected?: string): Promise<void> {
+  await git(cwd, ['update-ref', ref, sha, ...(expected ? [expected] : [])])
+}
+
+export async function deleteRef(cwd: string, ref: string): Promise<void> {
+  await git(cwd, ['update-ref', '-d', ref]).catch(() => undefined)
+}
+
+/** A file's path inside this checkout's git directory, worktree-aware. */
+export async function gitPath(cwd: string, name: string): Promise<string> {
+  return resolve(cwd, await git(cwd, ['rev-parse', '--git-path', name]))
+}
+
 /** Opens a pull request with `gh`, returning its number, or null if gh cannot. */
 export async function openPullRequest(
   cwd: string,
@@ -394,15 +584,30 @@ export async function openPullRequest(
 }
 
 export async function existingPullRequest(cwd: string, head: string): Promise<number | null> {
+  return (await openPullRequestFor(cwd, head))?.number ?? null
+}
+
+/** The open pull request from `head`, and whether it is still a draft, or null if gh cannot say. */
+export async function openPullRequestFor(cwd: string, head: string): Promise<{ number: number; draft: boolean } | null> {
   try {
-    const { stdout } = await run('gh', ['pr', 'list', '--head', head, '--json', 'number'], {
+    const { stdout } = await run('gh', ['pr', 'list', '--head', head, '--state', 'open', '--json', 'number,isDraft'], {
       cwd,
       timeout: 30_000,
     })
-    const parsed = JSON.parse(stdout) as Array<{ number: number }>
-    return parsed[0]?.number ?? null
+    const parsed = JSON.parse(stdout) as Array<{ number: number; isDraft?: boolean }>
+    return parsed[0] ? { number: parsed[0].number, draft: Boolean(parsed[0].isDraft) } : null
   } catch {
     return null
+  }
+}
+
+/** Takes a pull request out of draft. False if gh could not. */
+export async function readyPullRequest(cwd: string, number: number): Promise<boolean> {
+  try {
+    await run('gh', ['pr', 'ready', String(number)], { cwd, timeout: 30_000 })
+    return true
+  } catch {
+    return false
   }
 }
 

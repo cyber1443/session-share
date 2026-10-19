@@ -121,6 +121,12 @@ export type Participant = z.infer<typeof Participant>
  * have actually done. Nothing is dragged: a column you maintain by hand lies the
  * moment anyone is busy.
  */
+/** A full git object id, SHA-1 or SHA-256, lower case. */
+export const CommitSha = z
+  .string()
+  .regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/i)
+  .transform((sha) => sha.toLowerCase())
+
 /** What running the finished thing, in its real environment, showed. */
 export const Verification = z.object({
   passed: z.boolean(),
@@ -136,8 +142,34 @@ export const Verification = z.object({
   broke: z.array(TaskId).default([]),
   by: ParticipantId,
   at: Timestamp,
+  /**
+   * The commit of the contract branch that was run. A pass is evidence about
+   * that revision and no other: shipping or merging anything else on its
+   * strength would be shipping something nobody ran. Null on runs recorded
+   * before this existed, which therefore authorize nothing.
+   */
+  commitSha: CommitSha.nullable().default(null),
+  /**
+   * Set by the fold when the ticket's work changed after the run -- a task
+   * reopened or landed again, its contract re-landed. The verdict stays for
+   * the record; it just no longer speaks for what is on the branch.
+   */
+  stale: z.boolean().default(false),
 })
 export type Verification = z.infer<typeof Verification>
+
+/**
+ * Whether a run of the assembled thing still vouches for it: it passed, it
+ * names the revision it ran, and nothing about the ticket has changed since.
+ * With `headSha`, also that the revision is the one about to ship or merge.
+ */
+export function verificationHolds(
+  verification: Verification | null | undefined,
+  headSha?: string,
+): boolean {
+  if (!verification?.passed || verification.stale || !verification.commitSha) return false
+  return headSha === undefined || verification.commitSha === headSha.toLowerCase()
+}
 
 export const TicketState = z.enum([
   'plan',

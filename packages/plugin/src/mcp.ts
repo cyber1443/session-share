@@ -35,7 +35,7 @@ import {
   taskBranch,
 } from './git.js'
 import { readPreferences, writePreferences } from './preferences.js'
-import { registerGitTools } from './tools-git.js'
+import { registerGitTools, verdictCommit } from './tools-git.js'
 import { localIdentity, repoRemote, repoRoot } from './identity.js'
 
 const DEFAULT_SERVER_URL = process.env.SESSION_SHARE_URL ?? 'http://127.0.0.1:4310'
@@ -1221,6 +1221,13 @@ export function createServer(): McpServer {
     },
     async ({ ticketId, passed, how, summary, broke, followUps }) => {
       const cfg = config()
+      /**
+       * A pass vouches for one commit -- the contract branch as checked out
+       * here -- and only that commit may ship on it. A failure is recorded
+       * whatever this checkout is at; it ships nothing.
+       */
+      const assembled = await verdictCommit(await repoRoot(REPO_ROOT), (await snapshot(cfg)).session.slug, passed)
+      if ('problem' in assembled) return text(`Not recorded. ${assembled.problem}`)
       const result = await runCommand(cfg, {
         type: 'ticket.verified',
         ticketId: ticketId as never,
@@ -1229,6 +1236,7 @@ export function createServer(): McpServer {
         summary,
         broke: (broke ?? []) as never,
         followUps: followUps ?? [],
+        commitSha: assembled.sha,
       })
       const { ticket } = result
       const reopened = ticket.verification?.broke ?? []
@@ -1237,7 +1245,7 @@ export function createServer(): McpServer {
         : ''
       return text(
         (passed
-          ? `"${ticket.title}" verified. It is in review; open the PR with ss_ship.`
+          ? `"${ticket.title}" verified at ${ticket.verification?.commitSha?.slice(0, 7) ?? 'this commit'}. Open the PR with ss_ship -- it ships only that commit; anything landing after it needs another run.`
           : [
               `Recorded as broken, and the work is open again: ${reopened.join(', ') || 'nothing to reopen'}.`,
               `Everyone who built "${ticket.title}" has been told what you saw and asked to fix it.`,

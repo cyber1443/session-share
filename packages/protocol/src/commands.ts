@@ -4,6 +4,7 @@ import {
   Attachment,
   AutopilotMode,
   ChatMessage,
+  CommitSha,
   Contract,
   Ticket,
   HandoffRequest,
@@ -132,6 +133,11 @@ export const ClientCommand = z.discriminatedUnion('type', [
      * plan column, linked back here. Never started on its own.
      */
     followUps: z.array(FollowUp).max(10).default([]),
+    /**
+     * The contract-branch commit that was run. Required to pass: a pass that
+     * does not say what it ran cannot be held against what ships.
+     */
+    commitSha: CommitSha.nullable().default(null),
   }),
   /** Records the pull request that finished a ticket. */
   z.object({ type: z.literal('ticket.shipped'), ticketId: TicketId, prNumber: z.number().int().nullable().default(null) }),

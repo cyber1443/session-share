@@ -63262,6 +63262,7 @@ var Participant = external_exports.object({
   activity: ParticipantActivity,
   joinedAt: Timestamp
 });
+var CommitSha = external_exports.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/i).transform((sha) => sha.toLowerCase());
 var Verification = external_exports.object({
   passed: external_exports.boolean(),
   /** How it was exercised: the command, the URL, the simulator. */
@@ -63275,8 +63276,26 @@ var Verification = external_exports.object({
    */
   broke: external_exports.array(TaskId).default([]),
   by: ParticipantId,
-  at: Timestamp
+  at: Timestamp,
+  /**
+   * The commit of the contract branch that was run. A pass is evidence about
+   * that revision and no other: shipping or merging anything else on its
+   * strength would be shipping something nobody ran. Null on runs recorded
+   * before this existed, which therefore authorize nothing.
+   */
+  commitSha: CommitSha.nullable().default(null),
+  /**
+   * Set by the fold when the ticket's work changed after the run -- a task
+   * reopened or landed again, its contract re-landed. The verdict stays for
+   * the record; it just no longer speaks for what is on the branch.
+   */
+  stale: external_exports.boolean().default(false)
 });
+function verificationHolds(verification, headSha) {
+  if (!verification?.passed || verification.stale || !verification.commitSha)
+    return false;
+  return headSha === void 0 || verification.commitSha === headSha.toLowerCase();
+}
 var TicketState = external_exports.enum([
   "plan",
   "splitting",
@@ -64044,7 +64063,12 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
      * things that need checking, bugs elsewhere. Each becomes a ticket in the
      * plan column, linked back here. Never started on its own.
      */
-    followUps: external_exports.array(FollowUp).max(10).default([])
+    followUps: external_exports.array(FollowUp).max(10).default([]),
+    /**
+     * The contract-branch commit that was run. Required to pass: a pass that
+     * does not say what it ran cannot be held against what ships.
+     */
+    commitSha: CommitSha.nullable().default(null)
   }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
@@ -65145,8 +65169,11 @@ var SessionState = class {
         const named = body.decompositionId ?? null;
         for (const split of [...this.decompositions.values()]) {
           const lands = named ? split.id === named : split.status === "approved" && split.contractCommit === null;
-          if (lands)
+          if (lands) {
             this.decompositions.set(split.id, { ...split, contractCommit: body.commitSha });
+            if (split.ticketId)
+              this.staleVerification(split.ticketId);
+          }
         }
         break;
       }
@@ -65163,7 +65190,15 @@ var SessionState = class {
       case "task.state": {
         const task = this.tasks.get(body.taskId);
         if (task) {
-          this.tasks.set(body.taskId, { ...task, state: body.state, ownerId: body.ownerId });
+          const reopened = task.state === "merged" && !["merged", "pr", "failed"].includes(body.state);
+          this.tasks.set(body.taskId, {
+            ...task,
+            state: body.state,
+            ownerId: body.ownerId,
+            lastTest: reopened ? null : task.lastTest
+          });
+          if (task.ticketId && task.state !== body.state)
+            this.staleVerification(task.ticketId);
         }
         break;
       }
@@ -65265,6 +65300,18 @@ var SessionState = class {
     const split = key ? this.decompositions.get(key) : void 0;
     if (split)
       this.decompositions.set(split.id, change(split));
+  }
+  /**
+   * Marks a ticket's run as no longer about what is on the branch -- and a
+   * person's look with it, which was a look at that same build.
+   */
+  staleVerification(ticketId) {
+    const ticket = this.tickets.get(ticketId);
+    if (ticket?.verification && !ticket.verification.stale) {
+      this.tickets.set(ticketId, { ...ticket, verification: { ...ticket.verification, stale: true }, humanCheck: null });
+    } else if (ticket?.humanCheck) {
+      this.tickets.set(ticketId, { ...ticket, humanCheck: null });
+    }
   }
   updateSubticket(ticketId, subticketId, change) {
     const ticket = this.tickets.get(ticketId);
@@ -65409,16 +65456,16 @@ var SessionState = class {
       return "plan";
     if (ticket.mergedAt)
       return "done";
-    if (ticket.prNumber !== null)
-      return "review";
     const tasks = this.tasksOfTicket(ticketId);
     if (tasks.length > 0) {
       if (!tasks.every((task) => task.state === "merged"))
         return "building";
-      if (!ticket.verification?.passed)
+      if (!verificationHolds(ticket.verification))
         return "verify";
       return !ticket.needsHuman || ticket.humanCheck?.passed ? "review" : "verify";
     }
+    if (ticket.prNumber !== null)
+      return "review";
     if (ticket.decompositionId)
       return "proposed";
     return ticket.state === "splitting" ? "splitting" : "plan";
@@ -66349,7 +66396,7 @@ var SessionService = class {
       this.emit(sessionId, participantId, { type: "ticket.needsHuman", ticketId: ticket.id, value: command.value });
       const after = this.requireTicket(state, ticket.id);
       this.refreshTicketStates(sessionId, participantId);
-      if (!command.value && after.verification?.passed && state.ticketStateFor(ticket.id) === "review" && !after.prNumber) {
+      if (!command.value && verificationHolds(after.verification) && state.ticketStateFor(ticket.id) === "review" && !after.prNumber) {
         this.askToShip(sessionId, participantId, state, after, "passed its run, and no longer waits for a person");
       }
     }
@@ -66362,7 +66409,7 @@ var SessionService = class {
   humanCheck(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const ticket = this.requireTicket(state, command.ticketId);
-    if (state.ticketStateFor(ticket.id) !== "verify" || !ticket.verification?.passed) {
+    if (state.ticketStateFor(ticket.id) !== "verify" || !verificationHolds(ticket.verification)) {
       throw new ServiceError("not_ready", `"${ticket.title}" is not waiting for a look: it needs its automated run to pass first.`);
     }
     const by = state.participants.get(participantId)?.displayName ?? "Someone";
@@ -66375,7 +66422,9 @@ var SessionService = class {
           how: `checked by hand by ${by}`,
           summary: command.note || "It does not work when tried by hand.",
           broke: [],
-          followUps: []
+          followUps: [],
+          // The look was at the same build the automated run was.
+          commitSha: ticket.verification?.commitSha ?? null
         },
         ctx
       );
@@ -66421,6 +66470,61 @@ var SessionService = class {
       ].join("\n")
     );
     return { asked: checkout.id };
+  }
+  /**
+   * Whether the pull request GitHub describes may be merged from here, as it
+   * stands right now. Null when it may; otherwise why not.
+   *
+   * Only a ticket's own pull request -- the contract branch into the base, in
+   * this session's repository -- and only when every ticket whose work is on
+   * that branch passed a run of exactly the commit at its head. Everything
+   * about the pull request comes from GitHub, never from whoever pressed the
+   * button, and the merge itself is then pinned to that head: anything pushed
+   * after this check makes GitHub refuse instead of merging something no one
+   * ran.
+   */
+  mergeRefusal(sessionId, pull) {
+    const state = this.state(sessionId);
+    const session = state.session;
+    if (!session) return "No such session.";
+    const tickets = [...state.tickets.values()];
+    const shipped = tickets.filter((t) => t.prNumber === pull.number && !t.mergedAt);
+    if (shipped.length === 0) {
+      return `PR #${pull.number} is not the pull request of any open ticket in this session, so it is not merged from here. Merge it on GitHub if it should be.`;
+    }
+    const repo = `${session.repo.owner}/${session.repo.name}`.toLowerCase();
+    const contract = session.contractBranch ?? `ss/${session.slug}/contract`;
+    if (!pull.open) return `PR #${pull.number} is not open.`;
+    if (pull.baseRepo?.toLowerCase() !== repo || pull.headRepo?.toLowerCase() !== repo) {
+      return `PR #${pull.number} is not a branch of ${repo} into ${repo}.`;
+    }
+    if (pull.headRef !== contract || pull.baseRef !== session.repo.baseBranch) {
+      return `PR #${pull.number} is ${pull.headRef} \u2192 ${pull.baseRef}; a ticket ships as ${contract} \u2192 ${session.repo.baseBranch}.`;
+    }
+    const landed = (t) => Boolean(t.decompositionId && state.decompositions.get(t.decompositionId)?.contractCommit) || state.tasksOfTicket(t.id).some((task) => task.state === "merged");
+    const aboard = tickets.filter((t) => !t.mergedAt && (shipped.includes(t) || landed(t)));
+    const unproven = aboard.filter(
+      (t) => state.ticketStateFor(t.id) !== "review" || !verificationHolds(t.verification, pull.headSha)
+    );
+    if (unproven.length > 0) {
+      return [
+        `PR #${pull.number} is at ${pull.headSha.slice(0, 7)}, and not everything in it passed a run of that commit:`,
+        ...unproven.map((t) => `"${t.title}": ${this.verdictOf(state, t, pull.headSha)}`),
+        "Run it again on the contract branch at that commit and report with ss_ticket_verified."
+      ].join("\n");
+    }
+    return null;
+  }
+  verdictOf(state, ticket, headSha) {
+    const column = state.ticketStateFor(ticket.id);
+    const run2 = ticket.verification;
+    if (column === "building") return "its work is not all landed";
+    if (!run2) return "never run";
+    if (!run2.passed) return "its last run failed";
+    if (!run2.commitSha) return "its pass predates runs naming a commit";
+    if (run2.stale) return "its work changed after it passed";
+    if (run2.commitSha !== headSha.toLowerCase()) return `it passed at ${run2.commitSha.slice(0, 7)}, not at this head`;
+    return `it is in ${column}`;
   }
   /**
    * A pull request was merged -- from the board or on GitHub. Whichever
@@ -67324,9 +67428,10 @@ ${lines.join("\n")}`;
       [who],
       [
         again ? `The fixes for "${ticket.title}" have landed. Last time it was run it failed: ${ticket.verification?.summary}` : `Every task on "${ticket.title}" has landed on ${state.session?.contractBranch ?? "the contract branch"}.`,
-        again ? "Run it again, the same way, and check that specific failure is gone:" : "Nobody has run the whole thing yet. Do that now, before it goes anywhere near a PR:",
+        again ? "Run it again, the same way, and check that specific failure is gone:" : ticket.verification?.passed ? "It passed a run before, but that run is not of what is on the branch now. Run it again:" : "Nobody has run the whole thing yet. Do that now, before it goes anywhere near a PR:",
         "",
-        "1. ss_sync, so you have everyone's work together.",
+        `1. ss_sync, then check out ${state.session?.contractBranch ?? "the contract branch"} itself and run from there:`,
+        "   the verdict is recorded against that commit, and only that commit can ship on it.",
         "2. Work out how this project actually runs -- package.json scripts, a dev server, a",
         "   Playwright or Cypress config, docker compose, an Xcode or Android target, a CLI.",
         "   Read the repo rather than assuming; the answer is in there.",
@@ -67355,10 +67460,16 @@ ${lines.join("\n")}`;
     const ticket = this.requireTicket(state, command.ticketId);
     const ticketTasks = state.tasksOfTicket(ticket.id);
     const column = state.ticketStateFor(ticket.id);
-    if (column !== "verify") {
+    if (column !== "verify" && column !== "review") {
       throw new ServiceError(
         "not_ready",
-        column === "review" ? `"${ticket.title}" has already passed. Open the pull request with ss_ship.` : `"${ticket.title}" is not ready to be run yet: it is in ${column}, and a run only means something once every task has landed.`
+        `"${ticket.title}" is not ready to be run yet: it is in ${column}, and a run only means something once every task has landed.`
+      );
+    }
+    if (command.passed && !command.commitSha) {
+      throw new ServiceError(
+        "bad_request",
+        `A pass has to name the commit of the contract branch that was run (commitSha). Update the session-share plugin, check out the contract branch, run it, and report again.`
       );
     }
     const unknown2 = command.broke.filter((id) => !ticketTasks.some((task) => task.id === id));
@@ -67379,7 +67490,9 @@ ${lines.join("\n")}`;
         summary: command.summary,
         broke: reopened.map((task) => task.id),
         by: participantId,
-        at: Date.now()
+        at: Date.now(),
+        commitSha: command.commitSha,
+        stale: false
       }
     });
     for (const task of reopened) {
@@ -67458,10 +67571,10 @@ ${lines.join("\n")}`;
   shipTicket(command, ctx) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx);
     const ticket = this.requireTicket(state, command.ticketId);
-    if (state.ticketStateFor(ticket.id) !== "review" || !ticket.verification?.passed) {
+    if (state.ticketStateFor(ticket.id) !== "review" || !verificationHolds(ticket.verification)) {
       throw new ServiceError(
         "not_ready",
-        `"${ticket.title}" has not passed a run of the assembled thing yet, so there is nothing to open a pull request for.`
+        `"${ticket.title}" has not passed a current run of the assembled thing, so there is nothing to open a pull request for.`
       );
     }
     this.emit(sessionId, participantId, {
@@ -68366,7 +68479,7 @@ Issue: ${command.issueRef}` : "",
     this.refreshTicketStates(sessionId, participantId);
     const ticketId = task.ticketId;
     const ticket = ticketId ? state.tickets.get(ticketId) : null;
-    if (ticket && state.ticketStateFor(ticket.id) === "verify" && !ticket.verification?.passed) {
+    if (ticket && state.ticketStateFor(ticket.id) === "verify" && !verificationHolds(state.tickets.get(ticket.id)?.verification)) {
       this.askForVerification(sessionId, participantId, state, ticket);
     }
     return { unblocked };
@@ -68917,7 +69030,7 @@ var GitHubReader = class {
    * enforces everything it would for a person: branch protection, required
    * reviews and checks, and whether that account may write at all.
    */
-  async merge(repo, number4, method) {
+  async merge(repo, number4, method, sha) {
     const token = await this.token();
     if (!token) {
       return { merged: false, sha: null, message: "This server has no GitHub sign-in: run `gh auth login` on the host, or set GITHUB_TOKEN." };
@@ -68930,7 +69043,7 @@ var GitHubReader = class {
         "content-type": "application/json",
         "user-agent": "session-share"
       },
-      body: JSON.stringify({ merge_method: method }),
+      body: JSON.stringify({ merge_method: method, sha }),
       signal: AbortSignal.timeout(2e4)
     });
     const payload = await response.json().catch(() => ({}));
@@ -68940,6 +69053,38 @@ var GitHubReader = class {
       sha: payload.sha ?? null,
       message: payload.message ?? (response.ok ? "Merged." : `GitHub answered ${response.status}.`)
     };
+  }
+  /**
+   * A pull request as GitHub has it now: where it comes from, where it goes
+   * and the commit at its head. Never cached -- this is what a merge is
+   * checked against. Null when GitHub could not be asked or does not know it.
+   */
+  async pull(repo, number4) {
+    const token = await this.token();
+    try {
+      const response = await this.fetcher(`https://api.github.com/repos/${repo.owner}/${repo.name}/pulls/${number4}`, {
+        headers: {
+          accept: "application/vnd.github+json",
+          "user-agent": "session-share",
+          ...token ? { authorization: `Bearer ${token}` } : {}
+        },
+        signal: AbortSignal.timeout(8e3)
+      });
+      if (!response.ok) return null;
+      const pull = await response.json();
+      if (!pull.head?.sha || !pull.head.ref || !pull.base?.ref) return null;
+      return {
+        number: number4,
+        open: pull.state === "open" && !pull.merged,
+        headSha: pull.head.sha,
+        headRef: pull.head.ref,
+        headRepo: pull.head.repo?.full_name ?? null,
+        baseRef: pull.base.ref,
+        baseRepo: pull.base.repo?.full_name ?? null
+      };
+    } catch {
+      return null;
+    }
   }
   /** Whether a pull request has been merged, for tickets whose PR was merged on GitHub. */
   async mergedState(repo, number4) {
@@ -70333,7 +70478,16 @@ function createApp(options = {}) {
     if (!parsed.success) return reply.code(400).send({ error: "bad_request", message: parsed.error.message });
     const state = service.state(sessionId);
     if (!state.session) return reply.code(404).send({ error: "not_found" });
-    const result = await github.merge(state.session.repo, parsed.data.number, parsed.data.method);
+    const pull = await github.pull(state.session.repo, parsed.data.number);
+    if (!pull) {
+      return reply.code(409).send({
+        error: "conflict",
+        message: `Could not read PR #${parsed.data.number} from GitHub, so it cannot be checked, and is not merged.`
+      });
+    }
+    const refusal = service.mergeRefusal(sessionId, pull);
+    if (refusal) return reply.code(409).send({ error: "not_ready", message: refusal });
+    const result = await github.merge(state.session.repo, parsed.data.number, parsed.data.method, pull.headSha);
     if (!result.merged) return reply.code(409).send({ error: "conflict", message: result.message });
     const tickets = service.recordMerged(sessionId, actor, parsed.data.number, result.sha);
     return { ...result, tickets };

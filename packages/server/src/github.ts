@@ -37,6 +37,17 @@ export interface MergeResult {
   message: string
 }
 
+export interface PullHead {
+  number: number
+  open: boolean
+  headSha: string
+  headRef: string
+  /** `owner/name` of the repository the head branch is in; another one for a fork. */
+  headRepo: string | null
+  baseRef: string
+  baseRepo: string | null
+}
+
 export interface RunSummary {
   id: number
   workflow: string
@@ -204,7 +215,13 @@ export class GitHubReader {
    * enforces everything it would for a person: branch protection, required
    * reviews and checks, and whether that account may write at all.
    */
-  async merge(repo: RepoRef, number: number, method: 'merge' | 'squash' | 'rebase'): Promise<MergeResult> {
+  async merge(
+    repo: RepoRef,
+    number: number,
+    method: 'merge' | 'squash' | 'rebase',
+    /** The head commit the merge was cleared for. GitHub refuses if the branch has moved since. */
+    sha: string,
+  ): Promise<MergeResult> {
     const token = await this.token()
     if (!token) {
       return { merged: false, sha: null, message: 'This server has no GitHub sign-in: run `gh auth login` on the host, or set GITHUB_TOKEN.' }
@@ -217,7 +234,7 @@ export class GitHubReader {
         'content-type': 'application/json',
         'user-agent': 'session-share',
       },
-      body: JSON.stringify({ merge_method: method }),
+      body: JSON.stringify({ merge_method: method, sha }),
       signal: AbortSignal.timeout(20_000),
     })
     const payload = (await response.json().catch(() => ({}))) as { merged?: boolean; sha?: string; message?: string }
@@ -226,6 +243,44 @@ export class GitHubReader {
       merged: response.ok && Boolean(payload.merged),
       sha: payload.sha ?? null,
       message: payload.message ?? (response.ok ? 'Merged.' : `GitHub answered ${response.status}.`),
+    }
+  }
+
+  /**
+   * A pull request as GitHub has it now: where it comes from, where it goes
+   * and the commit at its head. Never cached -- this is what a merge is
+   * checked against. Null when GitHub could not be asked or does not know it.
+   */
+  async pull(repo: RepoRef, number: number): Promise<PullHead | null> {
+    const token = await this.token()
+    try {
+      const response = await this.fetcher(`https://api.github.com/repos/${repo.owner}/${repo.name}/pulls/${number}`, {
+        headers: {
+          accept: 'application/vnd.github+json',
+          'user-agent': 'session-share',
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        signal: AbortSignal.timeout(8000),
+      })
+      if (!response.ok) return null
+      const pull = (await response.json()) as {
+        state?: string
+        merged?: boolean
+        head?: { sha?: string; ref?: string; repo?: { full_name?: string } | null }
+        base?: { ref?: string; repo?: { full_name?: string } | null }
+      }
+      if (!pull.head?.sha || !pull.head.ref || !pull.base?.ref) return null
+      return {
+        number,
+        open: pull.state === 'open' && !pull.merged,
+        headSha: pull.head.sha,
+        headRef: pull.head.ref,
+        headRepo: pull.head.repo?.full_name ?? null,
+        baseRef: pull.base.ref,
+        baseRepo: pull.base.repo?.full_name ?? null,
+      }
+    } catch {
+      return null
     }
   }
 

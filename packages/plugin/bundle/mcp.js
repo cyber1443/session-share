@@ -22508,26 +22508,26 @@ var templateLiteralProcessor = (schema, _ctx, json2, _params) => {
 };
 var fileProcessor = (schema, _ctx, json2, _params) => {
   const _json = json2;
-  const file2 = {
+  const file3 = {
     type: "string",
     format: "binary",
     contentEncoding: "binary"
   };
   const { minimum, maximum, mime } = schema._zod.bag;
   if (minimum !== void 0)
-    file2.minLength = minimum;
+    file3.minLength = minimum;
   if (maximum !== void 0)
-    file2.maxLength = maximum;
+    file3.maxLength = maximum;
   if (mime) {
     if (mime.length === 1) {
-      file2.contentMediaType = mime[0];
-      Object.assign(_json, file2);
+      file3.contentMediaType = mime[0];
+      Object.assign(_json, file3);
     } else {
-      Object.assign(_json, file2);
+      Object.assign(_json, file3);
       _json.anyOf = mime.map((m) => ({ contentMediaType: m }));
     }
   } else {
-    Object.assign(_json, file2);
+    Object.assign(_json, file3);
   }
 };
 var successProcessor = (_schema, _ctx, json2, _params) => {
@@ -31163,6 +31163,7 @@ var Participant = external_exports.object({
   activity: ParticipantActivity,
   joinedAt: Timestamp
 });
+var CommitSha = external_exports.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/i).transform((sha) => sha.toLowerCase());
 var Verification = external_exports.object({
   passed: external_exports.boolean(),
   /** How it was exercised: the command, the URL, the simulator. */
@@ -31176,8 +31177,26 @@ var Verification = external_exports.object({
    */
   broke: external_exports.array(TaskId).default([]),
   by: ParticipantId,
-  at: Timestamp
+  at: Timestamp,
+  /**
+   * The commit of the contract branch that was run. A pass is evidence about
+   * that revision and no other: shipping or merging anything else on its
+   * strength would be shipping something nobody ran. Null on runs recorded
+   * before this existed, which therefore authorize nothing.
+   */
+  commitSha: CommitSha.nullable().default(null),
+  /**
+   * Set by the fold when the ticket's work changed after the run -- a task
+   * reopened or landed again, its contract re-landed. The verdict stays for
+   * the record; it just no longer speaks for what is on the branch.
+   */
+  stale: external_exports.boolean().default(false)
 });
+function verificationHolds(verification, headSha) {
+  if (!verification?.passed || verification.stale || !verification.commitSha)
+    return false;
+  return headSha === void 0 || verification.commitSha === headSha.toLowerCase();
+}
 var TicketState = external_exports.enum([
   "plan",
   "splitting",
@@ -31938,7 +31957,12 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
      * things that need checking, bugs elsewhere. Each becomes a ticket in the
      * plan column, linked back here. Never started on its own.
      */
-    followUps: external_exports.array(FollowUp).max(10).default([])
+    followUps: external_exports.array(FollowUp).max(10).default([]),
+    /**
+     * The contract-branch commit that was run. Required to pass: a pass that
+     * does not say what it ran cannot be held against what ships.
+     */
+    commitSha: CommitSha.nullable().default(null)
   }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),
@@ -32513,7 +32537,7 @@ function expectedBuild() {
   const hash2 = createHash("sha256");
   try {
     const dir = dirname(entry);
-    for (const name of readdirSync(dir).filter((file2) => file2.endsWith(".js")).sort()) {
+    for (const name of readdirSync(dir).filter((file3) => file3.endsWith(".js")).sort()) {
       const path = join(dir, name);
       if (!statSync(path).isFile()) continue;
       hash2.update(name);
@@ -32811,10 +32835,10 @@ function read() {
     return { accounts: {}, pending: {} };
   }
 }
-function write(file2) {
+function write(file3) {
   mkdirSync2(dirname2(ACCOUNTS_FILE), { recursive: true });
   const temporary = `${ACCOUNTS_FILE}.${process.pid}.tmp`;
-  writeFileSync2(temporary, `${JSON.stringify(file2, null, 2)}
+  writeFileSync2(temporary, `${JSON.stringify(file3, null, 2)}
 `, { mode: 384 });
   chmodSync(temporary, 384);
   renameSync(temporary, ACCOUNTS_FILE);
@@ -32823,19 +32847,19 @@ function accountFor(serverUrl) {
   return read().accounts[originOf(serverUrl)] ?? null;
 }
 function saveAccount(serverUrl, account) {
-  const file2 = read();
+  const file3 = read();
   const origin = originOf(serverUrl);
-  file2.accounts[origin] = account;
-  delete file2.pending[origin];
-  write(file2);
+  file3.accounts[origin] = account;
+  delete file3.pending[origin];
+  write(file3);
 }
 function forgetAccount(serverUrl) {
-  const file2 = read();
+  const file3 = read();
   const origin = originOf(serverUrl);
-  const had = file2.accounts[origin] ?? null;
-  delete file2.accounts[origin];
-  delete file2.pending[origin];
-  write(file2);
+  const had = file3.accounts[origin] ?? null;
+  delete file3.accounts[origin];
+  delete file3.pending[origin];
+  write(file3);
   return had;
 }
 function pendingFor(serverUrl) {
@@ -32843,9 +32867,9 @@ function pendingFor(serverUrl) {
   return pending && pending.expiresAt > Date.now() ? pending : null;
 }
 function savePending(serverUrl, pending) {
-  const file2 = read();
-  file2.pending[originOf(serverUrl)] = pending;
-  write(file2);
+  const file3 = read();
+  file3.pending[originOf(serverUrl)] = pending;
+  write(file3);
 }
 async function startSignIn(serverUrl, label) {
   const response = await fetch(new URL("/api/device", serverUrl), {
@@ -33725,15 +33749,15 @@ async function readMirroredFiles(cwd, sessionId) {
   if (!head) return [];
   const index = JSON.parse(await show(cwd, head, `${sessionDir(sessionId)}/files.json`) ?? "[]");
   const files = [];
-  for (const file2 of index) {
+  for (const file3 of index) {
     const bytes = await new Promise((resolve6) => {
-      const child = spawn4("git", ["cat-file", "blob", `${head}:${sessionDir(sessionId)}/files/${file2.id}`], { cwd });
+      const child = spawn4("git", ["cat-file", "blob", `${head}:${sessionDir(sessionId)}/files/${file3.id}`], { cwd });
       const chunks = [];
       child.stdout.on("data", (chunk) => chunks.push(chunk));
       child.on("close", () => resolve6(Buffer.concat(chunks)));
       child.on("error", () => resolve6(Buffer.alloc(0)));
     });
-    if (bytes.length > 0) files.push({ ...file2, base64: bytes.toString("base64") });
+    if (bytes.length > 0) files.push({ ...file3, base64: bytes.toString("base64") });
   }
   return files;
 }
@@ -33781,8 +33805,8 @@ async function readMirrored(cwd, sessionId) {
   if (!head) return [];
   const files = await git(cwd, ["ls-tree", "--name-only", `${head}:${sessionDir(sessionId)}/events`]).catch(() => "");
   const events = [];
-  for (const file2 of files.split("\n").filter(Boolean).sort()) {
-    const raw = await show(cwd, head, `${sessionDir(sessionId)}/events/${file2}`);
+  for (const file3 of files.split("\n").filter(Boolean).sort()) {
+    const raw = await show(cwd, head, `${sessionDir(sessionId)}/events/${file3}`);
     for (const line of (raw ?? "").split("\n")) {
       if (line.trim()) events.push(JSON.parse(line));
     }
@@ -33815,11 +33839,11 @@ async function pushLog(cwd, source, attempts = 3) {
       if (newFiles.length > 0 && source.files) {
         const index = parent ? JSON.parse(await show(cwd, parent, filesPath) ?? "[]") : [];
         for (const id of newFiles) {
-          const file2 = await source.files.read(id);
-          if (!file2) continue;
-          const blob = await gitBytes(cwd, ["hash-object", "-w", "--stdin"], file2.bytes);
+          const file3 = await source.files.read(id);
+          if (!file3) continue;
+          const blob = await gitBytes(cwd, ["hash-object", "-w", "--stdin"], file3.bytes);
           await git(cwd, ["update-index", "--add", "--cacheinfo", `100644,${blob},${sessionDir(source.meta.sessionId)}/files/${id}`], { env });
-          index.push({ id, name: file2.name, type: file2.type });
+          index.push({ id, name: file3.name, type: file3.type });
         }
         await write2(filesPath, `${JSON.stringify(index, null, 2)}
 `);
@@ -34132,8 +34156,9 @@ function boardUrl(serverUrl, packedInvite, as) {
 
 // packages/plugin/src/git.ts
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync9, mkdirSync as mkdirSync12, writeFileSync as writeFileSync11 } from "node:fs";
-import { dirname as dirname6, isAbsolute as isAbsolute2, relative, resolve as resolve4 } from "node:path";
+import { copyFileSync, existsSync as existsSync9, mkdirSync as mkdirSync12, mkdtempSync as mkdtempSync2, rmSync as rmSync6, writeFileSync as writeFileSync11 } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import { dirname as dirname6, isAbsolute as isAbsolute2, join as join13, relative, resolve as resolve4 } from "node:path";
 import { promisify as promisify2 } from "node:util";
 var run2 = promisify2(execFile2);
 var GitError = class extends Error {
@@ -34288,6 +34313,13 @@ async function updateLocalBranch(cwd, branch) {
   await git2(cwd, ["update-ref", `refs/heads/${branch}`, upstream, local]);
   return "updated";
 }
+async function revision(cwd, ref) {
+  try {
+    return await git2(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  } catch {
+    return null;
+  }
+}
 async function isAncestor(cwd, ancestor, of) {
   try {
     await git2(cwd, ["merge-base", "--is-ancestor", ancestor, of]);
@@ -34309,18 +34341,21 @@ function insideRepo(cwd, path) {
   return absolute;
 }
 async function writeFiles(cwd, files) {
-  const targets = files.map((file2) => insideRepo(cwd, file2.path));
+  const targets = files.map((file3) => insideRepo(cwd, file3.path));
   const written = [];
-  for (const [index, file2] of files.entries()) {
+  for (const [index, file3] of files.entries()) {
     const absolute = targets[index];
     mkdirSync12(dirname6(absolute), { recursive: true });
-    writeFileSync11(absolute, file2.contents);
-    written.push(file2.path);
+    writeFileSync11(absolute, file3.contents);
+    written.push(file3.path);
   }
   return written;
 }
 async function changedFiles(cwd) {
   return (await statusEntries(cwd)).map((entry) => entry.path);
+}
+async function unstagedChanges(cwd) {
+  return (await statusEntries(cwd)).filter((entry) => entry.status[1] !== " ").map((entry) => entry.path);
 }
 async function foreignChanges(cwd, patterns, ignore) {
   return (await statusEntries(cwd)).filter((entry) => entry.status !== "??").map((entry) => entry.path).filter((path) => !pathMatchesAny(path, patterns) && !ignore.some((prefix) => path.startsWith(prefix)));
@@ -34343,7 +34378,7 @@ async function statusEntries(cwd) {
   return files;
 }
 async function commit(cwd, patterns, message) {
-  const files = (await changedFiles(cwd)).filter((file2) => pathMatchesAny(file2, patterns));
+  const files = (await changedFiles(cwd)).filter((file3) => pathMatchesAny(file3, patterns));
   if (files.length === 0) return null;
   await git2(cwd, ["add", "-A", "--", ...files]);
   await git2(cwd, ["commit", "--only", "-m", message, "--", ...files]);
@@ -34365,6 +34400,110 @@ async function mergeInto(cwd, into, from) {
     if (conflicts.length === 0) throw error51;
     return { merged: false, conflicts };
   }
+}
+async function beginMerge(cwd, from) {
+  try {
+    await git2(cwd, ["merge", "--no-ff", "--no-commit", from]);
+    return { merged: true, conflicts: [] };
+  } catch (error51) {
+    const conflicts = await unmergedFiles(cwd);
+    if (conflicts.length === 0) {
+      await git2(cwd, ["merge", "--abort"]).catch(() => void 0);
+      throw error51;
+    }
+    return { merged: false, conflicts };
+  }
+}
+async function abortMerge(cwd) {
+  await git2(cwd, ["merge", "--abort"]);
+}
+async function unmergedFiles(cwd) {
+  return (await git2(cwd, ["diff", "--name-only", "--diff-filter=U"])).split("\n").filter(Boolean);
+}
+async function mergeHead(cwd) {
+  return revision(cwd, "MERGE_HEAD");
+}
+async function indexEntries(cwd) {
+  const { stdout } = await run2("git", ["ls-files", "--stage", "-z"], { cwd, timeout: 6e4, maxBuffer: 50 * 1024 * 1024 });
+  const entries = {};
+  for (const line of stdout.split("\0")) {
+    const match = line.match(/^(\d+) ([0-9a-f]+) (\d)\t(.*)$/s);
+    if (match && match[3] === "0") entries[match[4]] = `${match[1]} ${match[2]}`;
+  }
+  return entries;
+}
+async function conflictMarkers(cwd, paths) {
+  const present = paths.filter((path) => existsSync9(insideRepo(cwd, path)));
+  if (present.length === 0) return [];
+  try {
+    const { stdout } = await run2("git", ["grep", "--no-index", "-n", "-I", "-E", "^(<{7}|>{7}|\\|{7}) ", "--", ...present], {
+      cwd,
+      timeout: 6e4,
+      maxBuffer: 10 * 1024 * 1024
+    });
+    return stdout.split("\n").filter(Boolean);
+  } catch (error51) {
+    const failure = error51;
+    if (failure.code === 1 && !failure.stderr?.trim()) return [];
+    throw new GitError(`git grep failed: ${summarize(failure.stderr ?? failure.message ?? "")}`, failure.stderr ?? "");
+  }
+}
+async function stage(cwd, paths) {
+  if (paths.length > 0) await git2(cwd, ["add", "-A", "--", ...paths]);
+}
+async function treeOf(cwd, commit2) {
+  return git2(cwd, ["rev-parse", "--verify", `${commit2}^{tree}`]);
+}
+async function indexTree(cwd) {
+  return git2(cwd, ["write-tree"]);
+}
+async function workingTree(cwd, exclude) {
+  const scratch = join13(mkdtempSync2(join13(tmpdir2(), "ss-index-")), "index");
+  try {
+    const real = await gitPath(cwd, "index");
+    if (existsSync9(real)) copyFileSync(real, scratch);
+    const env = { ...process.env, GIT_INDEX_FILE: scratch };
+    const options = { cwd, env, timeout: 12e4, maxBuffer: 10 * 1024 * 1024 };
+    const excluded = exclude.map((prefix) => `:(exclude,top)${prefix}`);
+    await run2("git", ["add", "-A", "--", ":/", ...excluded], options);
+    return (await run2("git", ["write-tree"], options)).stdout.trim();
+  } catch (error51) {
+    const failure = error51;
+    throw new GitError(`git add failed: ${summarize(failure.stderr ?? failure.message ?? "")}`, failure.stderr ?? "");
+  } finally {
+    rmSync6(dirname6(scratch), { recursive: true, force: true });
+  }
+}
+async function commitTree(cwd, branch, tree, parents, message) {
+  const sha = await git2(cwd, ["commit-tree", tree, ...parents.flatMap((parent) => ["-p", parent]), "-m", message]);
+  await git2(cwd, ["update-ref", "-m", "session-share: tested resolution", `refs/heads/${branch}`, sha, parents[0]]);
+  if (parents.length > 1) {
+    for (const name of ["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE"]) rmSync6(await gitPath(cwd, name), { force: true });
+  }
+  return sha;
+}
+async function snapshotWork(cwd, ref, exclude, message) {
+  const tree = await workingTree(cwd, exclude);
+  const head = await git2(cwd, ["rev-parse", "HEAD"]);
+  const sha = await git2(cwd, ["commit-tree", tree, "-p", head, "-m", message]);
+  await git2(cwd, ["update-ref", ref, sha]);
+  return sha;
+}
+async function logTouching(cwd, range, paths) {
+  try {
+    return (await git2(cwd, ["log", "--format=%h %an: %s", "-n", "10", range, "--", ...paths])).split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function setRef(cwd, ref, sha, expected) {
+  await git2(cwd, ["update-ref", ref, sha, ...expected ? [expected] : []]);
+}
+async function deleteRef(cwd, ref) {
+  await git2(cwd, ["update-ref", "-d", ref]).catch(() => void 0);
+}
+async function gitPath(cwd, name) {
+  return resolve4(cwd, await git2(cwd, ["rev-parse", "--git-path", name]));
 }
 async function openPullRequest(cwd, options) {
   try {
@@ -34389,15 +34528,26 @@ async function openPullRequest(cwd, options) {
   }
 }
 async function existingPullRequest(cwd, head) {
+  return (await openPullRequestFor(cwd, head))?.number ?? null;
+}
+async function openPullRequestFor(cwd, head) {
   try {
-    const { stdout } = await run2("gh", ["pr", "list", "--head", head, "--json", "number"], {
+    const { stdout } = await run2("gh", ["pr", "list", "--head", head, "--state", "open", "--json", "number,isDraft"], {
       cwd,
       timeout: 3e4
     });
     const parsed = JSON.parse(stdout);
-    return parsed[0]?.number ?? null;
+    return parsed[0] ? { number: parsed[0].number, draft: Boolean(parsed[0].isDraft) } : null;
   } catch {
     return null;
+  }
+}
+async function readyPullRequest(cwd, number4) {
+  try {
+    await run2("gh", ["pr", "ready", String(number4)], { cwd, timeout: 3e4 });
+    return true;
+  } catch {
+    return false;
   }
 }
 async function addWorktree(cwd, path, branch, from) {
@@ -34500,6 +34650,54 @@ async function repoRemote(cwd) {
 }
 function titleCase(value) {
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+// packages/plugin/src/integration.ts
+import { execFile as execFile4 } from "node:child_process";
+import { existsSync as existsSync10, mkdirSync as mkdirSync13, readFileSync as readFileSync11, rmSync as rmSync7, writeFileSync as writeFileSync12 } from "node:fs";
+import { dirname as dirname7 } from "node:path";
+var MAX_ROUNDS = 3;
+var MAX_CHECKS = 5;
+var ACCEPTANCE_TIMEOUT_MS = 30 * 6e4;
+var backupRef = (slug, taskId) => `refs/session-share/${slug}/${taskId}/original`;
+var unpublishedRef = (slug, taskId) => `refs/session-share/${slug}/${taskId}/unpublished`;
+var savedRef = (slug, taskId, round) => `refs/session-share/${slug}/${taskId}/attempt-${round}`;
+async function file2(root, taskId) {
+  return gitPath(root, `session-share/integration-${taskId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+}
+async function readIntegration(root, taskId) {
+  const path = await file2(root, taskId);
+  if (!existsSync10(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync11(path, "utf8"));
+    if (parsed.taskId !== taskId) return null;
+    return parsed.version === 2 ? parsed : { version: Number(parsed.version) || 0, legacy: true };
+  } catch {
+    return { version: 0, legacy: true };
+  }
+}
+async function writeIntegration(root, state) {
+  const path = await file2(root, state.taskId);
+  mkdirSync13(dirname7(path), { recursive: true });
+  writeFileSync12(path, `${JSON.stringify(state, null, 2)}
+`);
+}
+async function clearIntegration(root, taskId) {
+  rmSync7(await file2(root, taskId), { force: true });
+}
+function runAcceptance(cwd, command, timeout = ACCEPTANCE_TIMEOUT_MS) {
+  return new Promise((resolve6) => {
+    execFile4("/bin/sh", ["-c", command], { cwd, timeout, maxBuffer: 64 * 1024 * 1024 }, (error51, stdout, stderr) => {
+      const output = `${stdout}${stderr}`.trim().slice(-1500);
+      if (!error51) return resolve6({ passed: true, exitCode: 0, output });
+      const code = error51.code;
+      resolve6({
+        passed: false,
+        exitCode: typeof code === "number" ? code : -1,
+        output: output || error51.message.slice(-1500)
+      });
+    });
+  });
 }
 
 // packages/plugin/src/tools-git.ts
@@ -34654,7 +34852,7 @@ Commit or stash them first \u2014 landing the contract switches branches.`
       const branch = contractBranch(state.session.slug);
       const files = splits.flatMap((split) => split.contract.files);
       const summary = splits.map((split) => split.contract.summary).join("\n\n");
-      for (const file2 of files) insideRepo(root, file2.path);
+      for (const file3 of files) insideRepo(root, file3.path);
       await checkoutBranch(root, branch, state.session.repo.baseBranch);
       const written = await writeFiles(root, files);
       const sha = await commit(root, written, `chore(contract): ${state.session.title.toLowerCase()}`.slice(0, 72) + `
@@ -34715,7 +34913,7 @@ Tasks land on this branch as they finish.`,
   server.registerTool(
     "ss_done",
     {
-      description: "Finish a task: commit everything under its owned paths, push, open a pull request, and merge it into the contract branch so whatever was waiting on it becomes claimable.",
+      description: "Finish a task: commit everything under its owned paths, push, open a pull request, and merge it into the contract branch so whatever was waiting on it becomes claimable. If the contract has moved under it, the contract is merged into your task branch, uncommitted. Where it conflicts, resolve the files and call this again; either way this runs the acceptance command itself on exactly that tree, commits the merge only if it passes, and lands it. Bounded: repeated failure stops and is escalated to the room.",
       inputSchema: {
         taskId: external_exports.string(),
         summary: external_exports.string().max(500).describe('One line for the commit message, ideally "<type>(<task-id>): <subject>"; otherwise filed as feat(<task-id>)'),
@@ -34725,124 +34923,191 @@ Tasks land on this branch as they finish.`,
             paths: external_exports.array(external_exports.string().min(1)).min(1).describe("Exactly the files in this commit")
           })
         ).optional().describe("Land the work as several atomic commits, in this order. Anything under the task left over goes in a final commit from summary."),
-        force: external_exports.boolean().default(false).describe("Land it even though the acceptance command has not passed")
+        force: external_exports.boolean().default(false).describe("Land it even though the acceptance command has not passed. Ignored while integrating with the contract: that is always tested here"),
+        integration: external_exports.enum(["abort", "retry"]).optional().describe(
+          "abort: give up on a conflict you cannot resolve safely -- your edits are kept under a ref, the merge is undone, and the room is told. retry: resume once stopped, which works only after a person has written in the room about this task since; never ask for that yourself"
+        )
       }
     },
-    async ({ taskId, summary, force, commits }) => {
-      const config3 = ctx.config();
-      const root = await ctx.repoRoot();
-      const preferences = readPreferences();
-      const state = await ctx.snapshot(config3);
-      const task = state.tasks.find((t) => t.id === taskId);
-      if (!task) throw new Error(`No task "${taskId}" in this session.`);
-      if (task.ownerId !== config3.participantId) throw new Error(`You do not hold "${taskId}".`);
-      if (task.state === "merged") return ctx.text(`"${taskId}" is already merged into the contract.`);
+    async (input) => ctx.text(await finish(input))
+  );
+  async function finish({
+    taskId,
+    summary,
+    force,
+    commits,
+    integration
+  }) {
+    const config3 = ctx.config();
+    const root = await ctx.repoRoot();
+    const preferences = readPreferences();
+    const state = await ctx.snapshot(config3);
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (!task) throw new Error(`No task "${taskId}" in this session.`);
+    if (task.ownerId !== config3.participantId) throw new Error(`You do not hold "${taskId}".`);
+    if (task.state === "merged") return `"${taskId}" is already merged into the contract.`;
+    const branch = taskBranch(state.session.slug, taskId);
+    const contract = contractBranch(state.session.slug);
+    const granted = (state.handoffs ?? []).filter(
+      (handoff) => handoff.status === "granted" && handoff.requesterId === config3.participantId && (handoff.requesterTaskId === null || handoff.requesterTaskId === taskId)
+    ).map((handoff) => handoff.path);
+    const paths = [...task.ownedPaths, ...granted];
+    const job = {
+      ctx,
+      config: config3,
+      root,
+      slug: state.session.slug,
+      taskId,
+      branch,
+      contract,
+      paths,
+      test: task.acceptance.testCommand,
+      summary
+    };
+    const recorded = await readIntegration(root, taskId);
+    if (recorded && "legacy" in recorded) {
+      return [
+        `An integration record for "${taskId}" from an older session-share (version ${recorded.version}) is in this checkout.`,
+        "It may describe a conflict resolution that was committed untested, so nothing is landed on it.",
+        `A person should look at ${branch}, and remove .git/session-share/integration-${taskId}.json once they have.`
+      ].join("\n");
+    }
+    let underway = recorded;
+    const elsewhere = underway && (underway.slug !== job.slug || underway.branch !== branch || underway.contract !== contract);
+    if (integration === "abort") return abandon(job, underway, Boolean(elsewhere));
+    if (elsewhere) {
+      return [
+        `The integration recorded for "${taskId}" is for ${underway.branch} into ${underway.contract}, not this session.`,
+        'Nothing was landed on it. Call ss_done with integration: "abort" to clear it; no commits are touched.'
+      ].join("\n");
+    }
+    if (underway?.phase === "escalated") {
+      if (integration !== "retry") return escalated(job, underway);
+      const resumed = await resume(job, underway, state);
+      if (typeof resumed === "string") return resumed;
+      underway = resumed;
+    }
+    let sha = null;
+    if (underway) {
+      const outcome = await recover(job, underway);
+      if (typeof outcome === "string") return outcome;
+      underway = outcome;
+      const moved = await drifted(job, underway);
+      if (moved) return moved;
+      sha = underway.tested.sha;
+    } else {
       if (!force && !task.lastTest?.passed) {
-        return ctx.text(
-          [
-            task.lastTest ? `"${taskId}" last reported a FAILING acceptance command:` : `"${taskId}" has not reported an acceptance result yet:`,
-            `  ${task.acceptance.testCommand}`,
-            task.lastTest?.summary ? `  ${task.lastTest.summary}` : "",
-            "",
-            "Run it, report the outcome with ss_report_test, and try again.",
-            "If it genuinely should land anyway, call this with force: true and say why in chat."
-          ].filter(Boolean).join("\n")
-        );
+        return [
+          task.lastTest ? `"${taskId}" last reported a FAILING acceptance command:` : `"${taskId}" has not reported an acceptance result yet:`,
+          `  ${task.acceptance.testCommand}`,
+          task.lastTest?.summary ? `  ${task.lastTest.summary}` : "",
+          "",
+          "Run it, report the outcome with ss_report_test, and try again.",
+          "If it genuinely should land anyway, call this with force: true and say why in chat."
+        ].filter(Boolean).join("\n");
       }
-      const branch = taskBranch(state.session.slug, taskId);
-      const contract = contractBranch(state.session.slug);
-      const granted = (state.handoffs ?? []).filter(
-        (handoff) => handoff.status === "granted" && handoff.requesterId === config3.participantId && (handoff.requesterTaskId === null || handoff.requesterTaskId === taskId)
-      ).map((handoff) => handoff.path);
-      const paths = [...task.ownedPaths, ...granted];
       const foreign = await foreignChanges(root, paths, OWN_ARTIFACTS);
       if (foreign.length > 0) {
-        return ctx.text(
-          [
-            `These changes are outside "${taskId}" and would block switching branches:`,
-            ...foreign.slice(0, 10).map((path) => `  ${path}`),
-            "",
-            "They are not part of this task, so they are not committed with it. Commit them elsewhere, stash them, or unstage them, then finish again."
-          ].join("\n")
-        );
+        return [
+          `These changes are outside "${taskId}" and would block switching branches:`,
+          ...foreign.slice(0, 10).map((path) => `  ${path}`),
+          "",
+          "They are not part of this task, so they are not committed with it. Commit them elsewhere, stash them, or unstage them, then finish again."
+        ].join("\n");
       }
       for (const planned of commits ?? []) {
         const problem = subjectProblem(planned.message.split("\n")[0].trim());
-        if (problem) return ctx.text(`${problem}
+        if (problem) return `${problem}
 
-Nothing was committed.`);
+Nothing was committed.`;
         const outside = planned.paths.filter((path) => !pathMatchesAny(path, paths));
         if (outside.length > 0) {
-          return ctx.text(`These paths are outside "${taskId}": ${outside.join(", ")}
+          return `These paths are outside "${taskId}": ${outside.join(", ")}
 
-Nothing was committed.`);
+Nothing was committed.`;
         }
       }
       await checkoutBranch(root, branch, contract);
-      let sha = null;
       for (const planned of commits ?? []) {
         const [subject, ...body] = planned.message.split("\n");
         sha = await commit(root, planned.paths, taskMessage(taskId, subject.trim(), body.join("\n"))) ?? sha;
       }
       sha = await commit(root, paths, taskMessage(taskId, taskSubject(taskId, summary))) ?? sha;
-      const pushed = preferences.push ? await push(root, branch) : false;
-      let prNumber = null;
-      if (preferences.openPullRequests && pushed) {
-        prNumber = await existingPullRequest(root, branch) ?? await openPullRequest(root, {
-          head: branch,
-          base: contract,
-          title: `${taskId}: ${task.title}`,
-          body: `${task.intent}
+    }
+    const pushed = preferences.push ? await push(root, branch) : false;
+    let prNumber = null;
+    if (preferences.openPullRequests && pushed) {
+      prNumber = await existingPullRequest(root, branch) ?? await openPullRequest(root, {
+        head: branch,
+        base: contract,
+        title: `${taskId}: ${task.title}`,
+        body: `${task.intent}
 
 Proven by \`${task.acceptance.testCommand}\`.`
-        });
-        if (prNumber) {
-          await runCommand(config3, { type: "task.branch", taskId, branch, prNumber });
-        }
+      });
+      if (prNumber) {
+        await runCommand(config3, { type: "task.branch", taskId, branch, prNumber });
       }
-      if (preferences.push && await updateLocalBranch(root, contract) === "diverged") {
-        const caughtUp = await mergeInto(root, contract, `origin/${contract}`);
-        if (!caughtUp.merged) {
-          await checkoutBranch(root, branch, contract);
-          return ctx.text(
-            [
-              `${contract} has moved on and your local copy cannot be merged with it:`,
-              ...caughtUp.conflicts.map((path) => `  ${path}`),
-              "",
-              "Run /ss:sync, resolve that, then finish again."
-            ].join("\n")
-          );
-        }
-      }
-      const merge2 = await mergeInto(root, contract, branch);
-      if (!merge2.merged) {
-        await checkoutBranch(root, branch, contract);
-        return ctx.text(
-          [
-            `Committed${sha ? ` (${sha.slice(0, 7)})` : ""} and pushed, but the merge into ${contract} conflicts:`,
-            ...merge2.conflicts.map((path) => `  ${path}`),
-            "",
-            "The merge was aborted, so nothing is half-applied and you are back on your branch.",
-            "A conflict here means two tasks touched the same file, which the split was supposed to prevent \u2014",
-            "say so in chat before resolving it, because the seam is probably in the wrong place."
-          ].join("\n")
-        );
-      }
-      if (preferences.push) await push(root, contract);
-      const { unblocked } = await runCommand(config3, { type: "task.merged", taskId });
-      await checkoutBranch(root, contract, state.session.repo.baseBranch);
-      return ctx.text(
-        [
-          `${taskId} is merged into ${contract}.`,
-          sha ? `  commit ${sha.slice(0, 7)}` : "  nothing new to commit",
-          prNumber ? `  PR #${prNumber}` : "",
-          pushed ? "  pushed" : "  not pushed",
-          "",
-          unblocked.length > 0 ? `Unblocked: ${unblocked.join(", ")}. Run /ss:next to take one.` : "Nothing was waiting on it. Run /ss:next for whatever is ready."
-        ].filter(Boolean).join("\n")
-      );
     }
-  );
+    if (preferences.push && await updateLocalBranch(root, contract) === "diverged") {
+      return [
+        `${contract} here has commits origin does not, and origin has commits it does not.`,
+        `Nothing was merged into it. Your work is committed on ${branch}${pushed ? " and pushed" : ""}.`,
+        `Run /ss:sync and bring ${contract} level with origin by hand, then finish again.`
+      ].join("\n");
+    }
+    const before = await revision(root, contract);
+    if (!before) throw new Error(`There is no ${contract} here to land on. Run /ss:sync first.`);
+    if (!await isAncestor(root, before, branch)) {
+      const round = await conflicted(job, underway, before, sha);
+      return round === AGAIN ? finish({ taskId, summary, force, commits }) : round;
+    }
+    if (underway) {
+      const moved = await drifted(job, underway);
+      if (moved) return moved;
+    }
+    const merge2 = await mergeInto(root, contract, branch);
+    if (!merge2.merged) {
+      await checkoutBranch(root, branch, contract);
+      throw new Error(`${branch} could not be merged into ${contract}, which it already contains: ${merge2.conflicts.join(", ")}`);
+    }
+    if (preferences.push) {
+      const published = await publish(root, contract);
+      if (published !== "pushed") {
+        const made = await revision(root, contract);
+        await checkoutBranch(root, branch, contract);
+        if (made) await setRef(root, unpublishedRef(job.slug, taskId), made);
+        await setRef(root, `refs/heads/${contract}`, before, made ?? void 0);
+        if ("moved" in published) {
+          const round = await conflicted(job, underway, published.moved, sha);
+          return round === AGAIN ? finish({ taskId, summary, force, commits }) : round;
+        }
+        return [
+          `${taskId} merged into ${contract} here, but origin would not take it: ${published.error}`,
+          "",
+          `Your work is committed on ${branch}${pushed ? " and pushed" : ""}; the local ${contract} is back where it was`,
+          `and the unpublished merge is kept at ${unpublishedRef(job.slug, taskId)}. Nothing is lost.`,
+          "Call ss_done again to retry; if it keeps failing, it is not a conflict -- check access to origin."
+        ].join("\n");
+      }
+    }
+    const { unblocked } = await runCommand(config3, { type: "task.merged", taskId });
+    if (underway) {
+      await clearIntegration(root, taskId);
+      await deleteRef(root, backupRef(job.slug, taskId));
+    }
+    await deleteRef(root, unpublishedRef(job.slug, taskId));
+    await checkoutBranch(root, contract, state.session.repo.baseBranch);
+    return [
+      `${taskId} is merged into ${contract}.`,
+      sha ? `  commit ${sha.slice(0, 7)}` : "  nothing new to commit",
+      underway?.tested ? `  integrated with ${contract} and tested here: \`${underway.tested.command}\` passed on exactly that commit` : "",
+      prNumber ? `  PR #${prNumber}` : "",
+      pushed ? "  pushed" : "  not pushed",
+      "",
+      unblocked.length > 0 ? `Unblocked: ${unblocked.join(", ")}. Run /ss:next to take one.` : "Nothing was waiting on it. Run /ss:next for whatever is ready."
+    ].filter(Boolean).join("\n");
+  }
   server.registerTool(
     "ss_sync",
     {
@@ -34896,6 +35161,26 @@ You are still on ${here}. Run \`git merge ${contract}\` there if you need what l
           `${contract} has diverged from origin. Run /ss:sync and merge origin/${contract} into it before shipping.`
         );
       }
+      const head = await revision(root, `refs/heads/${contract}`);
+      if (!head) return ctx.text(`There is no ${contract} here to ship. Run /ss:sync first.`);
+      const tickets = state.tickets ?? [];
+      const live = tickets.filter((ticket) => !ticket.mergedAt && state.tasks.some((task) => task.ticketId === ticket.id));
+      const unproven = live.filter((ticket) => ticket.state !== "review" || !verificationHolds(ticket.verification, head));
+      const loose = state.tasks.filter((task) => !task.ticketId || !tickets.some((ticket) => ticket.id === task.ticketId));
+      const vouched = live.length > unproven.length;
+      if (unproven.length > 0 || loose.length > 0 || !vouched) {
+        return ctx.text(
+          [
+            `Not shipped. ${contract} is at ${head.slice(0, 7)}, and not everything in it has passed a run of that commit:`,
+            ...unproven.map((ticket) => `  "${ticket.title}" -- ${unshippable(ticket, head)}`),
+            ...loose.map((task) => `  ${task.id} -- in no ticket, so no assembled run of it was ever recorded`),
+            ...live.length === 0 && loose.length === 0 ? ["  nothing in it belongs to a ticket that has been run assembled"] : [],
+            "",
+            `Check out ${contract}, run the assembled thing end to end, and report it with ss_ticket_verified;`,
+            "a failure goes back to whoever built the broken part. Then ship again."
+          ].join("\n")
+        );
+      }
       if (preferences.push) await push(root, contract);
       if (!preferences.openPullRequests) {
         return ctx.text(
@@ -34908,17 +35193,359 @@ You are still on ${here}. Run \`git merge ${contract}\` there if you need what l
         "## What landed",
         ...state.tasks.map((task) => `- **${task.id}** \u2014 ${task.title} (\`${task.acceptance.testCommand}\`)`)
       ].join("\n");
-      const prNumber = await existingPullRequest(root, contract) ?? await openPullRequest(root, {
+      const existing = await openPullRequestFor(root, contract);
+      const prNumber = existing?.number ?? await openPullRequest(root, {
         head: contract,
         base: state.session.repo.baseBranch,
         title: state.session.title,
         body
       });
+      const stillDraft = existing?.draft ? !await readyPullRequest(root, existing.number) : false;
       return ctx.text(
-        prNumber ? `PR #${prNumber}: ${state.session.title} \u2014 ${state.tasks.length} tasks, ${contract} \u2192 ${state.session.repo.baseBranch}.` : `Everything is merged into ${contract}. Open the PR yourself; gh could not (not installed, not authenticated, or no remote).`
+        !prNumber ? `Everything is merged into ${contract}. Open the PR yourself; gh could not (not installed, not authenticated, or no remote).` : [
+          `PR #${prNumber}: ${state.session.title} \u2014 ${state.tasks.length} tasks, ${contract} \u2192 ${state.session.repo.baseBranch}, at ${head.slice(0, 7)}.`,
+          existing?.draft ? stillDraft ? `It is still a draft: gh could not mark it ready. Mark #${prNumber} ready for review on GitHub.` : "It was a draft from landing the contract; it is now ready for review." : "",
+          `Record it with ss_ticket_shipped. It merges only at ${head.slice(0, 7)}: anything pushed after needs another run.`
+        ].filter(Boolean).join("\n")
       );
     }
   );
+}
+function unshippable(ticket, head) {
+  const run4 = ticket.verification;
+  if (!run4) return "never run assembled";
+  if (!run4.passed) return "its last run failed";
+  if (!run4.commitSha) return "its pass is from before runs named the commit they ran";
+  if (run4.stale) return "its work changed after it passed";
+  if (run4.commitSha !== head) return `it passed at ${run4.commitSha.slice(0, 7)}, not at this commit`;
+  return ticket.needsHuman && !ticket.humanCheck?.passed ? "it is waiting for a person to look" : `it is in ${ticket.state}`;
+}
+var AGAIN = /* @__PURE__ */ Symbol("again");
+async function conflicted(job, prior, contractSha, committed) {
+  const { root, branch, contract } = job;
+  await checkoutBranch(root, branch, contract);
+  const taskHead = await revision(root, "HEAD");
+  const original = prior?.original ?? taskHead;
+  if (!prior) await setRef(root, backupRef(job.slug, job.taskId), original);
+  const round = {
+    version: 2,
+    slug: job.slug,
+    taskId: job.taskId,
+    branch,
+    contract,
+    original,
+    taskHead,
+    contractHead: contractSha,
+    conflicts: [],
+    auto: {},
+    phase: "merging",
+    tested: null,
+    // Carried over, never restarted: only a person resets the count.
+    rounds: (prior?.rounds ?? 0) + 1,
+    checks: 0,
+    reason: null,
+    escalatedAt: null,
+    savedRef: null,
+    startedAt: Date.now()
+  };
+  if (round.rounds > MAX_ROUNDS) {
+    return escalate(job, round, `${contract} has moved under it ${MAX_ROUNDS} times running, so the seam is probably in the wrong place`);
+  }
+  const merge2 = await beginMerge(root, contractSha);
+  await writeIntegration(root, { ...round, conflicts: merge2.conflicts, auto: await indexEntries(root) });
+  if (merge2.merged) return AGAIN;
+  const theirs = await logTouching(root, `${taskHead}..${contractSha}`, merge2.conflicts);
+  return [
+    `${job.taskId} is committed${committed ? ` (${committed.slice(0, 7)})` : ""}, but it conflicts with what has landed on ${contract}:`,
+    ...merge2.conflicts.map((path) => `  ${path}`),
+    "",
+    `${contract} is untouched. Instead it (${contractSha.slice(0, 7)}) is being merged into your own branch, ${branch},`,
+    `uncommitted, and the conflicts are waiting in those files for you. Round ${round.rounds} of ${MAX_ROUNDS}.`,
+    ...theirs.length > 0 ? ["", "What landed there and touches them:", ...theirs.map((line) => `  ${line}`)] : [],
+    "",
+    "Resolve it now, without waiting to be asked:",
+    "1. Read each conflicted file and both sides of it (`git diff`, `git log -p MERGE_HEAD -- <file>`) and work out what each side meant.",
+    "2. Edit it so both intents survive. Do not take a side wholesale (`git checkout --ours/--theirs`) unless the other is truly superseded, and then say so in chat.",
+    "3. Change only the conflicted files and your own task's files. Do not commit, and do not run git merge, reset or commit yourself.",
+    `4. Call ss_done again with the same taskId. It checks no markers are left and nothing else moved, runs \`${job.test}\``,
+    "   itself on exactly that tree, and only if it passes commits the merge and lands it. If it fails, nothing is",
+    "   committed and your edits stay: fix them and call ss_done again.",
+    "",
+    `Bounded: ${MAX_CHECKS} failed attempts in a round, or ${MAX_ROUNDS} rounds, and it stops for a person with your edits kept.`,
+    'If you cannot tell how the two should fit, do not guess: call ss_done with integration: "abort".',
+    `Your branch from before this: ${original.slice(0, 7)}, kept at ${backupRef(job.slug, job.taskId)}.`
+  ].join("\n");
+}
+async function recover(job, state) {
+  const { root } = job;
+  const [here, head, merging] = await Promise.all([currentBranch(root), revision(root, "HEAD"), mergeHead(root)]);
+  if (here !== state.branch) return escalate(job, state, `the checkout moved to ${here}, off ${state.branch}, mid-integration`);
+  if (state.phase === "merging") {
+    if (head !== state.taskHead || merging !== state.contractHead) {
+      return escalate(
+        job,
+        state,
+        merging ? `the merge in progress is of ${merging.slice(0, 7)}, not the ${state.contractHead.slice(0, 7)} it started` : head !== state.taskHead ? `${state.branch} moved to ${head?.slice(0, 7) ?? "nothing"} while its merge was being resolved` : "the merge it started is no longer in progress, undone or committed by hand"
+      );
+    }
+  } else if (merging || !head || !state.tested || !await isAncestor(root, state.tested.sha, head)) {
+    return escalate(job, state, `${state.branch} no longer holds the tested commit ${state.tested?.sha.slice(0, 7) ?? ""} as it was left`);
+  }
+  const markers = await conflictMarkers(root, state.conflicts);
+  if (markers.length > 0) {
+    return handBack(job, state, ["Conflict markers are still in:", ...markers.slice(0, 20).map((line) => `  ${line}`)]);
+  }
+  const allowed = (path) => state.conflicts.includes(path) || pathMatchesAny(path, job.paths);
+  const own = (path) => OWN_ARTIFACTS.some((prefix) => path.startsWith(prefix));
+  const changed = (state.phase === "merging" ? await unstagedChanges(root) : await changedFiles(root)).filter((path) => !own(path));
+  const strays = changed.filter((path) => !allowed(path));
+  await stage(root, changed.filter(allowed));
+  const now = await indexEntries(root);
+  const moved = state.phase === "merging" ? [.../* @__PURE__ */ new Set([...Object.keys(now), ...Object.keys(state.auto)])].filter(
+    (path) => now[path] !== state.auto[path] && !allowed(path) && !own(path)
+  ) : [];
+  const outside = [.../* @__PURE__ */ new Set([...moved, ...strays])];
+  if (outside.length > 0) {
+    return handBack(job, state, [
+      "These changed outside the conflict and outside your task:",
+      ...outside.slice(0, 20).map((path) => `  ${path}`),
+      "",
+      "Undo those edits, or move untracked files out of the checkout. If one of them really has to change",
+      'for the two sides to fit, that is not yours to decide alone: call ss_done with integration: "abort" and say why.'
+    ]);
+  }
+  const unmerged = await unmergedFiles(root);
+  if (unmerged.length > 0) {
+    return handBack(job, state, ["Still unmerged:", ...unmerged.map((path) => `  ${path}`)]);
+  }
+  const tree = await indexTree(root);
+  if (await workingTree(root, OWN_ARTIFACTS) !== tree) {
+    return handBack(job, state, ["The files on disk are not what would be committed. Run git status, and leave only the resolution."]);
+  }
+  const headTree = await treeOf(root, head);
+  if (state.phase === "tested" && head === state.tested.sha && tree === state.tested.tree && state.tested.command === job.test) {
+    return state;
+  }
+  const ran = await runAcceptance(root, job.test);
+  const [headAfter, mergingAfter, treeAfter, onDisk] = await Promise.all([
+    revision(root, "HEAD"),
+    mergeHead(root),
+    indexTree(root).catch(() => null),
+    workingTree(root, OWN_ARTIFACTS).catch(() => null)
+  ]);
+  const intact = headAfter === head && mergingAfter === merging && treeAfter === tree && onDisk === tree;
+  const passed = ran.passed && intact;
+  await runCommand(job.config, {
+    type: "task.testResult",
+    taskId: job.taskId,
+    result: {
+      passed,
+      command: job.test,
+      exitCode: ran.exitCode,
+      summary: (intact ? ran.output : `It changed what it was testing, so it proves nothing. ${ran.output}`).slice(0, 2e3) || "(no output)",
+      ranAt: Date.now()
+    }
+  }).catch(() => void 0);
+  if (!intact) {
+    return handBack(job, state, [
+      `\`${job.test}\` changed what it was testing while it ran:`,
+      ...headAfter !== head ? [`  HEAD moved from ${head?.slice(0, 7)} to ${headAfter?.slice(0, 7) ?? "nothing"}`] : [],
+      ...mergingAfter !== merging ? ["  the merge in progress changed"] : [],
+      ...treeAfter !== tree || onDisk !== tree ? ["  files that would be committed changed"] : [],
+      "",
+      "A run of one tree says nothing about another, so nothing was committed. Put the files back as they were",
+      "resolved (git status shows what moved), make sure the command does not write tracked files, and call ss_done again."
+    ]);
+  }
+  if (!ran.passed) {
+    return handBack(job, state, [
+      `\`${job.test}\` FAILED (exit ${ran.exitCode}) on the resolution, so it was not committed:`,
+      ...ran.output.split("\n").slice(-25).map((line) => `  ${line}`),
+      "",
+      "The merge is still in progress with your edits in place. Fix it in the conflicted files or your own,",
+      "and call ss_done again: it runs the command again itself. force does not apply here."
+    ]);
+  }
+  const tip = merging !== null ? await commitTree(root, state.branch, tree, [head, merging], `Merge ${state.contract} into ${state.branch}`) : tree === headTree ? head : await commitTree(root, state.branch, tree, [head], taskMessage(job.taskId, taskSubject(job.taskId, job.summary)));
+  const next = { ...state, phase: "tested", tested: { sha: tip, tree, command: job.test }, checks: 0 };
+  await writeIntegration(root, next);
+  return next;
+}
+async function drifted(job, state) {
+  const { root } = job;
+  const tested = state.tested;
+  const [here, head, merging] = await Promise.all([currentBranch(root), revision(root, "HEAD"), mergeHead(root)]);
+  if (here !== state.branch || head !== tested.sha || merging) {
+    return escalate(
+      job,
+      state,
+      here !== state.branch ? `the checkout moved to ${here}, off ${state.branch}, before the tested commit landed` : merging ? `a merge of ${merging.slice(0, 7)} was begun on ${state.branch} before the tested commit landed` : `${state.branch} moved past the tested commit ${tested.sha.slice(0, 7)} before it landed`
+    );
+  }
+  const [tree, onDisk] = await Promise.all([
+    indexTree(root).catch(() => null),
+    workingTree(root, OWN_ARTIFACTS).catch(() => null)
+  ]);
+  if (tree === tested.tree && onDisk === tested.tree) return null;
+  return handBack(job, state, [
+    `Files changed after \`${tested.command}\` passed on ${tested.sha.slice(0, 7)} (git status shows which).`,
+    "That run says nothing about them, so the tested commit was not landed with them beside it, and they were not committed.",
+    "If they belong to the task, call ss_done again: it tests them first. Otherwise undo them and call ss_done again."
+  ]);
+}
+async function handBack(job, state, why) {
+  const checks = state.checks + 1;
+  if (checks >= MAX_CHECKS) {
+    return escalate(job, { ...state, checks }, `it still did not pass after ${checks} attempts`);
+  }
+  await writeIntegration(job.root, { ...state, checks });
+  return [
+    ...why,
+    "",
+    `Nothing was committed. ${MAX_CHECKS - checks} more attempt(s) in this round before it stops for a person -- or call ss_done with integration: "abort".`
+  ].join("\n");
+}
+async function abandon(job, state, elsewhere) {
+  if (!state) return `Nothing is being integrated for "${job.taskId}", so there is nothing to abort.`;
+  if (elsewhere) {
+    await clearIntegration(job.root, job.taskId);
+    return `Cleared a record of integrating ${state.branch} into ${state.contract}, which is not this task's. No commits were touched.`;
+  }
+  if (state.phase === "escalated") return escalated(job, state);
+  let kept = state;
+  if (state.phase === "merging") {
+    const merging = await mergeHead(job.root);
+    if (merging && merging === state.contractHead && await currentBranch(job.root) === state.branch) {
+      kept = await save(job, state);
+      if (kept.savedRef) await abortMerge(job.root).catch(() => void 0);
+    }
+  }
+  return escalate(job, kept, "the agent could not resolve the conflict safely and stopped");
+}
+async function save(job, state) {
+  if (state.savedRef) return state;
+  try {
+    const ref = savedRef(job.slug, job.taskId, state.rounds);
+    await snapshotWork(job.root, ref, OWN_ARTIFACTS, `session-share: uncommitted work on ${job.branch}, round ${state.rounds}`);
+    return { ...state, savedRef: ref };
+  } catch {
+    return state;
+  }
+}
+async function escalate(job, state, reason) {
+  const kept = await mergeHead(job.root) ? await save(job, state) : state;
+  const next = { ...kept, phase: "escalated", reason, escalatedAt: Date.now() };
+  await writeIntegration(job.root, next);
+  await runCommand(job.config, {
+    type: "chat.post",
+    body: [
+      `Integrating #${job.taskId} into ${job.contract} needs a person: ${reason}.`,
+      `Conflicted: ${state.conflicts.join(", ") || "none"}. Nothing untested was committed and nothing was landed; the work is on ${job.branch}${next.savedRef ? `, uncommitted edits kept at ${next.savedRef}` : ""}.`,
+      `When you have decided how it should go, say so here mentioning #${job.taskId}, then tell its agent to run ss_done with integration: "retry".`
+    ].join("\n"),
+    taskRef: job.taskId,
+    asAgent: true,
+    directive: false
+  }).catch(() => void 0);
+  return escalated(job, next);
+}
+function escalated(job, state) {
+  return [
+    `Integrating "${job.taskId}" is stopped for a person: ${state.reason ?? "it could not be resolved safely"}.`,
+    "Nothing untested was committed and nothing was landed.",
+    `Your work is on ${job.branch}; its commit from before any of this, ${state.original.slice(0, 7)}, is kept at ${backupRef(job.slug, job.taskId)}.`,
+    ...state.savedRef ? [`Every uncommitted edit in the checkout when it stopped is kept at ${state.savedRef}.`] : [],
+    "",
+    "Stop working on it. Do not resolve, commit, merge or reset anything for it, and do not ask to resume it",
+    `or post in the room on a person's behalf. ss_done with integration: "retry" resumes only after a person`,
+    `has written in the room about #${job.taskId} since it stopped; until then it refuses.`
+  ].join("\n");
+}
+async function resume(job, state, snapshot2) {
+  const since = state.escalatedAt ?? Infinity;
+  const said = (snapshot2.chat ?? []).some(
+    (message) => message.authorKind === "human" && message.createdAt > since && (message.taskRef === job.taskId || message.body.includes(`#${job.taskId}`))
+  );
+  if (!said) {
+    return [
+      `Not resumed. Nobody has written in the room about #${job.taskId} since it stopped, and resuming is a person's decision.`,
+      escalated(job, state)
+    ].join("\n\n");
+  }
+  const { root } = job;
+  const [here, head, merging] = await Promise.all([currentBranch(root), revision(root, "HEAD"), mergeHead(root)]);
+  const fresh = { reason: null, escalatedAt: null, rounds: 1, checks: 0, savedRef: null };
+  if (here === state.branch && merging && merging === state.contractHead && head === state.taskHead) {
+    const next = { ...state, ...fresh, phase: "merging", tested: null };
+    await writeIntegration(root, next);
+    return next;
+  }
+  if (here === state.branch && !merging && head && state.tested && await isAncestor(root, state.tested.sha, head)) {
+    const next = { ...state, ...fresh, phase: "tested" };
+    await writeIntegration(root, next);
+    return next;
+  }
+  if (merging) {
+    return `Not resumed: a merge of ${merging.slice(0, 7)} is in progress here that ss_done did not start. A person should finish or undo it (git status).`;
+  }
+  await clearIntegration(root, job.taskId);
+  return null;
+}
+async function publish(root, contract) {
+  let error51 = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await push(root, contract);
+      return "pushed";
+    } catch (failure) {
+      error51 = failure instanceof Error ? failure.message : String(failure);
+    }
+    try {
+      await fetch2(root);
+    } catch (failure) {
+      return { error: failure instanceof Error ? failure.message : String(failure) };
+    }
+    const [upstream, local] = await Promise.all([revision(root, `refs/remotes/origin/${contract}`), revision(root, `refs/heads/${contract}`)]);
+    if (upstream && local && !await isAncestor(root, upstream, local)) return { moved: upstream };
+  }
+  return { error: error51 };
+}
+async function verdictCommit(root, slug, passed) {
+  if (!passed) return { sha: null };
+  try {
+    return await assembledCommit(root, slug);
+  } catch (error51) {
+    return { problem: `Could not tell which commit ran: ${error51 instanceof Error ? error51.message : String(error51)}` };
+  }
+}
+async function assembledCommit(root, slug) {
+  const contract = contractBranch(slug);
+  const sha = await revision(root, `refs/heads/${contract}`);
+  if (!sha) return { problem: `There is no ${contract} in this checkout. Run ss_sync, check it out, run it, and report again.` };
+  const head = await revision(root, "HEAD");
+  if (head !== sha) {
+    return {
+      problem: `This checkout is at ${head?.slice(0, 7) ?? "no commit"}, not at ${contract} (${sha.slice(0, 7)}). A pass is recorded against the commit that ran: check out ${contract}, run it there, and report again.`
+    };
+  }
+  const modified = (await changedFiles(root)).filter((path) => !OWN_ARTIFACTS.some((prefix) => path.startsWith(prefix)));
+  if (modified.length > 0) {
+    return {
+      problem: [
+        `Files here are not as ${contract} has them, so what ran is not that commit as committed:`,
+        ...modified.slice(0, 10).map((path) => `  ${path}`),
+        "Put them back or remove them (or ignore them, if they are build output), run it again, and report again."
+      ].join("\n")
+    };
+  }
+  if (await hasRemote(root)) {
+    await fetch2(root);
+    const upstream = await revision(root, `refs/remotes/origin/${contract}`);
+    if (upstream && !await isAncestor(root, upstream, sha)) {
+      return { problem: `origin/${contract} has commits this checkout does not. Run ss_sync, run it again on what is there now, and report that.` };
+    }
+  }
+  return { sha };
 }
 
 // packages/plugin/src/mcp.ts
@@ -35048,7 +35675,7 @@ async function hostOnServer(root, server, described, given, issueRef) {
   if (!account) throw signInFirst(serverUrl);
   const credential = { authorization: `Bearer ${account.token}` };
   const { title, repo, slug, sameRepo } = described;
-  const resume = async (candidate) => {
+  const resume2 = async (candidate) => {
     if (!candidate) return null;
     try {
       const existing = await mintInvite(serverUrl, candidate, credential);
@@ -35063,12 +35690,12 @@ async function hostOnServer(root, server, described, given, issueRef) {
       return { invite: fresh.invite, resumed: false, slug: candidate };
     } catch (error51) {
       if (!String(error51).includes("is taken")) throw error51;
-      return resume(candidate);
+      return resume2(candidate);
     }
   };
   const attached = readConfig(root);
   const sameServer = attached ? originOf(attached.serverUrl) === serverUrl : false;
-  const created = (given?.trim() || !sameServer ? null : await resume(attached?.sessionRef)) ?? await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? await open(`${slug.slice(0, 26)}-${slugify2(account.githubLogin).slice(0, 13)}`);
+  const created = (given?.trim() || !sameServer ? null : await resume2(attached?.sessionRef)) ?? await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? await open(`${slug.slice(0, 26)}-${slugify2(account.githubLogin).slice(0, 13)}`);
   if (!created?.invite) {
     throw new Error(`Sessions named "${slug}" on ${serverUrl} belong to someone else. Pass a title to name this one.`);
   }
@@ -35151,7 +35778,7 @@ function createServer() {
           return sameRepo(existing.repo) ? { invite: existing.invite, resumed: true, slug: candidate } : null;
         }
       };
-      const resume = async (candidate) => {
+      const resume2 = async (candidate) => {
         if (!candidate) return null;
         try {
           const existing = await mintInvite(loopback, candidate);
@@ -35171,7 +35798,7 @@ function createServer() {
         return restored?.invite ? { invite: restored.invite, resumed: true, slug: restored.slug } : null;
       };
       const attached = readConfig(root);
-      const created = (given?.trim() ? null : await resume(attached?.sessionRef)) ?? (given?.trim() ? null : await resume(slugify2(basename2(root)))) ?? await restore() ?? await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? null;
+      const created = (given?.trim() ? null : await resume2(attached?.sessionRef)) ?? (given?.trim() ? null : await resume2(slugify2(basename2(root)))) ?? await restore() ?? await open(slug) ?? await open(`${slug.slice(0, 33)}-${shortHash(repo.remoteUrl)}`) ?? null;
       if (!created) {
         throw new Error(
           `Sessions named "${slug}" on this server belong to other repositories. Pass a title to name this one.`
@@ -35582,7 +36209,7 @@ function createServer() {
     async ({ ticketId, kind, files }) => {
       const cfg = config2();
       const attachments = [];
-      for (const file2 of files) attachments.push(await uploadPicture(cfg, resolve5(file2.path), kind, file2.caption ?? ""));
+      for (const file3 of files) attachments.push(await uploadPicture(cfg, resolve5(file3.path), kind, file3.caption ?? ""));
       await runCommand(cfg, { type: "ticket.attach", ticketId, attachments }, 15e3);
       return text(`Attached ${attachments.length} picture(s) to the ticket. They show on the board.`);
     }
@@ -35761,6 +36388,8 @@ function createServer() {
     },
     async ({ ticketId, passed, how, summary, broke, followUps }) => {
       const cfg = config2();
+      const assembled = await verdictCommit(await repoRoot(REPO_ROOT), (await snapshot(cfg)).session.slug, passed);
+      if ("problem" in assembled) return text(`Not recorded. ${assembled.problem}`);
       const result = await runCommand(cfg, {
         type: "ticket.verified",
         ticketId,
@@ -35768,14 +36397,15 @@ function createServer() {
         how,
         summary,
         broke: broke ?? [],
-        followUps: followUps ?? []
+        followUps: followUps ?? [],
+        commitSha: assembled.sha
       });
       const { ticket } = result;
       const reopened = ticket.verification?.broke ?? [];
       const filed = result.followUps.length ? `
 Filed as follow-up tickets: ${result.followUps.map((t) => `"${t.title}"`).join(", ")}.` : "";
       return text(
-        (passed ? `"${ticket.title}" verified. It is in review; open the PR with ss_ship.` : [
+        (passed ? `"${ticket.title}" verified at ${ticket.verification?.commitSha?.slice(0, 7) ?? "this commit"}. Open the PR with ss_ship -- it ships only that commit; anything landing after it needs another run.` : [
           `Recorded as broken, and the work is open again: ${reopened.join(", ") || "nothing to reopen"}.`,
           `Everyone who built "${ticket.title}" has been told what you saw and asked to fix it.`,
           "When the last fix lands you will be asked to run it again."

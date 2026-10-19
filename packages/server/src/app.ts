@@ -909,6 +909,10 @@ export function createApp(options: AppOptions = {}): App {
    * Merges a pull request from the board, with the host's GitHub sign-in.
    * Anyone with a seat in the session may press it -- the same people who can
    * already push to the branches -- and GitHub still applies its own rules.
+   *
+   * Only a ticket's pull request, and only at the commit its run passed on:
+   * the head is read from GitHub here, checked against the session, and the
+   * merge is pinned to it, so a push after the check is refused by GitHub.
    */
   fastify.post('/sessions/:ref/github/merge', async (request, reply) => {
     const sessionId = readable(request, reply)
@@ -920,7 +924,16 @@ export function createApp(options: AppOptions = {}): App {
     if (!parsed.success) return reply.code(400).send({ error: 'bad_request', message: parsed.error.message })
     const state = service.state(sessionId)
     if (!state.session) return reply.code(404).send({ error: 'not_found' })
-    const result = await github.merge(state.session.repo, parsed.data.number, parsed.data.method)
+    const pull = await github.pull(state.session.repo, parsed.data.number)
+    if (!pull) {
+      return reply.code(409).send({
+        error: 'conflict',
+        message: `Could not read PR #${parsed.data.number} from GitHub, so it cannot be checked, and is not merged.`,
+      })
+    }
+    const refusal = service.mergeRefusal(sessionId, pull)
+    if (refusal) return reply.code(409).send({ error: 'not_ready', message: refusal })
+    const result = await github.merge(state.session.repo, parsed.data.number, parsed.data.method, pull.headSha)
     if (!result.merged) return reply.code(409).send({ error: 'conflict', message: result.message })
     const tickets = service.recordMerged(sessionId, actor as ParticipantId | null, parsed.data.number, result.sha)
     return { ...result, tickets }
