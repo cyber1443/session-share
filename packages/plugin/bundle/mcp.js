@@ -33717,31 +33717,39 @@ var REMOTE_REF = `refs/remotes/origin/${LOG_BRANCH}`;
 var CHUNK = 1e3;
 function git(cwd, args, options = {}) {
   return new Promise((resolve6, reject) => {
+    const { input } = options;
     const child = spawn4("git", args, {
       cwd,
       env: { ...process.env, ...options.env },
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: [input === void 0 ? "ignore" : "pipe", "pipe", "pipe"]
     });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk) => stdout += chunk);
-    child.stderr.on("data", (chunk) => stderr += chunk);
+    let stdinError = null;
+    let exit = null;
+    let stdinOpen = Boolean(input !== void 0 && child.stdin);
+    const settle = () => {
+      if (!exit || stdinOpen) return;
+      const { code, signal } = exit;
+      if (code !== 0) reject(new Error(`git ${args[0]} failed: ${stderr.trim().split("\n").at(-1) || (signal ?? code)}`));
+      else if (stdinError) reject(new Error(`git ${args[0]} exited before reading all of its input: ${stdinError.message}`));
+      else resolve6(stdout.trim());
+    };
+    child.stdout?.on("data", (chunk) => stdout += chunk);
+    child.stderr?.on("data", (chunk) => stderr += chunk);
     child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve6(stdout.trim());
-      else reject(new Error(`git ${args[0]} failed: ${stderr.trim().split("\n").at(-1) ?? code}`));
+    child.on("close", (code, signal) => {
+      exit = { code, signal };
+      settle();
     });
-    child.stdin.end(options.input ?? "");
-  });
-}
-function gitBytes(cwd, args, input) {
-  return new Promise((resolve6, reject) => {
-    const child = spawn4("git", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    child.stdout.on("data", (chunk) => stdout += chunk);
-    child.on("error", reject);
-    child.on("close", (code) => code === 0 ? resolve6(stdout.trim()) : reject(new Error(`git ${args[0]} failed`)));
-    child.stdin.end(Buffer.from(input));
+    if (input !== void 0 && child.stdin) {
+      child.stdin.on("error", (error51) => stdinError = error51);
+      child.stdin.on("close", () => {
+        stdinOpen = false;
+        settle();
+      });
+      child.stdin.end(typeof input === "string" ? input : Buffer.from(input));
+    }
   });
 }
 async function readMirroredFiles(cwd, sessionId) {
@@ -33841,7 +33849,7 @@ async function pushLog(cwd, source, attempts = 3) {
         for (const id of newFiles) {
           const file3 = await source.files.read(id);
           if (!file3) continue;
-          const blob = await gitBytes(cwd, ["hash-object", "-w", "--stdin"], file3.bytes);
+          const blob = await git(cwd, ["hash-object", "-w", "--stdin"], { input: file3.bytes });
           await git(cwd, ["update-index", "--add", "--cacheinfo", `100644,${blob},${sessionDir(source.meta.sessionId)}/files/${id}`], { env });
           index.push({ id, name: file3.name, type: file3.type });
         }
