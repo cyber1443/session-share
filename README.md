@@ -6,11 +6,11 @@ Each dev keeps their own Claude account, their own quota and their own GitHub id
 
 ## The idea in one screen
 
-1. Anyone writes a **ticket** in the board's Plan column. Everyone else is told it exists and can **join** it. Joining is the only agreement there is — no approval follows.
-2. As soon as someone joins, a member's Claude reads the repo and proposes a **contract** — the shared types, schemas and stubs everything else will import — plus tasks that own disjoint file globs and are each provable by one command.
+1. Anyone writes a **ticket** in the board's Plan column. Everyone else is told it exists and can **join** it. Joining adds you to the ticket; it does not start work. A valid ticket split needs no later approval vote.
+2. Once the intended teammates have joined, someone presses **Start**. One person is enough. A member's Claude reads the repo and proposes a **contract** — the shared types, schemas and stubs everything else will import — plus tasks that own disjoint file globs and are each provable by one command.
 3. A **deterministic validator** rejects the split if two concurrently-runnable tasks own the same path, if it collides with another live ticket, if the graph has a cycle, or if a task has nothing to prove it. An LLM never decides whether two agents are about to collide. A valid split goes live immediately, shared out between whoever joined.
 4. Each dev claims a task and gets a **lease** on its paths. A `PreToolUse` hook denies any Edit or Write outside that lease, with the fix in the message. This is what makes two autonomous agents in one repo safe.
-5. Every task passing its own test says nothing about the pieces fitting together, so somebody **runs the assembled thing** — the browser, the simulator, whatever this project actually runs in — before it goes near a PR. A failing run reopens the tasks it names, and when the fix lands the run is asked for again. That loop repeats until it works.
+5. Every task passing its own test says nothing about the pieces fitting together, so the workflow asks somebody to **run the assembled thing** — the browser, the simulator, whatever this project actually runs in — before the ticket reaches review. A failing run reopens the tasks it names, and when the fix lands the run is asked for again. That loop repeats until it works.
 6. The cards move themselves. `plan → splitting → proposed → building → verify → review` follows what the agents have actually done; nothing is draggable, because a column you maintain by hand drifts from the truth the moment anyone is busy. Any card can be **deleted** at any stage by anyone — its tasks and their leases go with it, and nothing in git is touched.
 7. Everyone — humans and agents — shares one durable room, and the board shows the work live. The room is also a terminal: a message sent in **run** mode is delivered into the other participants' Claude Code and acted on there.
 
@@ -128,20 +128,31 @@ should dial.
 
 ### The whole loop
 
-Both of you have the repo cloned and are sitting on `main`. Then:
+Both of you have the repo cloned and are sitting on `main`. The current board-ticket flow is:
 
 | | |
 |---|---|
 | `/ss:host` | starts the server, opens a session for this repo, hands you one string to send. Work is tickets on the board, so the session needs no name |
 | `/ss:join ssx_…` | your teammate attaches their own clone |
-| `/ss:plan add dark mode`, or type the brief on the board | Claude reads the repo and proposes a contract plus tasks; the validator rejects overlaps before anyone sees them |
-| move cards, then approve, on the board | the split arrives balanced between you; both approve, or the lead if there are more than three. Each agent is then told what it owns |
-| `/ss:land` | creates `ss/<session>/contract` off `main`, commits the contract files, pushes, opens a draft PR. Only now is anything claimable |
+| create a ticket on the board, then join it | type the brief and let everyone who will work on it join. Joining alone does not start a split |
+| press **Start** on the ticket | Claude reads the repo and proposes a contract plus tasks. The validator checks the split; a valid split is assigned to the members and goes live without an approval vote |
+| `/ss:land` (the proposing agent is told to run this) | creates `ss/<session>/contract` off `main`, commits the contract files, pushes, opens a draft PR. Only after the contract lands are tasks claimable |
 | `/ss:next` (each) | you each get a different task, a lease over its files, **and your own branch** off the contract |
 | — work — | simultaneously. The lease gate blocks either agent from editing the other's files. The board shows both live |
 | `/ss:done` | runs the acceptance test, commits your owned paths, pushes, opens a PR, merges into the contract branch, and unblocks whatever was waiting |
 | `/ss:sync` | pulls what your teammate landed |
 | `/ss:ship` | opens the PR for the whole session: contract branch → `main` |
+
+For a board ticket, the agents are told to land the contract, claim their tasks,
+work, test and finish them. The commands above show the steps they carry out;
+you do not need to approve the split or manually run `/ss:next` to get them going.
+
+**The older, ticketless flow is different.** `/ss:plan add dark mode` proposes a
+split without a ticket. You can adjust its assignments on the board, then
+approve it: all present people approve in a room of up to three, or the lead
+approves in a larger room. Only after that approval do you run `/ss:land` and
+continue with `/ss:next`. This approval step applies to a proposal without a
+`ticketId`, not to the board-ticket flow above.
 
 Two ways to try that without involving anyone: `pnpm git-flow-demo` drives the
 whole loop against a throwaway remote and two clones and prints what happened,
