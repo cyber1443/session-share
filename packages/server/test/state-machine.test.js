@@ -13,6 +13,9 @@ import { createApp } from '../dist/index.js'
  */
 
 const REPO = { owner: 'acme', name: 'web', baseBranch: 'main', remoteUrl: 'x' }
+/** The contract-branch commit a run is reported against. */
+const HEAD = 'a'.repeat(40)
+const MOVED = 'b'.repeat(40)
 
 const contract = (path, contents = '') => ({
   summary: 'seam',
@@ -258,7 +261,7 @@ describe('reporting on the assembled thing', () => {
     s.run(a, { type: 'task.claim', taskId: 'one' })
     s.run(a, { type: 'task.merged', taskId: 'one' })
     s.fails(a, { type: 'ticket.shipped', ticketId: ticket.id, prNumber: 7 }, 'not_ready')
-    s.run(b, { type: 'ticket.verified', ticketId: ticket.id, passed: true, how: 'h', summary: 's' })
+    s.run(b, { type: 'ticket.verified', ticketId: ticket.id, passed: true, how: 'h', summary: 's', commitSha: HEAD })
     assert.equal(s.run(a, { type: 'ticket.shipped', ticketId: ticket.id, prNumber: 7 }).ticket.prNumber, 7)
   })
 })
@@ -723,7 +726,7 @@ describe('what a verification run turns up', () => {
       { title: 'Check tax rounding with finance' },
       { title: 'coupon field ignores whitespace' },
     ]
-    const result = s.run(a, { type: 'ticket.verified', ticketId: ticket.id, passed: true, how: 'playwright', summary: 'ok', followUps })
+    const result = s.run(a, { type: 'ticket.verified', ticketId: ticket.id, passed: true, how: 'playwright', summary: 'ok', followUps, commitSha: HEAD })
     assert.equal(result.followUps.length, 2, 'the repeated title is filed once')
     const filed = s.state().tickets.get(result.followUps[0].id)
     assert.equal(filed.followUpOf, ticket.id)
@@ -778,7 +781,7 @@ describe('a ticket that asks for a human look', () => {
     const a = s.join('alice')
     const b = s.join('bob')
     const ticket = verifiable(s, a, b)
-    s.run(a, { type: 'ticket.verified', ticketId: ticket.id, passed: true, how: 'playwright', summary: 'ok' })
+    s.run(a, { type: 'ticket.verified', ticketId: ticket.id, passed: true, how: 'playwright', summary: 'ok', commitSha: HEAD })
     assert.equal(s.state().ticketStateFor(ticket.id), 'verify', 'a passing run is not enough on its own')
     const shipNow = () => s.state().chat.filter((m) => m.directive && /ss_ship/.test(m.body)).length
     assert.equal(shipNow(), 0)
@@ -793,7 +796,7 @@ describe('a ticket that asks for a human look', () => {
     const a = s.join('alice')
     const b = s.join('bob')
     const ticket = verifiable(s, a, b)
-    s.run(a, { type: 'ticket.verified', ticketId: ticket.id, passed: true, how: 'playwright', summary: 'ok' })
+    s.run(a, { type: 'ticket.verified', ticketId: ticket.id, passed: true, how: 'playwright', summary: 'ok', commitSha: HEAD })
     s.run(b, { type: 'ticket.humanCheck', ticketId: ticket.id, passed: false, note: 'the button does nothing' })
     assert.equal(s.state().ticketStateFor(ticket.id), 'building')
     assert.equal(s.state().tasks.get('look-one').state, 'ready')
@@ -810,5 +813,171 @@ describe('a ticket that asks for a human look', () => {
     const directive = s.state().chat.filter((m) => m.directive).at(-1)
     assert.deepEqual(directive.mentions, [b.participantId])
     assert.match(directive.body, /ss_worktree/)
+  })
+})
+
+describe('a pass is about one commit', () => {
+  /** A ticket whose tasks have all landed, waiting in verify. */
+  function landed(s, a, b, ids = ['p-one', 'p-two']) {
+    const made = liveTicket(s, a, b, 'Pay', 'src/p/c.ts', ids.map((id) => spec(id, [`src/p/${id}/**`])))
+    for (const id of ids) {
+      s.run(a, { type: 'task.claim', taskId: id })
+      s.run(a, { type: 'task.merged', taskId: id })
+    }
+    assert.equal(s.state().ticketStateFor(made.ticket.id), 'verify')
+    return made.ticket
+  }
+  const pass = (ticketId, commitSha = HEAD) => ({ type: 'ticket.verified', ticketId, passed: true, how: 'playwright', summary: 'ok', commitSha })
+  const pull = (over = {}) => ({
+    number: 7, open: true, headSha: HEAD, headRef: 'ss/sm/contract', headRepo: 'acme/web', baseRef: 'main', baseRepo: 'acme/web', ...over,
+  })
+
+  it('will not take a pass that does not say what it ran', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const ticket = landed(s, a, b)
+    s.fails(b, { ...pass(ticket.id), commitSha: undefined }, 'bad_request')
+    assert.equal(s.state().ticketStateFor(ticket.id), 'verify')
+  })
+
+  it('goes back to verify, and cannot ship or merge, once its work changes after passing', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const ticket = landed(s, a, b)
+    s.run(b, pass(ticket.id))
+    s.run(a, { type: 'ticket.shipped', ticketId: ticket.id, prNumber: 7 })
+    assert.equal(s.app.service.mergeRefusal(s.sessionId, pull()), null, 'passed at exactly this head')
+
+    // One of its tasks is reopened by its holder and lands again: new code, nobody ran it.
+    s.run(a, { type: 'task.testResult', taskId: 'p-one', result: { passed: true, command: 'npm test', exitCode: 0, summary: 'ok', ranAt: Date.now() } })
+    assert.equal(s.state().ticketStateFor(ticket.id), 'building', 'an open PR does not hide work being redone')
+    s.run(a, { type: 'task.merged', taskId: 'p-one' })
+    assert.equal(s.state().ticketStateFor(ticket.id), 'verify')
+    assert.equal(s.state().tickets.get(ticket.id).verification.stale, true)
+    assert.ok(s.state().chat.some((m) => m.directive && /not of what is on the branch now/.test(m.body)), 'and someone is asked to run it again')
+    assert.match(s.app.service.mergeRefusal(s.sessionId, pull()), /changed after it passed/)
+    s.fails(a, { type: 'ticket.shipped', ticketId: ticket.id, prNumber: 7 }, 'not_ready')
+
+    s.run(b, pass(ticket.id, MOVED))
+    assert.equal(s.state().ticketStateFor(ticket.id), 'review')
+    assert.match(s.app.service.mergeRefusal(s.sessionId, pull()), /passed at bbbbbbb, not at this head/)
+    assert.equal(s.app.service.mergeRefusal(s.sessionId, pull({ headSha: MOVED })), null)
+  })
+
+  it('keeps a ticket with an open PR waiting for a person after every new run, and after its work changes', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const ticket = landed(s, a, b)
+    s.run(a, { type: 'ticket.needsHuman', ticketId: ticket.id, value: true })
+    s.run(b, pass(ticket.id))
+    s.run(b, { type: 'ticket.humanCheck', ticketId: ticket.id, passed: true, note: 'clicked through it' })
+    s.run(a, { type: 'ticket.shipped', ticketId: ticket.id, prNumber: 7 })
+    assert.equal(s.state().ticketStateFor(ticket.id), 'review')
+    assert.equal(s.app.service.mergeRefusal(s.sessionId, pull()), null)
+
+    // The branch moved, so it is run again from review: the open PR is no way round a new look.
+    s.run(b, pass(ticket.id, MOVED))
+    assert.equal(s.state().tickets.get(ticket.id).humanCheck, null, 'the last look was at another build')
+    assert.equal(s.state().ticketStateFor(ticket.id), 'verify', 'a PR number does not stand in for a person')
+    assert.match(s.app.service.mergeRefusal(s.sessionId, pull({ headSha: MOVED })), /"Pay": it is in verify/)
+    s.run(b, { type: 'ticket.humanCheck', ticketId: ticket.id, passed: true, note: 'tried it again' })
+    assert.equal(s.state().ticketStateFor(ticket.id), 'review')
+    assert.equal(s.app.service.mergeRefusal(s.sessionId, pull({ headSha: MOVED })), null)
+
+    // Its work is reopened and lands again: the run and the look both stop counting.
+    s.run(a, { type: 'task.testResult', taskId: 'p-one', result: { passed: true, command: 'npm test', exitCode: 0, summary: 'ok', ranAt: Date.now() } })
+    assert.equal(s.state().tickets.get(ticket.id).humanCheck, null)
+    s.run(a, { type: 'task.merged', taskId: 'p-one' })
+    assert.equal(s.state().ticketStateFor(ticket.id), 'verify')
+    assert.match(s.app.service.mergeRefusal(s.sessionId, pull({ headSha: MOVED })), /changed after it passed/)
+    s.run(b, pass(ticket.id, MOVED))
+    assert.equal(s.state().ticketStateFor(ticket.id), 'verify', 'a fresh pass still waits for a person')
+    assert.match(s.app.service.mergeRefusal(s.sessionId, pull({ headSha: MOVED })), /it is in verify/)
+    s.run(b, { type: 'ticket.humanCheck', ticketId: ticket.id, passed: true, note: 'and again' })
+    assert.equal(s.app.service.mergeRefusal(s.sessionId, pull({ headSha: MOVED })), null)
+  })
+
+  it('treats a pass recorded before commits were named as no pass at all', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const ticket = landed(s, a, b)
+    s.app.store.append(s.sessionId, b.participantId, {
+      type: 'ticket.verified',
+      ticketId: ticket.id,
+      verification: { passed: true, how: 'old plugin', summary: 'ok', broke: [], by: b.participantId, at: 1 },
+    })
+    s.app.store.append(s.sessionId, b.participantId, { type: 'ticket.shipped', ticketId: ticket.id, prNumber: 7 })
+    s.app.service.reload(s.sessionId)
+
+    assert.equal(s.state().ticketStateFor(ticket.id), 'verify', 'a PR number does not make an unbound pass count')
+    assert.match(s.app.service.mergeRefusal(s.sessionId, pull()), /predates runs naming a commit/)
+    // And it can be run again from there, which is the way out.
+    s.run(b, pass(ticket.id))
+    assert.equal(s.app.service.mergeRefusal(s.sessionId, pull()), null)
+  })
+
+  it('reopens failed work without the test that let it land last time', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const { ticket } = liveTicket(s, a, b, 'Pay', 'src/p/c.ts', [spec('p-one', ['src/p/x/**'])])
+    s.run(a, { type: 'task.claim', taskId: 'p-one' })
+    s.run(a, { type: 'task.testResult', taskId: 'p-one', result: { passed: true, command: 'npm test', exitCode: 0, summary: 'ok', ranAt: 1 } })
+    s.run(a, { type: 'task.merged', taskId: 'p-one' })
+    assert.equal(s.state().tasks.get('p-one').lastTest.passed, true)
+
+    s.run(b, { type: 'ticket.verified', ticketId: ticket.id, passed: false, how: 'playwright', summary: 'broken', broke: ['p-one'], commitSha: HEAD })
+    assert.equal(s.state().tasks.get('p-one').state, 'ready')
+    assert.equal(s.state().tasks.get('p-one').lastTest, null, 'it has to prove itself again')
+    assert.match(s.app.service.mergeRefusal(s.sessionId, pull()), /not the pull request of any open ticket/)
+  })
+
+  it('merges only the ticket PR, from the contract into the base, in this repository', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const ticket = landed(s, a, b)
+    s.run(b, pass(ticket.id))
+    s.run(a, { type: 'ticket.shipped', ticketId: ticket.id, prNumber: 7 })
+    const refuse = (over, why) => assert.match(s.app.service.mergeRefusal(s.sessionId, pull(over)), why)
+
+    refuse({ number: 99 }, /not the pull request of any open ticket/)
+    refuse({ open: false }, /not open/)
+    refuse({ headRepo: 'mallory/web' }, /not a branch of acme\/web/)
+    refuse({ headRef: 'feature/other' }, /a ticket ships as ss\/sm\/contract → main/)
+    refuse({ baseRef: 'release' }, /a ticket ships as/)
+    assert.equal(s.app.service.mergeRefusal(s.sessionId, pull()), null)
+  })
+
+  it('will not merge the shared branch while another ticket on it is unproven', () => {
+    const s = session()
+    const a = s.join('alice')
+    const b = s.join('bob')
+    const ticket = landed(s, a, b, ['p-one'])
+    s.run(b, pass(ticket.id))
+    s.run(a, { type: 'ticket.shipped', ticketId: ticket.id, prNumber: 7 })
+
+    // A second ticket's work lands on the same contract branch after the PR was opened.
+    const other = liveTicket(s, a, b, 'Other', 'src/q/c.ts', [spec('q-one', ['src/q/x/**'])])
+    s.run(a, { type: 'task.claim', taskId: 'q-one' })
+    s.run(a, { type: 'task.merged', taskId: 'q-one' })
+    assert.match(s.app.service.mergeRefusal(s.sessionId, pull({ headSha: MOVED })), /"Other": never run/)
+
+    // Both run at the new head: the first ticket is re-run from review, which is allowed.
+    s.run(b, pass(other.ticket.id, MOVED))
+    s.run(b, pass(ticket.id, MOVED))
+    assert.equal(s.app.service.mergeRefusal(s.sessionId, pull({ headSha: MOVED })), null)
+
+    // Approved, but nothing of it is on the branch yet: it is not in the PR, so it holds nothing up.
+    const later = ticketWithSplit(s, a, b, 'Later', 'src/r/c.ts', [spec('r-one', ['src/r/x/**'])])
+    s.run(a, { type: 'ticket.approve', ticketId: later.ticket.id })
+    assert.ok(s.state().tasksOfTicket(later.ticket.id).length > 0)
+    assert.equal(s.app.service.mergeRefusal(s.sessionId, pull({ headSha: MOVED })), null)
+    s.run(a, { type: 'contract.committed', branch: 'ss/sm/contract', commitSha: 'def', ticketId: later.ticket.id })
+    assert.match(s.app.service.mergeRefusal(s.sessionId, pull({ headSha: MOVED })), /"Later"/, 'its contract landing puts it aboard')
   })
 })

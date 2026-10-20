@@ -230,9 +230,25 @@ describe('merging from the board', () => {
   const repo = { owner: 'acme', name: 'web', baseBranch: 'main', remoteUrl: 'git@github.com:acme/web.git' }
   const calls = []
   let open = true
+  const RAN = 'c'.repeat(40)
+  const PUSHED = 'd'.repeat(40)
+  /** What GitHub has at the PR's head; `next`, when set, is pushed right after it is read. */
+  const github = { head: RAN, next: null }
   const fetcher = async (url, init = {}) => {
-    calls.push({ url: String(url), method: init.method ?? 'GET' })
+    calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body ? JSON.parse(init.body) : null })
     const u = String(url)
+    if (/\/pulls\/(7|9)$/.test(u)) {
+      const head = github.head
+      if (github.next) [github.head, github.next] = [github.next, null]
+      return new Response(
+        JSON.stringify({
+          state: open ? 'open' : 'closed',
+          merged: !open,
+          head: { sha: head, ref: 'ss/m/contract', repo: { full_name: 'acme/web' } },
+          base: { ref: 'main', repo: { full_name: 'acme/web' } },
+        }),
+      )
+    }
     if (u.endsWith('/graphql')) {
       return new Response(
         JSON.stringify({
@@ -258,6 +274,10 @@ describe('merging from the board', () => {
     }
     if (u.includes('/actions/runs')) return new Response(JSON.stringify({ workflow_runs: [] }))
     if (u.endsWith('/pulls/7/merge')) {
+      // GitHub's own precondition: a sha that is no longer the head is refused.
+      if (JSON.parse(init.body).sha !== github.head) {
+        return new Response(JSON.stringify({ message: 'Head branch was modified. Review and try the merge again.' }), { status: 409 })
+      }
       open = false
       return new Response(JSON.stringify({ merged: true, sha: 'abc123', message: 'Pull Request successfully merged' }))
     }
@@ -300,9 +320,42 @@ describe('merging from the board', () => {
       assert.equal(local.service.state(sessionId).tickets.get(second.body.data.ticket.id).state, 'done')
 
       assert.equal((await req('POST', '/sessions/m/github/merge', { number: 7 })).status, 401, 'a seat is needed')
-      const merged = await req('POST', '/sessions/m/github/merge', { number: 7, method: 'squash' }, auth)
+      const puts = () => calls.filter((c) => c.method === 'PUT')
+      const merge = (number = 7) => req('POST', '/sessions/m/github/merge', { number, method: 'squash' }, auth)
+
+      // Shipped, but nobody ran it: the button is not a way round that.
+      const unrun = await merge()
+      assert.equal(unrun.status, 409)
+      assert.match(unrun.body.message, /never run/)
+      assert.equal((await merge(9)).status, 409, 'a PR no ticket shipped is not merged from here')
+      assert.equal(puts().length, 0)
+
+      local.store.append(sessionId, ann.participantId, {
+        type: 'ticket.verified',
+        ticketId: made.data.ticket.id,
+        verification: { passed: true, how: 'playwright', summary: 'ok', broke: [], by: ann.participantId, at: 1, commitSha: RAN },
+      })
+      local.service.reload(sessionId)
+
+      // Someone pushed to the contract branch after the run.
+      github.head = PUSHED
+      const moved = await merge()
+      assert.equal(moved.status, 409)
+      assert.match(moved.body.message, /passed at ccccccc, not at this head/)
+      assert.equal(puts().length, 0)
+
+      // ...and someone pushes between the check and the merge: GitHub refuses the pinned sha.
+      github.head = RAN
+      github.next = PUSHED
+      const raced = await merge()
+      assert.equal(raced.status, 409)
+      assert.deepEqual(puts().at(-1).body, { merge_method: 'squash', sha: RAN })
+      assert.equal(local.service.state(sessionId).tickets.get(made.data.ticket.id).mergedAt, null)
+
+      github.head = RAN
+      const merged = await merge()
       assert.equal(merged.status, 200, JSON.stringify(merged.body))
-      assert.ok(calls.some((c) => c.method === 'PUT' && c.url.endsWith('/pulls/7/merge')))
+      assert.deepEqual(puts().at(-1).body, { merge_method: 'squash', sha: RAN }, 'the merge is pinned to the commit that ran')
       const ticket = local.service.state(sessionId).tickets.get(made.data.ticket.id)
       assert.equal(ticket.state, 'done')
       assert.ok(ticket.mergedAt)

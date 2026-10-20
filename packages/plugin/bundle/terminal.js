@@ -14680,6 +14680,7 @@ var Participant = external_exports.object({
   activity: ParticipantActivity,
   joinedAt: Timestamp
 });
+var CommitSha = external_exports.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/i).transform((sha) => sha.toLowerCase());
 var Verification = external_exports.object({
   passed: external_exports.boolean(),
   /** How it was exercised: the command, the URL, the simulator. */
@@ -14693,7 +14694,20 @@ var Verification = external_exports.object({
    */
   broke: external_exports.array(TaskId).default([]),
   by: ParticipantId,
-  at: Timestamp
+  at: Timestamp,
+  /**
+   * The commit of the contract branch that was run. A pass is evidence about
+   * that revision and no other: shipping or merging anything else on its
+   * strength would be shipping something nobody ran. Null on runs recorded
+   * before this existed, which therefore authorize nothing.
+   */
+  commitSha: CommitSha.nullable().default(null),
+  /**
+   * Set by the fold when the ticket's work changed after the run -- a task
+   * reopened or landed again, its contract re-landed. The verdict stays for
+   * the record; it just no longer speaks for what is on the branch.
+   */
+  stale: external_exports.boolean().default(false)
 });
 var TicketState = external_exports.enum([
   "plan",
@@ -15455,7 +15469,12 @@ var ClientCommand = external_exports.discriminatedUnion("type", [
      * things that need checking, bugs elsewhere. Each becomes a ticket in the
      * plan column, linked back here. Never started on its own.
      */
-    followUps: external_exports.array(FollowUp).max(10).default([])
+    followUps: external_exports.array(FollowUp).max(10).default([]),
+    /**
+     * The contract-branch commit that was run. Required to pass: a pass that
+     * does not say what it ran cannot be held against what ships.
+     */
+    commitSha: CommitSha.nullable().default(null)
   }),
   /** Records the pull request that finished a ticket. */
   external_exports.object({ type: external_exports.literal("ticket.shipped"), ticketId: TicketId, prNumber: external_exports.number().int().nullable().default(null) }),

@@ -38,6 +38,7 @@ import {
   parseTaskRefs,
   validateDecomposition,
   usageDay,
+  verificationHolds,
   weightedUnits,
 } from '@session-share/protocol'
 import { Store } from './db.js'
@@ -271,7 +272,7 @@ export class SessionService {
       const after = this.requireTicket(state, ticket.id)
       this.refreshTicketStates(sessionId, participantId)
       // Switched off while it was waiting for a look: nothing stands between it and its PR now.
-      if (!command.value && after.verification?.passed && state.ticketStateFor(ticket.id) === 'review' && !after.prNumber) {
+      if (!command.value && verificationHolds(after.verification) && state.ticketStateFor(ticket.id) === 'review' && !after.prNumber) {
         this.askToShip(sessionId, participantId, state, after, 'passed its run, and no longer waits for a person')
       }
     }
@@ -285,7 +286,7 @@ export class SessionService {
   private humanCheck(command: Extract<ClientCommand, { type: 'ticket.humanCheck' }>, ctx: CommandContext) {
     const { sessionId, participantId, state } = this.requireParticipant(ctx)
     const ticket = this.requireTicket(state, command.ticketId)
-    if (state.ticketStateFor(ticket.id) !== 'verify' || !ticket.verification?.passed) {
+    if (state.ticketStateFor(ticket.id) !== 'verify' || !verificationHolds(ticket.verification)) {
       throw new ServiceError('not_ready', `"${ticket.title}" is not waiting for a look: it needs its automated run to pass first.`)
     }
     const by = state.participants.get(participantId)?.displayName ?? 'Someone'
@@ -299,6 +300,8 @@ export class SessionService {
           summary: command.note || 'It does not work when tried by hand.',
           broke: [],
           followUps: [],
+          // The look was at the same build the automated run was.
+          commitSha: ticket.verification?.commitSha ?? null,
         },
         ctx,
       )
@@ -347,6 +350,84 @@ export class SessionService {
       ].join('\n'),
     )
     return { asked: checkout.id }
+  }
+
+  /**
+   * Whether the pull request GitHub describes may be merged from here, as it
+   * stands right now. Null when it may; otherwise why not.
+   *
+   * Only a ticket's own pull request -- the contract branch into the base, in
+   * this session's repository -- and only when every ticket whose work is on
+   * that branch passed a run of exactly the commit at its head. Everything
+   * about the pull request comes from GitHub, never from whoever pressed the
+   * button, and the merge itself is then pinned to that head: anything pushed
+   * after this check makes GitHub refuse instead of merging something no one
+   * ran.
+   */
+  mergeRefusal(
+    sessionId: SessionId,
+    pull: {
+      number: number
+      open: boolean
+      headSha: string
+      headRef: string
+      headRepo: string | null
+      baseRef: string
+      baseRepo: string | null
+    },
+  ): string | null {
+    const state = this.state(sessionId)
+    const session = state.session
+    if (!session) return 'No such session.'
+    const tickets = [...state.tickets.values()]
+    const shipped = tickets.filter((t) => t.prNumber === pull.number && !t.mergedAt)
+    if (shipped.length === 0) {
+      return `PR #${pull.number} is not the pull request of any open ticket in this session, so it is not merged from here. Merge it on GitHub if it should be.`
+    }
+
+    const repo = `${session.repo.owner}/${session.repo.name}`.toLowerCase()
+    const contract = session.contractBranch ?? `ss/${session.slug}/contract`
+    if (!pull.open) return `PR #${pull.number} is not open.`
+    if (pull.baseRepo?.toLowerCase() !== repo || pull.headRepo?.toLowerCase() !== repo) {
+      return `PR #${pull.number} is not a branch of ${repo} into ${repo}.`
+    }
+    if (pull.headRef !== contract || pull.baseRef !== session.repo.baseBranch) {
+      return `PR #${pull.number} is ${pull.headRef} → ${pull.baseRef}; a ticket ships as ${contract} → ${session.repo.baseBranch}.`
+    }
+
+    /**
+     * The contract branch is shared, so the pull request carries every
+     * ticket whose work has landed on it -- its contract or any of its tasks
+     * -- not only the one it was opened for. Each of them has to have been
+     * run at this head.
+     */
+    const landed = (t: Ticket) =>
+      Boolean(t.decompositionId && state.decompositions.get(t.decompositionId)?.contractCommit) ||
+      state.tasksOfTicket(t.id).some((task) => task.state === 'merged')
+    const aboard = tickets.filter((t) => !t.mergedAt && (shipped.includes(t) || landed(t)))
+    const unproven = aboard.filter(
+      (t) => state.ticketStateFor(t.id) !== 'review' || !verificationHolds(t.verification, pull.headSha),
+    )
+    if (unproven.length > 0) {
+      return [
+        `PR #${pull.number} is at ${pull.headSha.slice(0, 7)}, and not everything in it passed a run of that commit:`,
+        ...unproven.map((t) => `"${t.title}": ${this.verdictOf(state, t, pull.headSha)}`),
+        'Run it again on the contract branch at that commit and report with ss_ticket_verified.',
+      ].join('\n')
+    }
+    return null
+  }
+
+  private verdictOf(state: SessionState, ticket: Ticket, headSha: string): string {
+    const column = state.ticketStateFor(ticket.id)
+    const run = ticket.verification
+    if (column === 'building') return 'its work is not all landed'
+    if (!run) return 'never run'
+    if (!run.passed) return 'its last run failed'
+    if (!run.commitSha) return 'its pass predates runs naming a commit'
+    if (run.stale) return 'its work changed after it passed'
+    if (run.commitSha !== headSha.toLowerCase()) return `it passed at ${run.commitSha.slice(0, 7)}, not at this head`
+    return `it is in ${column}`
   }
 
   /**
@@ -1469,9 +1550,12 @@ export class SessionService {
           : `Every task on "${ticket.title}" has landed on ${state.session?.contractBranch ?? 'the contract branch'}.`,
         again
           ? 'Run it again, the same way, and check that specific failure is gone:'
-          : 'Nobody has run the whole thing yet. Do that now, before it goes anywhere near a PR:',
+          : ticket.verification?.passed
+            ? 'It passed a run before, but that run is not of what is on the branch now. Run it again:'
+            : 'Nobody has run the whole thing yet. Do that now, before it goes anywhere near a PR:',
         '',
-        '1. ss_sync, so you have everyone\'s work together.',
+        `1. ss_sync, then check out ${state.session?.contractBranch ?? 'the contract branch'} itself and run from there:`,
+        '   the verdict is recorded against that commit, and only that commit can ship on it.',
         '2. Work out how this project actually runs -- package.json scripts, a dev server, a',
         '   Playwright or Cypress config, docker compose, an Xcode or Android target, a CLI.',
         '   Read the repo rather than assuming; the answer is in there.',
@@ -1512,12 +1596,27 @@ export class SessionService {
      * edits to whoever claimed them next.
      */
     const column = state.ticketStateFor(ticket.id)
-    if (column !== 'verify') {
+    /**
+     * Review is accepted too: the contract branch is shared, so another
+     * ticket landing moves the commit a pass was about without touching this
+     * ticket, and the only way back to something shippable is a new run.
+     */
+    if (column !== 'verify' && column !== 'review') {
       throw new ServiceError(
         'not_ready',
-        column === 'review'
-          ? `"${ticket.title}" has already passed. Open the pull request with ss_ship.`
-          : `"${ticket.title}" is not ready to be run yet: it is in ${column}, and a run only means something once every task has landed.`,
+        `"${ticket.title}" is not ready to be run yet: it is in ${column}, and a run only means something once every task has landed.`,
+      )
+    }
+
+    /**
+     * A pass is about one revision. Without it, nothing downstream can tell
+     * whether what is about to ship is what was run -- which is the only
+     * thing a pass is for.
+     */
+    if (command.passed && !command.commitSha) {
+      throw new ServiceError(
+        'bad_request',
+        `A pass has to name the commit of the contract branch that was run (commitSha). Update the session-share plugin, check out the contract branch, run it, and report again.`,
       )
     }
 
@@ -1556,6 +1655,8 @@ export class SessionService {
         broke: reopened.map((task) => task.id),
         by: participantId,
         at: Date.now(),
+        commitSha: command.commitSha,
+        stale: false,
       },
     })
 
@@ -1674,10 +1775,10 @@ export class SessionService {
      * earlier parked the card in review for good -- a PR number outranks
      * everything else in where a card sits -- with tasks still unbuilt under it.
      */
-    if (state.ticketStateFor(ticket.id) !== 'review' || !ticket.verification?.passed) {
+    if (state.ticketStateFor(ticket.id) !== 'review' || !verificationHolds(ticket.verification)) {
       throw new ServiceError(
         'not_ready',
-        `"${ticket.title}" has not passed a run of the assembled thing yet, so there is nothing to open a pull request for.`,
+        `"${ticket.title}" has not passed a current run of the assembled thing, so there is nothing to open a pull request for.`,
       )
     }
     this.emit(sessionId, participantId, {
@@ -3017,7 +3118,7 @@ export class SessionService {
     if (
       ticket &&
       state.ticketStateFor(ticket.id) === 'verify' &&
-      !ticket.verification?.passed
+      !verificationHolds(state.tickets.get(ticket.id)?.verification)
     ) {
       this.askForVerification(sessionId, participantId, state, ticket)
     }

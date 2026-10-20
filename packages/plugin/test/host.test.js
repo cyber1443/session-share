@@ -39,9 +39,10 @@ function repo(parent) {
   const dir = join(scratch, parent, 'app')
   mkdirSync(dir, { recursive: true })
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir })
-  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=T', 'commit', '-q', '--allow-empty', '-m', 'init'], {
-    cwd: dir,
-  })
+  // Local identity, not -c: the server commits here too when mirroring the log.
+  execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir })
+  execFileSync('git', ['config', 'user.name', 'T'], { cwd: dir })
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'init'], { cwd: dir })
   return dir
 }
 

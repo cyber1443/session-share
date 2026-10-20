@@ -38,35 +38,62 @@ export interface MirrorMeta {
 
 type StoredEvent = Pick<EventEnvelope, 'seq' | 'ts' | 'actorId' | 'body'>
 
-function git(cwd: string, args: string[], options: { env?: NodeJS.ProcessEnv; input?: string } = {}): Promise<string> {
+/**
+ * Runs git and settles once it has exited, with its stdout or its last line of
+ * stderr.
+ *
+ * Stdin is only a pipe when there is input to send. A command that reads
+ * nothing gets no pipe at all: an empty write to one that git had already
+ * closed by exiting failed with EPIPE outside this promise, and took the
+ * process with it.
+ *
+ * When there is input -- only `hash-object --stdin`, a string or a picture's
+ * bytes -- a failed write is settled here too. A nonzero exit is reported as
+ * git's own error, whatever happened to the write. An exit of 0 after the write
+ * failed is refused all the same: hash-object only finishes once it has read to
+ * the end, and it cannot see the end until every byte was written, so a write
+ * that failed means it hashed something other than what was sent.
+ */
+function git(
+  cwd: string,
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv; input?: string | Uint8Array } = {},
+): Promise<string> {
   return new Promise((resolve, reject) => {
+    const { input } = options
     const child = spawn('git', args, {
       cwd,
       env: { ...process.env, ...options.env },
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     })
     let stdout = ''
     let stderr = ''
-    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk))
-    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk))
+    let stdinError: Error | null = null
+    let exit: { code: number | null; signal: NodeJS.Signals | null } | null = null
+    // The child's 'close' does not wait for its stdin, so settle on whichever of the two finishes last.
+    let stdinOpen = Boolean(input !== undefined && child.stdin)
+    const settle = () => {
+      if (!exit || stdinOpen) return
+      const { code, signal } = exit
+      if (code !== 0) reject(new Error(`git ${args[0]} failed: ${stderr.trim().split('\n').at(-1) || (signal ?? code)}`))
+      else if (stdinError) reject(new Error(`git ${args[0]} exited before reading all of its input: ${stdinError.message}`))
+      else resolve(stdout.trim())
+    }
+    child.stdout?.on('data', (chunk: Buffer) => (stdout += chunk))
+    child.stderr?.on('data', (chunk: Buffer) => (stderr += chunk))
     child.on('error', reject)
-    child.on('close', (code) => {
-      if (code === 0) resolve(stdout.trim())
-      else reject(new Error(`git ${args[0]} failed: ${stderr.trim().split('\n').at(-1) ?? code}`))
+    child.on('close', (code, signal) => {
+      exit = { code, signal }
+      settle()
     })
-    child.stdin.end(options.input ?? '')
-  })
-}
-
-/** Like git(), for binary stdin: a picture is not text. */
-function gitBytes(cwd: string, args: string[], input: Uint8Array): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
-    let stdout = ''
-    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk))
-    child.on('error', reject)
-    child.on('close', (code) => (code === 0 ? resolve(stdout.trim()) : reject(new Error(`git ${args[0]} failed`))))
-    child.stdin.end(Buffer.from(input))
+    if (input !== undefined && child.stdin) {
+      child.stdin.on('error', (error) => (stdinError = error))
+      child.stdin.on('close', () => {
+        stdinOpen = false
+        settle()
+      })
+      child.stdin.end(typeof input === 'string' ? input : Buffer.from(input))
+    }
   })
 }
 
@@ -209,7 +236,7 @@ export async function pushLog(cwd: string, source: PushSource, attempts = 3): Pr
         for (const id of newFiles) {
           const file = await source.files.read(id)
           if (!file) continue
-          const blob = await gitBytes(cwd, ['hash-object', '-w', '--stdin'], file.bytes)
+          const blob = await git(cwd, ['hash-object', '-w', '--stdin'], { input: file.bytes })
           await git(cwd, ['update-index', '--add', '--cacheinfo', `100644,${blob},${sessionDir(source.meta.sessionId)}/files/${id}`], { env })
           index.push({ id, name: file.name, type: file.type })
         }

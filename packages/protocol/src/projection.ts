@@ -1,4 +1,4 @@
-import { usageDay, weightedUnits } from './domain.js'
+import { usageDay, verificationHolds, weightedUnits } from './domain.js'
 import type {
   ChatMessage,
   DailySpend,
@@ -381,7 +381,10 @@ export class SessionState {
           const lands = named
             ? split.id === named
             : split.status === 'approved' && split.contractCommit === null
-          if (lands) this.decompositions.set(split.id, { ...split, contractCommit: body.commitSha })
+          if (lands) {
+            this.decompositions.set(split.id, { ...split, contractCommit: body.commitSha })
+            if (split.ticketId) this.staleVerification(split.ticketId)
+          }
         }
         break
       }
@@ -397,7 +400,20 @@ export class SessionState {
       case 'task.state': {
         const task = this.tasks.get(body.taskId)
         if (task) {
-          this.tasks.set(body.taskId, { ...task, state: body.state, ownerId: body.ownerId })
+          /**
+           * Work that comes back out of the contract is going to change, so the
+           * test that let it land last time says nothing about what lands next.
+           * `pr` and `failed` arrive with a result of their own, folded just before.
+           */
+          const reopened = task.state === 'merged' && !['merged', 'pr', 'failed'].includes(body.state)
+          this.tasks.set(body.taskId, {
+            ...task,
+            state: body.state,
+            ownerId: body.ownerId,
+            lastTest: reopened ? null : task.lastTest,
+          })
+          // Anything a ticket's task does after its run is something the run did not see.
+          if (task.ticketId && task.state !== body.state) this.staleVerification(task.ticketId)
         }
         break
       }
@@ -505,6 +521,19 @@ export class SessionState {
     const key = id ?? this.latestDecompositionId
     const split = key ? this.decompositions.get(key) : undefined
     if (split) this.decompositions.set(split.id, change(split))
+  }
+
+  /**
+   * Marks a ticket's run as no longer about what is on the branch -- and a
+   * person's look with it, which was a look at that same build.
+   */
+  private staleVerification(ticketId: TicketId): void {
+    const ticket = this.tickets.get(ticketId)
+    if (ticket?.verification && !ticket.verification.stale) {
+      this.tickets.set(ticketId, { ...ticket, verification: { ...ticket.verification, stale: true }, humanCheck: null })
+    } else if (ticket?.humanCheck) {
+      this.tickets.set(ticketId, { ...ticket, humanCheck: null })
+    }
   }
 
   private updateSubticket(ticketId: TicketId, subticketId: string, change: (s: Subticket) => Subticket): void {
@@ -683,27 +712,34 @@ export class SessionState {
     const ticket = this.tickets.get(ticketId)
     if (!ticket) return 'plan'
     /**
-     * A ticket with a pull request stays in review. Nothing here merges
-     * anything -- that is a decision with a human on the end of it -- so a
-     * `done` column would only ever mean "we opened a PR", which is what the
-     * review column already says.
+     * A ticket with a pull request sits in review while its run still holds.
+     * Nothing here merges anything -- that is a decision with a human on the
+     * end of it -- so a `done` column would only ever mean "we opened a PR",
+     * which is what the review column already says.
      */
     // Merged is the end of the line, whoever pressed the button and wherever.
     if (ticket.mergedAt) return 'done'
-    if (ticket.prNumber !== null) return 'review'
 
     const tasks = this.tasksOfTicket(ticketId)
     if (tasks.length > 0) {
+      // Work reopened under an open PR is being built again, whatever the PR says.
       if (!tasks.every((task) => task.state === 'merged')) return 'building'
       /**
        * Every piece passing its own test is not the same as the pieces working
        * together -- and a split makes that failure more likely, not less. So
-       * the assembled thing gets run before anyone calls it done.
+       * the assembled thing gets run before anyone calls it done, and run
+       * again whenever what was run is no longer what is there: a pass that
+       * is stale, or never said which commit it ran, holds nothing back.
        */
-      if (!ticket.verification?.passed) return 'verify'
-      // Asked for a person's look as well: it waits here until someone has had one.
+      if (!verificationHolds(ticket.verification)) return 'verify'
+      /**
+       * Asked for a person's look as well: it waits here until someone has
+       * had one -- an open PR included. A new run clears the last look, so a
+       * PR opened earlier is no way round looking at what is there now.
+       */
       return !ticket.needsHuman || ticket.humanCheck?.passed ? 'review' : 'verify'
     }
+    if (ticket.prNumber !== null) return 'review'
     // A split exists but nothing has been seeded: it is waiting to be accepted.
     if (ticket.decompositionId) return 'proposed'
     return ticket.state === 'splitting' ? 'splitting' : 'plan'
