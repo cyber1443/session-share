@@ -32,6 +32,9 @@ function clones() {
   const clone = (name) => {
     const dir = join(root, `${name}-${id}`)
     git(root, 'clone', '--quiet', remote, dir)
+    // Clones do not inherit the seed's local config, and pushLog commits.
+    git(dir, 'config', 'user.email', 't@example.com')
+    git(dir, 'config', 'user.name', 't')
     return dir
   }
   return { a: clone('a'), b: clone('b') }

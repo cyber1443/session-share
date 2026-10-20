@@ -52,16 +52,15 @@ function repo(name, files) {
   const dir = mkdtempSync(join(tmpdir(), `ss-e2e-${name}-`))
   dirs.push(dir)
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir })
+  // Local to this throwaway repo, not -c: landing the contract commits here too.
+  execFileSync('git', ['config', 'user.email', 'e2e@test'], { cwd: dir })
+  execFileSync('git', ['config', 'user.name', 'E2E'], { cwd: dir })
   for (const [path, contents] of Object.entries(files)) {
     mkdirSync(join(dir, dirname(path)), { recursive: true })
     writeFileSync(join(dir, path), contents)
   }
   execFileSync('git', ['add', '.'], { cwd: dir })
-  execFileSync(
-    'git',
-    ['-c', 'user.email=e2e@test', '-c', 'user.name=E2E', 'commit', '-qm', 'init'],
-    { cwd: dir },
-  )
+  execFileSync('git', ['commit', '-qm', 'init'], { cwd: dir })
   return dir
 }
 
@@ -421,14 +420,40 @@ try {
   check(/more than one tag/.test(rerun ?? ''), 'with the failure it has to disprove')
 
   say('Re-run and working, it reaches review')
-  const verified = await bobBoard.command({
+  /**
+   * A pass is bound to the contract-branch commit it ran. The tasks here are
+   * marked merged over HTTP rather than by git, so the branch head is still
+   * the contract commit Bob's ss_land_contract made -- that is what this
+   * controlled run names. Nothing is built or run against it.
+   */
+  const contractBranch = backToVerify.session.contractBranch
+  check(Boolean(contractBranch), 'the session knows its contract branch')
+  const contractSha = execFileSync('git', ['rev-parse', '--verify', `refs/heads/${contractBranch}^{commit}`], {
+    cwd: bobRepo,
+    encoding: 'utf8',
+  }).trim()
+  check(/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(contractSha), `the contract branch exists locally at ${contractSha.slice(0, 7)}`)
+
+  const pass = {
     type: 'ticket.verified',
     ticketId: opened.ticket.id,
     passed: true,
-    how: 'node --test plus a run of the CLI',
-    summary: 'Filters correctly with several tags.',
-  })
+    how: 'e2e harness: controlled report from scripts/e2e.mjs; no assembled application was run',
+    summary: 'Harness stand-in for a passing run of the contract branch.',
+  }
+  const unnamed = await bobBoard.command(pass).then(
+    () => null,
+    (error) => error.message,
+  )
+  check(/has to name the commit/.test(unnamed ?? ''), 'a pass that does not name its commit is refused', `a pass without commitSha was ${unnamed ? `refused with: ${unnamed}` : 'accepted'}`)
+  check(
+    (await bobBoard.snapshot()).tickets.find((t) => t.id === opened.ticket.id)?.state === 'verify',
+    'and the refused pass moved nothing',
+  )
+
+  const verified = await bobBoard.command({ ...pass, commitSha: contractSha })
   check(verified.ticket.state === 'review', 'only a passing run moves it on')
+  check(verified.ticket.verification?.commitSha === contractSha, 'and the pass is held against the commit it named')
 
   say('The session takes another ticket after that one is done')
   /**
